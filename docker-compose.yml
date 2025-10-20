@@ -1,0 +1,92 @@
+services:
+  temporal:
+    image: temporalio/auto-setup:1.24
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PWD=postgres
+      - POSTGRES_SEEDS=db
+      - POSTGRES_DB=temporal
+      - POSTGRES_VISIBILITY_DB=temporal_visibility
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "7233:7233"
+    healthcheck:
+      # force IPv4 so we don't resolve localhost to ::1
+      test: ["CMD-SHELL", "tctl --address temporal:7233 namespace list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: crypto-trading-agents-ui
+    environment:
+      # Point UI at the Temporal frontend gRPC endpoint inside the compose network
+      - TEMPORAL_ADDRESS=temporal:7233
+      # Optional: name it if you run multiple clusters
+      - TEMPORAL_AUTH_ENABLED=false
+      # If you ever add a payload codec service, expose it here:
+      # - TEMPORAL_CODEC_ENDPOINT=http://codec:8080
+    ports:
+      - "8088:8080"     # host:container
+    depends_on:
+      - temporal
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=botdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      temporal:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    env_file: .env
+    command: sh -lc "uv run python -m mcp_server.app"
+    ports:
+      - "${MCP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+
+  worker: # Temporal worker that loads workflows
+    build: .
+    depends_on:
+      temporal:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      app:
+        condition: service_started
+    env_file: .env
+    command: sh -lc "uv run python -m worker.main"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
