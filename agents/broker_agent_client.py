@@ -5,18 +5,13 @@ import logging
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent
-try:
-    import openai
-    _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-except Exception:  # pragma: no cover - optional dependency
-    openai = None
-    _openai_client = None
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from agents.utils import stream_chat_completion, tool_result_data
 from agents.context_manager import create_context_manager
 from agents.constants import ORANGE, PINK, RESET, EXCHANGE, DEFAULT_LOG_LEVEL, BROKER_AGENT
 from agents.logging_utils import setup_logging
+from agents.langfuse_utils import create_openai_client, init_langfuse
 
 # Tools this agent is allowed to call
 ALLOWED_TOOLS = {
@@ -31,10 +26,15 @@ ALLOWED_TOOLS = {
     "get_transaction_history",
     "send_user_feedback",
     "get_pending_feedback",
+    "list_technical_metrics",
+    "compute_technical_metrics",
+    "update_market_cache",
 }
 
 logger = setup_logging(__name__)
 
+init_langfuse()
+_openai_client = create_openai_client()
 
 
 SYSTEM_PROMPT = (

@@ -8,23 +8,34 @@ import secrets
 from typing import Any, Dict, List
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 import logging
 from temporalio.client import Client, RPCError, RPCStatusCode, WorkflowExecutionStatus
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse, PlainTextResponse
 from starlette.requests import Request
 
 # Import workflow classes
 from tools.market_data import SubscribeCEXStream, HistoricalDataLoaderWorkflow
 from tools.strategy_signal import EvaluateStrategyMomentum
 from tools.execution import PlaceMockOrder, PlaceMockBatchOrder, OrderIntent, BatchOrderIntent
+from tools.metrics_service import (
+    MetricsRequest,
+    load_dataframe_async,
+    fetch_and_cache_async,
+    compute_metrics_async,
+    cache_file_for,
+    ensure_required_columns,
+    load_cached_dataframe,
+)
 from agents.workflows import (
     ExecutionLedgerWorkflow,
     BrokerAgentWorkflow,
     JudgeAgentWorkflow,
 )
 from tools.agent_logger import AgentLogger
+from metrics import list_metrics as registry_list_metrics
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="[%(asctime)s] %(levelname)s: %(message)s")
@@ -483,6 +494,95 @@ async def get_historical_ticks(
         results[sym] = ticks
 
     return results
+
+
+@app.tool(annotations={"title": "List Technical Metrics", "readOnlyHint": True})
+async def list_technical_metrics() -> Dict[str, Any]:
+    """Return the list of registered technical indicators."""
+
+    metrics = registry_list_metrics()
+    return {"metrics": metrics, "count": len(metrics)}
+
+
+@app.tool(annotations={"title": "Update Market Cache", "readOnlyHint": False})
+async def update_market_cache(
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 500,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """Fetch OHLCV candles from Coinbase Exchange and cache locally."""
+
+    cache_path = cache_file_for(symbol, timeframe, limit)
+    if cache_path.exists() and not overwrite:
+        df = load_cached_dataframe(cache_path)
+        saved_path = cache_path
+        action = "loaded"
+    else:
+        if overwrite and cache_path.exists():
+            cache_path.unlink()
+        df, saved_path = await fetch_and_cache_async(symbol, timeframe, limit, cache_path)
+        action = "fetched"
+
+    preview = df.tail(5).to_dict(orient="records")
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "limit": limit,
+        "rows": len(df),
+        "cache_path": str(saved_path),
+        "action": action,
+        "preview": preview,
+    }
+
+
+@app.tool(annotations={"title": "Compute Technical Metrics", "readOnlyHint": True})
+async def compute_technical_metrics(
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 500,
+    features: List[str] | None = None,
+    params: Dict[str, Dict[str, Any]] | None = None,
+    output: str = "wide",
+    tail: int = 50,
+    use_cache: bool = True,
+    fetch_if_missing: bool = True,
+    data_path: str | None = None,
+) -> Dict[str, Any]:
+    """Compute Tier I technical metrics over OHLCV data."""
+
+    selected_features = features or registry_list_metrics()
+    params = params or {}
+    request = MetricsRequest(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=limit,
+        use_cache=use_cache,
+        data_path=Path(data_path) if data_path else None,
+    )
+
+    df = await load_dataframe_async(request, fetch_if_missing=fetch_if_missing)
+    ensure_required_columns(df)
+
+    metrics_df = await compute_metrics_async(df, selected_features, params=params, output=output)
+
+    tail = max(tail, 1)
+    if output == "wide":
+        preview_df = metrics_df.tail(tail)
+    else:
+        preview_df = metrics_df.tail(tail * len(selected_features))
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "limit": limit,
+        "features": selected_features,
+        "output": output,
+        "rows": len(metrics_df),
+        "preview": preview_df.to_dict(orient="records"),
+        "cache_path": str(cache_file_for(symbol, timeframe, limit)),
+    }
 
 
 @app.tool(annotations={"title": "Get Portfolio Status", "readOnlyHint": True})
@@ -1297,6 +1397,49 @@ async def fetch_signals(request: Request) -> Response:
 
     logger.debug("Starting signal stream for %s after %s", name, after)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.custom_route("/healthz", methods=["GET"])
+async def healthz(_request):
+    return PlainTextResponse("ok", status_code=200)
+
+
+# ---- Simple HTTP shims to invoke selected MCP tools ----
+@app.custom_route("/tools/start_market_stream", methods=["POST"])
+async def http_start_market_stream(request: Request) -> Response:
+    body = await request.json()
+    symbols = body.get("symbols") or []
+    interval_sec = int(body.get("interval_sec", 1))
+    load_historical = bool(body.get("load_historical", True))
+    result = await start_market_stream(symbols, interval_sec, load_historical)
+    return JSONResponse(result)
+
+@app.custom_route("/tools/get_portfolio_status", methods=["GET", "POST"])
+async def http_get_portfolio_status(_request: Request) -> Response:
+    result = await get_portfolio_status()
+    return JSONResponse(result)
+
+@app.custom_route("/tools/place_mock_order", methods=["POST"])
+async def http_place_mock_order(request: Request) -> Response:
+    body = await request.json()
+    orders = body.get("orders") or []
+    # let pydantic/dataclass conversion inside tool handle types
+    result = await place_mock_order(orders)
+    return JSONResponse(result)
+
+@app.custom_route("/tools/get_transaction_history", methods=["GET"])
+async def http_get_tx(_request: Request) -> Response:
+    result = await get_transaction_history()
+    return JSONResponse(result)
+
+@app.custom_route("/tools/trigger_evaluation", methods=["POST"])
+async def http_trigger_eval(request: Request) -> Response:
+    body = await request.json()
+    window_days = int(body.get("window_days", 7))
+    force = bool(body.get("force", False))
+    result = await trigger_performance_evaluation(window_days, force)
+    return JSONResponse(result)
+
 
 
 if __name__ == "__main__":

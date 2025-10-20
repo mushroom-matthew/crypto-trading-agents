@@ -2,7 +2,6 @@ import os
 import json
 import asyncio
 from typing import Any, AsyncIterator, Set
-import openai
 import logging
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -31,6 +30,7 @@ from agents.constants import (
 )
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
+from agents.langfuse_utils import create_openai_client, init_langfuse
 
 # Tools this agent is allowed to call
 ALLOWED_TOOLS = {
@@ -41,13 +41,16 @@ ALLOWED_TOOLS = {
     "get_transaction_history",
     "get_performance_metrics",
     "get_risk_metrics",
+    "list_technical_metrics",
+    "compute_technical_metrics",
 }
 
 # Context management is now handled by the ContextManager class
 
 logger = setup_logging(__name__)
 
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+init_langfuse()
+openai_client = create_openai_client()
 
 SYSTEM_PROMPT = (
     "You are an autonomous portfolio management agent that analyzes market data and executes trading decisions "

@@ -9,7 +9,6 @@ import os
 from typing import Dict, List, Optional
 from datetime import datetime, timezone, timedelta
 
-import openai
 from temporalio.client import Client, RPCError, RPCStatusCode
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -27,10 +26,12 @@ from agents.constants import (
 )
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
+from agents.langfuse_utils import create_openai_client, init_langfuse
 
 logger = setup_logging(__name__, level="INFO")
 
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+init_langfuse()
+openai_client = create_openai_client()
 
 
 class JudgeAgent:
