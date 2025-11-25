@@ -181,10 +181,34 @@ Each block corresponds to one or more MCP tools (Temporal workflows) described b
 Required environment variables:
 
 - `OPENAI_API_KEY` – enables the broker and execution agents to use OpenAI models.
-- `COINBASEEXCHANGE_API_KEY` and `COINBASEEXCHANGE_SECRET` – API credentials for Coinbase Exchange.
+- `COINBASE_API_KEY` / `COINBASE_API_SECRET` – Coinbase App (CDP) API key pair; secrets can be pasted directly from the downloaded JSON (newlines are supported).
+- `COINBASE_WALLET_SECRET` – optional, only required for wallet-authenticated POST/DELETE calls. Leave empty for read-only trading.
+- `COINBASEEXCHANGE_API_KEY` and `COINBASEEXCHANGE_SECRET` – legacy Advanced Trade credentials (fallback if you still need HMAC auth).
 - `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` and `TASK_QUEUE` – Temporal connection settings (defaults are shown in `.env`).
 - `MCP_PORT` – port for the MCP server (defaults to `8080`).
 - `HISTORICAL_MINUTES` – minutes of historical data to load on startup (defaults to `60` for 1 hour).
+
+### Preparing Coinbase Wallets for Live Trading
+
+1. **Fund Coinbase wallets** – Deposit ETH and BTC into the Coinbase account tied to your API key. Only these balances will be used; no transfers occur until you explicitly allow trading.
+2. **Seed the ledger** – Pull wallets/balances into the internal database so Temporal workflows see real holdings:
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main ledger seed-from-coinbase
+   ```
+3. **Inspect wallet IDs and cached balances** – Use the new wallet inspector to note the `wallet_id` for ETH and BTC:
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main wallet list
+   ```
+4. **Mark 20% as tradable** – For each funded wallet, set the tradeable fraction to `0.20` (repeat per wallet):
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main wallet set-tradeable-fraction <wallet_id> 0.20
+   ```
+   These fractions gate how much the execution agent may reserve or spend per wallet.
+5. **Reconcile before trading** – Confirm ledger entries match Coinbase using the reconciliation tool:
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main reconcile run
+   ```
+6. **Dry-run trading flows** – Keep `RUN_MODE=dev` (or disable actual order placement in prompts) while observing the broker/execution agents. Only remove the guard once you’re satisfied with monitoring, risk limits, and logging.
 
 ### Quick Setup (local dev)
 
@@ -197,6 +221,54 @@ cd durable-crypto-agents
 python -m venv .venv && source .venv/bin/activate
 pip install uv
 uv sync
+
+### Coinbase Ledger & Trading
+
+The production ledger stack lives under `app/` and exposes a CLI for seeding wallets, reserving balances, and placing live trades via Coinbase Advanced Trade.
+
+1. Copy environment defaults and update with your credentials:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Install dependencies and start the Postgres service with migrations:
+
+   ```bash
+   make init
+   make db-up
+   ```
+
+3. Seed wallets directly from Coinbase (creates internal ledger balances and reservations backing):
+
+   ```bash
+   uv run python -m app.cli.main ledger seed-from-coinbase
+   ```
+
+4. Configure what fraction of each wallet is available to the trading bots:
+
+   ```bash
+   uv run python -m app.cli.main wallet set-tradeable-fraction --wallet 1 --frac 0.5
+   ```
+
+5. Place a cost-gated trade:
+
+   ```bash
+   uv run python -m app.cli.main trade place \
+     --wallet 1 \
+     --product BTC-USD \
+     --side buy \
+     --qty 0.01 \
+     --notional 300 \
+     --expected-edge 15 \
+     --idempotency-key demo-trade-001
+   ```
+
+6. Reconcile the internal ledger with Coinbase balances (writes a drift report to stdout):
+
+   ```bash
+   uv run python -m app.cli.main reconcile run --threshold 0.0001
+   ```
 
 # Launch the full stack
 ./run_stack.sh

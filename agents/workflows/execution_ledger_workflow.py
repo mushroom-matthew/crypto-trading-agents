@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 from typing import Dict, List, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from temporalio import workflow
 from temporalio.client import Client
+
+from agents.activities.ledger import persist_fill_activity
 
 
 @workflow.defn
@@ -30,6 +32,20 @@ class ExecutionLedgerWorkflow:
         self.profit_scraping_percentage = Decimal("0.20")  # Default 20% profit scraping
         self.scraped_profits = Decimal("0")  # Total profits set aside
         self.user_preferences: Dict[str, Any] = {}  # Store user preferences
+        self.enable_real_ledger = os.environ.get("ENABLE_REAL_LEDGER", "1") != "0"
+        self.trading_wallet_id = self._env_int("LEDGER_TRADING_WALLET_ID")
+        self.trading_wallet_name = os.environ.get("LEDGER_TRADING_WALLET_NAME", "mock_trading")
+        self.equity_wallet_name = os.environ.get("LEDGER_EQUITY_WALLET_NAME", "system_equity")
+
+    def _env_int(self, key: str) -> int | None:
+        value = os.environ.get(key)
+        if not value:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            workflow.logger.warning("Invalid integer for %s environment variable", key)
+            return None
 
     @workflow.signal
     def set_user_preferences(self, preferences: Dict[str, Any]) -> None:
@@ -45,9 +61,38 @@ class ExecutionLedgerWorkflow:
             self.profit_scraping_percentage = Decimal("0.20")  # Default 20%
         
         workflow.logger.info(f"Profit scraping set to {self.profit_scraping_percentage * 100}%")
+        if "enable_real_ledger" in preferences:
+            self.enable_real_ledger = bool(preferences["enable_real_ledger"])
+        if "trading_wallet_id" in preferences:
+            try:
+                self.trading_wallet_id = int(preferences["trading_wallet_id"])
+            except (TypeError, ValueError):
+                workflow.logger.warning("Invalid trading_wallet_id supplied via preferences")
+        if "trading_wallet_name" in preferences:
+            self.trading_wallet_name = str(preferences["trading_wallet_name"])
+        if "equity_wallet_name" in preferences:
+            self.equity_wallet_name = str(preferences["equity_wallet_name"])
 
     @workflow.signal
     def record_fill(self, fill: Dict) -> None:
+        sequence = self.fill_count + 1
+        if self.enable_real_ledger:
+            try:
+                info = workflow.info()
+            except RuntimeError:
+                info = None
+            if info is not None:
+                payload = {
+                    "fill": dict(fill),
+                    "workflow_id": info.workflow_id,
+                    "sequence": sequence,
+                    "recorded_at": datetime.now(timezone.utc).timestamp(),
+                    "trading_wallet_id": self.trading_wallet_id,
+                    "trading_wallet_name": self.trading_wallet_name,
+                    "equity_wallet_name": self.equity_wallet_name,
+                }
+                workflow.create_task(self._persist_fill(payload))
+
         side = fill["side"]
         symbol = fill["symbol"]
         qty = Decimal(str(fill["qty"]))
@@ -113,6 +158,16 @@ class ExecutionLedgerWorkflow:
             else:
                 self.positions[symbol] = new_qty
         self.fill_count += 1
+
+    async def _persist_fill(self, payload: Dict[str, Any]) -> None:
+        try:
+            await workflow.execute_activity(
+                persist_fill_activity,
+                payload,
+                schedule_to_close_timeout=timedelta(seconds=30),
+            )
+        except Exception as exc:
+            workflow.logger.error("Failed to persist fill to ledger", error=str(exc))
     
     def _validate_price(self, price: Decimal, symbol: str) -> bool:
         """Validate that a price is reasonable."""
