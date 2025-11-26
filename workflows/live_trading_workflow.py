@@ -20,19 +20,19 @@ from workflows.activities import (
 class LiveTradingWorkflow:
     @workflow.run
     async def run(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        await workflow.execute_activity(
+        plan_payload = await workflow.execute_activity(
             load_strategy_config_activity,
             params,
             schedule_to_close_timeout=timedelta(minutes=1),
         )
         snapshots = await workflow.execute_activity(
             build_snapshots_activity,
-            {"symbols": params["symbols"]},
+            {"symbols": params["symbols"], "plan": plan_payload.get("plan"), "timeframe": params.get("timeframe", "1h")},
             schedule_to_close_timeout=timedelta(minutes=1),
         )
         intents_payload = await workflow.execute_activity(
             generate_signals_activity,
-            {"snapshots": snapshots},
+            {"snapshots": snapshots, "plan": plan_payload.get("plan")},
             schedule_to_close_timeout=timedelta(minutes=1),
         )
         judgements = await workflow.execute_activity(

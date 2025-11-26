@@ -55,28 +55,30 @@ def load_strategy_config_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @activity.defn
 def build_snapshots_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
-    prices = fetch_recent_prices(payload["symbols"])
-    summaries = {
-        symbol: {
-            "price": prices[symbol],
-            "rolling_high": payload.get("rolling_high", prices[symbol] * 1.05),
-            "rolling_low": payload.get("rolling_low", prices[symbol] * 0.95),
-            "recent_max": payload.get("recent_max", prices[symbol]),
-            "atr": 1.0,
-            "atr_band": 2.0,
-            "volume_multiple": 1.0,
-            "volume_floor": 0.5,
+    summaries: Dict[str, Dict[str, Any]] = {}
+    timeframe = payload.get("timeframe", "1h")
+    for symbol in payload["symbols"]:
+        candles = fetch_ohlcv_history(symbol, timeframe, lookback_days=payload.get("lookback_days", 2))
+        summary = summarize_indicators(symbol, candles)
+        summaries[symbol] = {
+            "price": candles[-1].close,
+            "rolling_high": summary.rolling_high,
+            "rolling_low": summary.rolling_low,
+            "recent_max": summary.rolling_high,
+            "atr": summary.atr,
+            "atr_band": summary.atr * 1.5,
+            "volume_multiple": summary.volume_multiple,
         }
-        for symbol in payload["symbols"]
-    }
-    snapshots = build_market_snapshots(summaries)
+    plan = payload.get("plan")
+    snapshots = build_market_snapshots(summaries, plan)
     return {symbol: snapshot.__dict__ for symbol, snapshot in snapshots.items()}
 
 
 @activity.defn
 def generate_signals_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     service = SignalAgentService(DEFAULT_STRATEGY_CONFIG)
-    snapshots = build_market_snapshots(payload["snapshots"])
+    plan = payload.get("plan")
+    snapshots = build_market_snapshots(payload["snapshots"], plan)
     intents = service.generate(snapshots)
     return {"intents": intents}
 

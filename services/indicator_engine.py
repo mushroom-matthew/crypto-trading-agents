@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+import pandas as pd
+
 from services.market_data_worker import Candle
 
 
@@ -22,13 +24,26 @@ class IndicatorSummary:
 def summarize_indicators(symbol: str, candles: List[Candle]) -> IndicatorSummary:
     """Compute a handful of indicators needed by planner and signal agent."""
 
-    closes = [c.close for c in candles]
-    highs = [c.high for c in candles]
-    lows = [c.low for c in candles]
-    ema_fast = sum(closes[-20:]) / min(len(closes), 20)
-    ema_slow = sum(closes[-50:]) / min(len(closes), 50)
-    atr = sum(high - low for high, low in zip(highs[-14:], lows[-14:])) / max(1, min(len(highs), 14))
-    rolling_high = max(highs[-50:])
-    rolling_low = min(lows[-50:])
-    volume_multiple = 1.0
+    if not candles:
+        raise ValueError("No candles supplied")
+    df = pd.DataFrame([c.__dict__ for c in candles])
+    closes = df["close"]
+    highs = df["high"]
+    lows = df["low"]
+    volumes = df["volume"]
+    ema_fast = closes.ewm(span=min(len(closes), 20), adjust=False).mean().iloc[-1]
+    ema_slow = closes.ewm(span=min(len(closes), 50), adjust=False).mean().iloc[-1]
+    tr = pd.concat(
+        [
+            highs - lows,
+            (highs - closes.shift()).abs(),
+            (lows - closes.shift()).abs(),
+        ],
+        axis=1,
+    )
+    atr = tr.max(axis=1).rolling(window=min(len(tr), 14)).mean().iloc[-1]
+    rolling_high = highs.tail(min(len(highs), 50)).max()
+    rolling_low = lows.tail(min(len(lows), 50)).min()
+    vol_ma = volumes.rolling(window=min(len(volumes), 20)).mean().iloc[-1]
+    volume_multiple = volumes.iloc[-1] / vol_ma if vol_ma else 1.0
     return IndicatorSummary(symbol, ema_fast, ema_slow, atr, rolling_high, rolling_low, volume_multiple)
