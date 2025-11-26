@@ -31,10 +31,12 @@ def _discover_modules() -> Iterable[Any]:
     """Yield all imported modules under ``tools`` and ``agents``."""
     import tools
     import agents
+    import workflows
 
     # Include the base packages themselves
     yield tools
     yield agents
+    yield workflows
 
     for finder, name, ispkg in pkgutil.walk_packages(tools.__path__, prefix="tools."):
         try:
@@ -48,6 +50,14 @@ def _discover_modules() -> Iterable[Any]:
         try:
             module = importlib.import_module(name)
         except Exception as exc:  # pragma: no cover - import errors should not kill worker
+            print(f"Failed to import {name}: {exc}", file=sys.stderr)
+            continue
+        yield module
+
+    for finder, name, ispkg in pkgutil.walk_packages(workflows.__path__, prefix="workflows."):
+        try:
+            module = importlib.import_module(name)
+        except Exception as exc:
             print(f"Failed to import {name}: {exc}", file=sys.stderr)
             continue
         yield module
