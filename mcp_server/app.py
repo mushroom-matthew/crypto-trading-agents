@@ -33,6 +33,7 @@ from agents.workflows import (
     ExecutionLedgerWorkflow,
     BrokerAgentWorkflow,
     JudgeAgentWorkflow,
+    StrategySpecWorkflow,
 )
 from tools.agent_logger import AgentLogger
 from metrics import list_metrics as registry_list_metrics
@@ -56,12 +57,32 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.temporal_utils import get_temporal_client
+from agents.strategy_planner import plan_strategy_spec
 
 # Initialize FastMCP
 app = FastMCP("crypto-trading-server")
 
 # Simple in-memory signal log for backward compatibility
 signal_log: dict[str, list[dict]] = {}
+
+
+async def ensure_strategy_spec_handle(client: Client):
+    """Ensure the strategy spec workflow exists and return its handle."""
+    wf_id = "strategy-spec-store"
+    handle = client.get_workflow_handle(wf_id)
+    try:
+        await handle.describe()
+    except RPCError as err:
+        if err.status == RPCStatusCode.NOT_FOUND:
+            await client.start_workflow(
+                StrategySpecWorkflow.run,
+                id=wf_id,
+                task_queue="mcp-tools",
+            )
+            handle = client.get_workflow_handle(wf_id)
+        else:
+            raise
+    return handle
 
 
 @app.tool(annotations={"title": "Subscribe CEX Stream", "readOnlyHint": True})
@@ -190,7 +211,8 @@ async def set_user_preferences(preferences: Dict[str, Any]) -> Dict[str, str]:
             "status": "error",
             "message": "Preferences parameter is required and must be a non-empty dictionary"
         }
-    
+
+
     required_keys = ["experience_level", "risk_tolerance", "trading_style"]
     missing_keys = [key for key in required_keys if key not in preferences]
     if missing_keys:
@@ -246,6 +268,48 @@ async def set_user_preferences(preferences: Dict[str, Any]) -> Dict[str, str]:
         "message": f"Updated user preferences: {', '.join(preferences.keys())}",
         "preferences_set": str(list(preferences.keys()))
     }
+
+
+@app.tool(annotations={"title": "Plan Strategy", "readOnlyHint": False})
+async def plan_strategy(
+    market: str,
+    timeframe: str,
+    risk_profile: str,
+    mode: str | None = None,
+    notes: str | None = None,
+) -> Dict[str, Any]:
+    """Use the Strategy Planner to generate and persist a StrategySpec."""
+    result = await plan_strategy_spec(
+        market=market,
+        timeframe=timeframe,
+        risk_profile=risk_profile,
+        mode=mode,
+        notes=notes,
+    )
+    return {"status": "ok", "strategy": result}
+
+
+@app.tool(annotations={"title": "Get Strategy Spec", "readOnlyHint": True})
+async def get_strategy_spec(market: str, timeframe: str | None = None) -> Dict[str, Any]:
+    """Fetch the active StrategySpec for a market/timeframe."""
+    client = await get_temporal_client()
+    handle = await ensure_strategy_spec_handle(client)
+    spec = await handle.query("get_strategy_spec", market, timeframe)
+    if not spec:
+        return {
+            "status": "not_found",
+            "message": f"No strategy spec configured for {market}" + (f" ({timeframe})" if timeframe else ""),
+        }
+    return {"status": "ok", "strategy": spec}
+
+
+@app.tool(annotations={"title": "List Strategy Specs", "readOnlyHint": True})
+async def list_strategy_specs() -> Dict[str, Any]:
+    """List all stored StrategySpec entries."""
+    client = await get_temporal_client()
+    handle = await ensure_strategy_spec_handle(client)
+    strategies = await handle.query("list_strategy_specs")
+    return {"status": "ok", "strategies": strategies}
 
 
 @app.tool(annotations={"title": "Get User Preferences", "readOnlyHint": True})

@@ -19,14 +19,9 @@ T = TypeVar("T")
 def _build_engine(settings: Settings) -> AsyncEngine:
     """Create an AsyncEngine from configuration."""
 
-    connect_args: dict[str, object] = {}
-    if settings.db_dsn.startswith("postgresql"):
-        connect_args["server_settings"] = {"application_name": "cta-ledger"}
-
     return create_async_engine(
         settings.db_dsn,
         pool_pre_ping=True,
-        connect_args=connect_args,
     )
 
 

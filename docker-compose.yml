@@ -4,8 +4,8 @@ services:
     environment:
       - DB=postgres12
       - DB_PORT=5432
-      - POSTGRES_USER=postgres
-      - POSTGRES_PWD=postgres
+      - POSTGRES_USER=botuser
+      - POSTGRES_PWD=botpass
       - POSTGRES_SEEDS=db
       - POSTGRES_DB=temporal
       - POSTGRES_VISIBILITY_DB=temporal_visibility
@@ -44,8 +44,8 @@ services:
   db:
     image: postgres:15-alpine
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=botuser
+      - POSTGRES_PASSWORD=botpass
       - POSTGRES_DB=botdb
     volumes:
       - pgdata:/var/lib/postgresql/data

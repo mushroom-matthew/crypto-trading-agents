@@ -17,7 +17,7 @@ from agents.workflows.judge_agent_workflow import JudgeAgentWorkflow
 from agents.workflows.execution_ledger_workflow import ExecutionLedgerWorkflow
 from tools.performance_analysis import PerformanceAnalyzer, format_performance_report
 from tools.agent_logger import AgentLogger
-from agents.utils import check_and_process_feedback
+from agents.utils import check_and_process_feedback, tool_result_data
 from agents.constants import (
     ORANGE, CYAN, GREEN, RED, RESET, 
     DEFAULT_LOG_LEVEL, DEFAULT_OPENAI_MODEL,
@@ -54,6 +54,9 @@ class JudgeAgent:
         
         # Performance threshold for prompt updates
         self.update_threshold = 50.0  # Trigger prompt examination if score below this
+        self.replan_score_threshold = float(os.environ.get("JUDGE_REPLAN_SCORE_THRESHOLD", "45"))
+        self.replan_cooldown_seconds = int(os.environ.get("JUDGE_REPLAN_COOLDOWN_SECONDS", "3600"))
+        self.last_replan_timestamp: Optional[int] = None
     
     async def initialize(self) -> None:
         """Initialize the judge agent."""
@@ -663,7 +666,86 @@ Return ONLY the improved system prompt, no explanations."""
             await handle.signal("mark_triggers_processed", {})
         except Exception as exc:
             logger.debug("Failed to mark triggers as processed: %s", exc)
-    
+
+    async def trigger_strategy_replan(self, evaluation: Dict) -> Optional[List[Dict[str, Any]]]:
+        """Trigger deterministic strategy re-planning when performance degrades."""
+        overall_score = evaluation.get("overall_score", 100.0)
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if overall_score >= self.replan_score_threshold:
+            return None
+        if (
+            self.last_replan_timestamp
+            and now_ts - self.last_replan_timestamp < self.replan_cooldown_seconds
+        ):
+            logger.info("Skipping re-plan: cooldown active")
+            return None
+
+        broker_wf = os.environ.get("BROKER_WF_ID", "broker-agent")
+        try:
+            broker_handle = self.temporal_client.get_workflow_handle(broker_wf)
+            symbols: list[str] = await broker_handle.query("get_symbols")
+        except Exception as exc:
+            logger.warning("Unable to fetch active symbols for re-plan: %s", exc)
+            return None
+
+        if not symbols:
+            logger.info("No active symbols to re-plan")
+            return None
+
+        prefs = await self.get_user_preferences()
+        risk_profile = prefs.get("risk_tolerance", "medium")
+        trading_style = prefs.get("trading_style", "balanced")
+        mode_map = {
+            "aggressive": "breakout",
+            "balanced": "trend",
+            "conservative": "mean_revert",
+        }
+        mode = mode_map.get(trading_style, None)
+        timeframe = os.environ.get("STRATEGY_TIMEFRAME", "15m")
+        recommendations = evaluation.get("recommendations", [])
+        notes = (
+            f"Judge-triggered replan due to low score {overall_score:.1f}. "
+            f"Top recommendations: {', '.join(recommendations[:2]) if recommendations else 'improve risk discipline'}"
+        )
+
+        replan_results: List[Dict[str, Any]] = []
+        for symbol in symbols:
+            payload = {
+                "market": symbol,
+                "timeframe": timeframe,
+                "risk_profile": risk_profile,
+                "mode": mode,
+                "notes": notes,
+            }
+            try:
+                result = await self.mcp_session.call_tool("plan_strategy", payload)
+                replan_results.append(
+                    {
+                        "symbol": symbol,
+                        "strategy": tool_result_data(result),
+                    }
+                )
+                print(
+                    f"{ORANGE}[JudgeAgent] 🔁 Strategy re-plan triggered for {symbol} (risk={risk_profile}){RESET}"
+                )
+            except Exception as exc:
+                logger.error("Failed to plan strategy for %s: %s", symbol, exc)
+
+        if replan_results:
+            self.last_replan_timestamp = now_ts
+            await self.agent_logger.log_action(
+                action_type="strategy_replan",
+                details={
+                    "trigger": "judge_auto",
+                    "threshold": self.replan_score_threshold,
+                    "overall_score": overall_score,
+                    "symbols": [entry["symbol"] for entry in replan_results],
+                },
+                result={"success": True},
+            )
+            return replan_results
+        return None
+
     
     async def run_evaluation_cycle(self) -> None:
         """Run a complete evaluation cycle."""
@@ -758,6 +840,13 @@ Return ONLY the improved system prompt, no explanations."""
             except Exception as log_error:
                 logger.error(f"Failed to log evaluation: {log_error}")
             
+            replan_info = await self.trigger_strategy_replan(evaluation)
+            if replan_info:
+                evaluation["strategy_replans"] = replan_info
+                print(f"{ORANGE}[JudgeAgent] Triggered strategy re-planning for {len(replan_info)} market(s){RESET}")
+            else:
+                evaluation["strategy_replans"] = []
+            
             # Mark any trigger requests as processed
             await self._mark_triggers_processed()
             
@@ -784,6 +873,7 @@ async def _watch_judge_preferences(client: Client, current_preferences: dict, ju
             if prefs != current_preferences:
                 current_preferences.clear()
                 current_preferences.update(prefs)
+                judge_agent.user_preferences = dict(prefs)
                 
                 if prefs:
                     print(f"{GREEN}[JudgeAgent] ✅ User preferences updated: risk_tolerance={prefs.get('risk_tolerance', 'moderate')}, trading_style={prefs.get('trading_style', 'balanced')}, experience_level={prefs.get('experience_level', 'intermediate')}{RESET}")

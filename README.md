@@ -270,6 +270,20 @@ The production ledger stack lives under `app/` and exposes a CLI for seeding wal
    uv run python -m app.cli.main reconcile run --threshold 0.0001
    ```
 
+### Web Dashboard (Human Supervisor)
+
+Replace the tmux-based workflow with a lightweight web UI that supervises all agents, shows ledger snapshots, and keeps a human in the loop.
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python -m app.dashboard
+```
+
+Open <http://localhost:8081/> to:
+
+- Start/stop Temporal, the worker, MCP server, and broker/execution/judge agents from a single panel.
+- Inspect Coinbase-linked wallets, tradable fractions, and balances per strategy/portfolio.
+- Review the short-term backlog (see `docs/ROADMAP.md`) and plan future automation without leaving the UI.
+
 # Launch the full stack
 ./run_stack.sh
 ```

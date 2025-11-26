@@ -19,12 +19,6 @@ def upgrade() -> None:
     order_type = sa.Enum("limit", "market", name="order_type")
     reservation_state = sa.Enum("active", "consumed", "canceled", name="reservation_state")
 
-    wallet_type.create(op.get_bind(), checkfirst=True)
-    ledger_side.create(op.get_bind(), checkfirst=True)
-    order_side.create(op.get_bind(), checkfirst=True)
-    order_type.create(op.get_bind(), checkfirst=True)
-    reservation_state.create(op.get_bind(), checkfirst=True)
-
     op.create_table(
         "wallets",
         sa.Column("wallet_id", sa.BigInteger(), primary_key=True, autoincrement=True),
