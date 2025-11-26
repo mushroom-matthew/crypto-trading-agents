@@ -35,4 +35,4 @@ Totally fair—the current tmux layout dumps a firehose of mixed logs, so tracki
     doesn’t dominate the interface.
 
   If you want to pursue one of these (like adding a summary command or restructuring the tmux layout), happy to help
-  sketch or implement it.
+  sketch or implement it.[]
