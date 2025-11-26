@@ -12,6 +12,7 @@ from services.planner_agent import LLMPlanner, PlannerRequest, PlannerPreference
 from services.signal_agent_service import build_market_snapshots, SignalAgentService
 from services.judge_agent_service import JudgeAgentService, PortfolioState
 from services.execution_agent_service import ExecutionAgentService
+from services.strategy_config_store import save_plan, load_plan
 from trading_core.config import DEFAULT_STRATEGY_CONFIG
 
 
@@ -43,14 +44,13 @@ def plan_strategy_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @activity.defn
 def store_strategy_config_activity(payload: Dict[str, Any]) -> None:
-    # TODO: persist planner output to DB or key-value store
-    return None
+    save_plan(payload["symbol"], payload["plan"])
 
 
 @activity.defn
 def load_strategy_config_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
-    # TODO: load config from DB; currently returns default structure
-    return {"strategy": DEFAULT_STRATEGY_CONFIG.name}
+    plan = load_plan(payload["symbol"])
+    return {"plan": plan}
 
 
 @activity.defn
