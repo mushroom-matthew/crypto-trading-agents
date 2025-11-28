@@ -62,11 +62,13 @@ class PerformanceAnalyzer:
         sorted_txs = sorted(transactions, key=lambda x: x["timestamp"])
         
         returns = []
-        prev_portfolio_value = sorted_txs[0]["cash_before"]
+        first_tx = sorted_txs[0]
+        prev_portfolio_value = first_tx.get("cash_before") or first_tx.get("cost") or first_tx.get("position_value") or 1.0
         
         for tx in sorted_txs:
             # Simplified return calculation
-            current_value = tx["cash_before"] + tx.get("position_value", 0)
+            current_cash = tx.get("cash_before", prev_portfolio_value)
+            current_value = (current_cash or 0.0) + tx.get("position_value", tx.get("cost", 0.0) or 0.0)
             if prev_portfolio_value > 0:
                 period_return = (current_value - prev_portfolio_value) / prev_portfolio_value
                 returns.append(period_return)

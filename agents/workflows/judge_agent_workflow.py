@@ -30,6 +30,54 @@ class JudgeAgentWorkflow:
         self.action_count = 0
         self.summary_count = 0
         self.user_feedback: List[Dict[str, Any]] = []  # Store user feedback messages
+        base_prompt = {
+            "version": 1,
+            "prompt_type": "execution_agent",
+            "prompt_content": "You are the execution agent ensuring disciplined trading.",
+            "description": "Initial execution agent prompt",
+            "changes": [],
+            "reason": "initialization",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "is_active": True,
+        }
+        self.prompt_versions: List[Dict[str, Any]] = [base_prompt]
+        self.current_prompt_version: int = 1
+
+    def _deactivate_all_prompts(self) -> None:
+        for version in self.prompt_versions:
+            version["is_active"] = False
+
+    @workflow.signal
+    def update_prompt_version(self, prompt_data: Dict[str, Any]) -> None:
+        """Append a new prompt version and mark it active."""
+
+        self._deactivate_all_prompts()
+        next_version = len(self.prompt_versions) + 1
+        entry = {
+            "version": next_version,
+            "prompt_type": prompt_data.get("prompt_type", "execution_agent"),
+            "prompt_content": prompt_data.get("prompt_content", ""),
+            "description": prompt_data.get("description", ""),
+            "changes": prompt_data.get("changes", []),
+            "reason": prompt_data.get("reason", ""),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "is_active": True,
+        }
+        self.prompt_versions.append(entry)
+        self.current_prompt_version = next_version
+
+    @workflow.signal
+    def rollback_prompt(self, target_version: int) -> None:
+        """Rollback to a previous prompt version."""
+
+        if not any(version["version"] == target_version for version in self.prompt_versions):
+            return
+        self._deactivate_all_prompts()
+        for version in self.prompt_versions:
+            if version["version"] == target_version:
+                version["is_active"] = True
+                break
+        self.current_prompt_version = target_version
 
     @workflow.signal
     def record_evaluation(self, evaluation: Dict) -> None:
@@ -95,21 +143,19 @@ class JudgeAgentWorkflow:
                 evaluation["status"] = "processed"
 
     @workflow.query
-    def get_evaluations(self, params: Dict = None) -> List[Dict]:
+    def get_evaluations(self, params: Dict | None = None, *, limit: int | None = None, since_ts: int | None = None) -> List[Dict]:
         """Get recent evaluations."""
-        if params is None:
-            params = {}
-        
-        limit = params.get("limit", 50)
-        since_ts = params.get("since_ts", 0)
+        params = params or {}
+        effective_limit = limit if limit is not None else params.get("limit", 50)
+        effective_since = since_ts if since_ts is not None else params.get("since_ts", 0)
         
         filtered = [
             eval for eval in self.evaluations 
-            if eval.get("timestamp", 0) >= since_ts
+            if eval.get("timestamp", 0) >= effective_since
         ]
         # Return most recent first
-        filtered.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-        return filtered[:limit]
+        filtered.sort(key=lambda x: (x.get("timestamp", 0), x.get("evaluation_id", 0)), reverse=True)
+        return filtered[:effective_limit]
 
     @workflow.query
     def get_context_history(self, limit: int = 20) -> List[Dict]:

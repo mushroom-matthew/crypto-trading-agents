@@ -1,0 +1,110 @@
+"""Risk-constraint enforcement and position sizing."""
+
+from __future__ import annotations
+
+import math
+from typing import Dict, Mapping
+
+from schemas.llm_strategist import IndicatorSnapshot, PortfolioState, PositionSizingRule, RiskConstraint
+
+
+class RiskEngine:
+    """Applies plan-level RiskConstraint values to candidate orders."""
+
+    def __init__(
+        self,
+        constraints: RiskConstraint,
+        sizing_rules: Mapping[str, PositionSizingRule],
+        daily_anchor_equity: float | None = None,
+    ) -> None:
+        self.constraints = constraints
+        self.sizing_rules: Dict[str, PositionSizingRule] = dict(sizing_rules)
+        self.daily_anchor_equity = daily_anchor_equity
+
+    def _fraction(self, pct: float | None) -> float:
+        return (pct or 0.0) / 100.0
+
+    def _within_daily_loss(self, equity: float) -> bool:
+        if self.daily_anchor_equity is None:
+            self.daily_anchor_equity = equity
+            return True
+        anchor = self.daily_anchor_equity
+        if anchor <= 0:
+            return True
+        loss = (anchor - equity) / anchor
+        return loss <= self._fraction(self.constraints.max_daily_loss_pct)
+
+    def _symbol_notional(self, symbol: str, price: float, portfolio: PortfolioState) -> float:
+        position = portfolio.positions.get(symbol, 0.0)
+        return abs(position) * price
+
+    def _available_symbol_capacity(self, symbol: str, price: float, portfolio: PortfolioState) -> float:
+        max_symbol = portfolio.equity * self._fraction(self.constraints.max_symbol_exposure_pct)
+        if max_symbol <= 0:
+            return float("inf")
+        return max(0.0, max_symbol - self._symbol_notional(symbol, price, portfolio))
+
+    def _portfolio_exposure(self, portfolio: PortfolioState) -> float:
+        return max(0.0, portfolio.equity - portfolio.cash)
+
+    def _available_portfolio_capacity(self, portfolio: PortfolioState) -> float:
+        max_portfolio = portfolio.equity * self._fraction(self.constraints.max_portfolio_exposure_pct)
+        if max_portfolio <= 0:
+            return float("inf")
+        return max(0.0, max_portfolio - self._portfolio_exposure(portfolio))
+
+    def _position_risk_cap(self, portfolio: PortfolioState) -> float:
+        return portfolio.equity * self._fraction(self.constraints.max_position_risk_pct)
+
+    def _rule_for(self, symbol: str) -> PositionSizingRule:
+        if symbol not in self.sizing_rules:
+            self.sizing_rules[symbol] = PositionSizingRule(
+                symbol=symbol,
+                sizing_mode="fixed_fraction",
+                target_risk_pct=self.constraints.max_position_risk_pct,
+            )
+        return self.sizing_rules[symbol]
+
+    def _notional_from_rule(
+        self,
+        rule: PositionSizingRule,
+        portfolio: PortfolioState,
+        indicator: IndicatorSnapshot,
+    ) -> float:
+        equity = max(portfolio.equity, 1e-9)
+        if rule.sizing_mode == "fixed_fraction":
+            pct = rule.target_risk_pct or self.constraints.max_position_risk_pct
+            return equity * self._fraction(pct)
+        if rule.sizing_mode == "notional":
+            return max(0.0, rule.notional or 0.0)
+        if rule.sizing_mode == "vol_target":
+            target = rule.vol_target_annual or 0.0
+            realized = indicator.realized_vol_short or indicator.realized_vol_medium or 0.0
+            if target <= 0 or realized <= 0:
+                return 0.0
+            daily_target = target / math.sqrt(365.0)
+            scale = daily_target / realized
+            return equity * min(scale, 1.0)
+        raise ValueError(f"unsupported sizing mode {rule.sizing_mode}")
+
+    def size_position(
+        self,
+        symbol: str,
+        price: float,
+        portfolio: PortfolioState,
+        indicator: IndicatorSnapshot,
+    ) -> float:
+        if price <= 0 or not self._within_daily_loss(portfolio.equity):
+            return 0.0
+        rule = self._rule_for(symbol)
+        desired_notional = self._notional_from_rule(rule, portfolio, indicator)
+        if desired_notional <= 0:
+            return 0.0
+        caps = [
+            self._position_risk_cap(portfolio),
+            self._available_symbol_capacity(symbol, price, portfolio),
+            self._available_portfolio_capacity(portfolio),
+        ]
+        allowed_notional = min(filter(lambda val: val > 0, caps), default=0.0)
+        final = min(desired_notional, allowed_notional) if allowed_notional > 0 else 0.0
+        return max(0.0, final / price)

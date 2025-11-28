@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from services.strategy_config_store import load_all_plans
+from agents.strategies.llm_client import LLMClient
+from .llm_strategist_runner import LLMStrategistBacktester
 from .simulator import run_backtest, run_portfolio_backtest
 from .strategies import StrategyWrapperConfig, StrategyParameters
 
@@ -26,6 +29,15 @@ def main() -> None:
     parser.add_argument("--go-to-cash", action="store_true")
     parser.add_argument("--plan-file", help="Path to JSON file with planner plans")
     parser.add_argument("--use-saved-plans", action="store_true", help="Load plan metadata from data/strategy_configs.json")
+    parser.add_argument("--llm-strategist", choices=["enabled", "disabled"], default="disabled", help="Enable the LLM strategist workflow")
+    parser.add_argument("--llm-calls-per-day", type=int, default=1)
+    parser.add_argument("--llm-cache-dir", default=".cache/strategy_plans")
+    parser.add_argument("--llm-run-id", default="default")
+    parser.add_argument("--llm-prompt", help="Optional prompt template path for the strategist")
+    parser.add_argument("--max-position-risk-pct", type=float, default=2.0)
+    parser.add_argument("--max-symbol-exposure-pct", type=float, default=25.0)
+    parser.add_argument("--max-portfolio-exposure-pct", type=float, default=80.0)
+    parser.add_argument("--max-daily-loss-pct", type=float, default=3.0)
     args = parser.parse_args()
 
     start = datetime.fromisoformat(args.start)
@@ -66,6 +78,41 @@ def main() -> None:
             if params:
                 per_symbol_params[symbol] = params
         strategy_cfg.per_symbol_parameters = per_symbol_params
+
+    if args.llm_strategist == "enabled":
+        risk_params = {
+            "max_position_risk_pct": args.max_position_risk_pct,
+            "max_symbol_exposure_pct": args.max_symbol_exposure_pct,
+            "max_portfolio_exposure_pct": args.max_portfolio_exposure_pct,
+            "max_daily_loss_pct": args.max_daily_loss_pct,
+        }
+        pairs = args.pairs or [args.pair]
+        prompt_path = Path(args.llm_prompt) if args.llm_prompt else None
+        backtester = LLMStrategistBacktester(
+            pairs=pairs,
+            start=start,
+            end=end,
+            initial_cash=args.initial_cash,
+            fee_rate=args.fee_rate,
+            llm_client=LLMClient(),
+            cache_dir=Path(args.llm_cache_dir),
+            llm_calls_per_day=args.llm_calls_per_day,
+            risk_params=risk_params,
+            prompt_template_path=prompt_path,
+        )
+        result = backtester.run(run_id=args.llm_run_id)
+        print("=== LLM Strategist Summary ===")
+        for key, value in result.summary.items():
+            print(f"{key}: {value}")
+        print("\nLLM cost estimates:", result.llm_costs)
+        if result.plan_log:
+            print("\nPlan log (first 5 entries):")
+            for entry in result.plan_log[:5]:
+                print(entry)
+        if not result.fills.empty:
+            print("\nSample fills:")
+            print(result.fills.tail())
+        return
 
     if args.pairs:
         weights: Optional[List[float]] = args.weights

@@ -10,6 +10,9 @@ from temporalio import workflow
 from temporalio.client import Client
 
 from agents.activities.ledger import persist_fill_activity
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @workflow.defn
@@ -60,7 +63,10 @@ class ExecutionLedgerWorkflow:
         else:
             self.profit_scraping_percentage = Decimal("0.20")  # Default 20%
         
-        workflow.logger.info(f"Profit scraping set to {self.profit_scraping_percentage * 100}%")
+        try:
+            workflow.logger.info("Profit scraping set to %s%%", self.profit_scraping_percentage * 100)
+        except Exception:
+            logger.info("Profit scraping set to %s%%", self.profit_scraping_percentage * 100)
         if "enable_real_ledger" in preferences:
             self.enable_real_ledger = bool(preferences["enable_real_ledger"])
         if "trading_wallet_id" in preferences:
@@ -79,7 +85,7 @@ class ExecutionLedgerWorkflow:
         if self.enable_real_ledger:
             try:
                 info = workflow.info()
-            except RuntimeError:
+            except Exception:
                 info = None
             if info is not None:
                 payload = {
@@ -150,7 +156,11 @@ class ExecutionLedgerWorkflow:
                     self.scraped_profits += scraped_amount
                     # Remove scraped profits from available cash
                     self.cash -= scraped_amount
-                    workflow.logger.info(f"Scraped {scraped_amount:.2f} ({self.profit_scraping_percentage * 100}%) from {position_realized_pnl:.2f} profit")
+                    message = f"Scraped {scraped_amount:.2f} ({self.profit_scraping_percentage * 100}%) from {position_realized_pnl:.2f} profit"
+                    try:
+                        workflow.logger.info(message)
+                    except Exception:
+                        logger.info(message)
             
             if new_qty <= 0:
                 self.positions.pop(symbol, None)
@@ -290,21 +300,21 @@ class ExecutionLedgerWorkflow:
         return {sym: float(p) for sym, p in self.entry_price.items()}
 
     @workflow.query
-    def get_transaction_history(self, params: Dict = None) -> List[Dict]:
+    def get_transaction_history(self, params: Dict = None, *, limit: int | None = None, since_ts: int | None = None) -> List[Dict]:
         """Return transaction history filtered by timestamp and limited by count."""
         if params is None:
             params = {}
         
-        since_ts = params.get("since_ts", 0)
-        limit = params.get("limit", 1000)
+        since = since_ts if since_ts is not None else params.get("since_ts", 0)
+        max_items = limit if limit is not None else params.get("limit", 1000)
         
         filtered_transactions = [
             tx for tx in self.transaction_history 
-            if tx["timestamp"] >= since_ts
+            if tx["timestamp"] >= since
         ]
         # Return most recent transactions first
         filtered_transactions.sort(key=lambda x: x["timestamp"], reverse=True)
-        return filtered_transactions[:limit]
+        return filtered_transactions[:max_items]
 
     @workflow.query
     def get_performance_metrics(self, window_days: int = 30) -> Dict[str, float]:
@@ -408,7 +418,9 @@ class ExecutionLedgerWorkflow:
             position_concentrations[symbol] = concentration
         
         max_position_concentration = max(position_concentrations.values()) if position_concentrations else 0.0
-        cash_ratio = float(self.cash) / total_portfolio_value if total_portfolio_value > 0 else 1.0
+        max_position_concentration = max(0.0, min(1.0, max_position_concentration))
+        raw_ratio = float(self.cash) / total_portfolio_value if total_portfolio_value > 0 else 1.0
+        cash_ratio = max(0.0, min(1.0, raw_ratio))
         
         return {
             "total_portfolio_value": total_portfolio_value,
