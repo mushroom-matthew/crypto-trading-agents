@@ -5,8 +5,9 @@ from .llm_backtest_engine import (
     BacktestPortfolio,
     BacktestResult,
     call_llm_strategy_planner,
-    run_backtest,
+    run_backtest as run_gated_backtest,
 )
+from .simulator import BacktestResult as StrategyBacktestResult, PortfolioBacktestResult, run_backtest, run_portfolio_backtest
 
 __all__ = [
     "BacktestAction",
@@ -14,4 +15,8 @@ __all__ = [
     "BacktestResult",
     "call_llm_strategy_planner",
     "run_backtest",
+    "run_gated_backtest",
+    "StrategyBacktestResult",
+    "PortfolioBacktestResult",
+    "run_portfolio_backtest",
 ]

@@ -18,14 +18,22 @@ class SignalAgentService:
         return [intent.__dict__ for intent in intents]
 
 
-def build_market_snapshots(indicator_summaries: Dict[str, dict], plan: Dict[str, Any] | None = None) -> Dict[str, MarketSnapshot]:
+def build_market_snapshots(
+    indicator_summaries: Dict[str, dict],
+    plan_map: Dict[str, Dict[str, Any]] | None = None,
+) -> Dict[str, MarketSnapshot]:
     snapshots: Dict[str, MarketSnapshot] = {}
     for symbol, summary in indicator_summaries.items():
-        atr_band = summary.get("atr_band", summary["atr"] * 1.5)
-        volume_floor = summary.get("volume_floor", 1.0)
-        if plan and plan.get("symbol") == symbol:
-            atr_band = plan.get("atr_band", atr_band)
-            volume_floor = plan.get("volume_floor", volume_floor)
+        atr_band_mult = 1.5
+        volume_floor = 1.0
+        go_to_cash = summary.get("go_to_cash", False)
+        if plan_map and symbol in plan_map:
+            metadata = plan_map[symbol].get("metadata") or {}
+            volatility = metadata.get("volatility", {})
+            volume_meta = metadata.get("volume", {})
+            atr_band_mult = volatility.get("atr_band_mult", atr_band_mult)
+            volume_floor = volume_meta.get("volume_floor", volume_floor)
+            go_to_cash = metadata.get("allow_go_to_cash", go_to_cash)
         snapshots[symbol] = MarketSnapshot(
             symbol=symbol,
             price=summary["price"],
@@ -33,10 +41,10 @@ def build_market_snapshots(indicator_summaries: Dict[str, dict], plan: Dict[str,
             rolling_low=summary["rolling_low"],
             recent_max=summary["recent_max"],
             atr=summary["atr"],
-            atr_band=atr_band,
+            atr_band=summary["atr"] * atr_band_mult,
             volume_multiple=summary["volume_multiple"],
             volume_floor=volume_floor,
             is_leader=summary.get("is_leader", True),
-            go_to_cash=summary.get("go_to_cash", False),
+            go_to_cash=go_to_cash,
         )
     return snapshots

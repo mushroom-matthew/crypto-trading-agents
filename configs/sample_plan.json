@@ -1,0 +1,18 @@
+{
+  "BTC-USD": {
+    "plan": {},
+    "metadata": {
+      "volatility": {"atr_band_mult": 1.2},
+      "volume": {"volume_floor": 1.2},
+      "allow_go_to_cash": false
+    }
+  },
+  "ETH-USD": {
+    "plan": {},
+    "metadata": {
+      "volatility": {"atr_band_mult": 1.8},
+      "volume": {"volume_floor": 1.5},
+      "allow_go_to_cash": true
+    }
+  }
+}

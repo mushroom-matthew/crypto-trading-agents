@@ -39,18 +39,29 @@ def plan_strategy_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         preferences=PlannerPreferences(risk_mode="aggressive"),
     )
     response = planner.plan(request)
-    return response.plan.model_dump()
+    return {"plan": response.plan.model_dump(), "metadata": response.metadata}
 
 
 @activity.defn
 def store_strategy_config_activity(payload: Dict[str, Any]) -> None:
-    save_plan(payload["symbol"], payload["plan"])
+    save_plan(payload["symbol"], payload)
 
 
 @activity.defn
 def load_strategy_config_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
-    plan = load_plan(payload["symbol"])
-    return {"plan": plan}
+    symbols = payload.get("symbols")
+    result: Dict[str, Any] = {}
+    if symbols:
+        plan_map = {}
+        for symbol in symbols:
+            entry = load_plan(symbol)
+            if entry:
+                plan_map[symbol] = entry
+        result["plans"] = plan_map
+    else:
+        plan = load_plan(payload["symbol"])
+        result["plans"] = {payload["symbol"]: plan} if plan else {}
+    return result
 
 
 @activity.defn
@@ -66,19 +77,17 @@ def build_snapshots_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
             "rolling_low": summary.rolling_low,
             "recent_max": summary.rolling_high,
             "atr": summary.atr,
-            "atr_band": summary.atr * 1.5,
             "volume_multiple": summary.volume_multiple,
         }
-    plan = payload.get("plan")
-    snapshots = build_market_snapshots(summaries, plan)
+    plan_map = payload.get("plan_map")
+    snapshots = build_market_snapshots(summaries, plan_map)
     return {symbol: snapshot.__dict__ for symbol, snapshot in snapshots.items()}
 
 
 @activity.defn
 def generate_signals_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     service = SignalAgentService(DEFAULT_STRATEGY_CONFIG)
-    plan = payload.get("plan")
-    snapshots = build_market_snapshots(payload["snapshots"], plan)
+    snapshots = build_market_snapshots(payload["snapshots"], payload.get("plan_map"))
     intents = service.generate(snapshots)
     return {"intents": intents}
 

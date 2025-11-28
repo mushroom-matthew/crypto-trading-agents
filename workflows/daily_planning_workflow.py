@@ -29,14 +29,18 @@ class DailyPlanningWorkflow:
             {"symbol": strategy_payload["symbol"], "candles": candles["candles"]},
             schedule_to_close_timeout=timedelta(minutes=1),
         )
-        plan = await workflow.execute_activity(
+        plan_output = await workflow.execute_activity(
             plan_strategy_activity,
             {"symbol": strategy_payload["symbol"], "summary": summary},
             schedule_to_close_timeout=timedelta(minutes=2),
         )
         await workflow.execute_activity(
             store_strategy_config_activity,
-            {"symbol": strategy_payload["symbol"], "plan": plan},
+            {
+                "symbol": strategy_payload["symbol"],
+                "plan": plan_output.get("plan"),
+                "metadata": plan_output.get("metadata"),
+            },
             schedule_to_close_timeout=timedelta(minutes=1),
         )
-        return {"status": "planned", "plan": plan}
+        return {"status": "planned", "plan": plan_output.get("plan"), "metadata": plan_output.get("metadata")}

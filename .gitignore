@@ -16,3 +16,4 @@ logs/
 *.log
 .DS_Store
 data/market_cache/
+data/
