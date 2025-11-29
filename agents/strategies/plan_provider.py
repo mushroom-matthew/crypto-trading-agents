@@ -75,9 +75,9 @@ class StrategyPlanProvider:
         cached = self._load_cached(cache_path)
         if cached:
             return cached
-        date_key = plan_date.strftime("%Y-%m-%d")
+        date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
-            raise RuntimeError(f"LLM call budget exhausted for {date_key}")
+            raise RuntimeError(f"LLM call budget exhausted for {date_key[1]}")
         plan = self.llm_client.generate_plan(llm_input, prompt_template=prompt_template)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(plan.to_json(indent=2))

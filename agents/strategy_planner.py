@@ -10,6 +10,7 @@ from openai import OpenAI
 from temporalio.client import Client, RPCError, RPCStatusCode
 
 from agents.logging_utils import setup_logging
+from agents.prompt_manager import PromptManager
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import create_openai_client, init_langfuse
 from agents.workflows.strategy_spec_workflow import StrategySpecWorkflow
@@ -19,8 +20,12 @@ logger = setup_logging(__name__)
 
 init_langfuse()
 openai_client: OpenAI = create_openai_client()
+prompt_manager = PromptManager()
 
-STRATEGY_SPEC_PROMPT = """
+
+def _strategy_spec_prompt() -> str:
+    base_prompt = prompt_manager.templates["execution_agent_standard"].render()
+    schema_instructions = """
 You are a deterministic trading strategy planner. Respond ONLY with JSON that can be parsed into
 the following schema (StrategySpec):
 
@@ -60,6 +65,7 @@ RiskSpec:
 
 Output valid JSON only. No additional commentary.
 """
+    return f"{base_prompt}\n\n{schema_instructions.strip()}"
 
 
 async def ensure_strategy_workflow(client: Client) -> None:
@@ -101,7 +107,7 @@ async def plan_strategy_spec(
         "notes": notes,
     }
     messages = [
-        {"role": "system", "content": STRATEGY_SPEC_PROMPT},
+        {"role": "system", "content": _strategy_spec_prompt()},
         {"role": "user", "content": json.dumps(payload)},
     ]
     completion = openai_client.responses.create(

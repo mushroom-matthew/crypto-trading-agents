@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Dict, Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict
 
-from schemas.strategy_plan import StrategyPlan
+from schemas.llm_strategist import PositionSizingRule, RiskConstraint, StrategyPlan, TriggerCondition
 from trading_core.config import PlannerSettings
 from tools.performance_analysis import PerformanceAnalyzer
 
@@ -65,27 +65,30 @@ class LLMPlanner:
             },
             "metadata": metadata,
         }
-        # TODO: send payload to LLM; using stubbed plan for now.
-        plan_payload = {
-            "strategy_id": f"plan-{request.symbol}",
-            "created_at": datetime.now(timezone.utc),
-            "symbol": request.symbol,
-            "timeframe": payload["timeframe"],
-            "lookback": {
-                "preferred_bars": min(max(self.settings.min_lookback_bars, 100), self.settings.max_lookback_bars),
-                "min_bars": self.settings.min_lookback_bars,
-                "max_bars": self.settings.max_lookback_bars,
-            },
-            "risk": {
-                "max_fraction_of_balance": 0.3,
-                "risk_per_trade_fraction": 0.01,
-                "max_drawdown_pct": 0.4,
-                "leverage": 1.0,
-            },
-            "entry_conditions": [],
-            "exit_conditions": [],
-            "replan_triggers": {},
-            "llm_metadata": {"model_name": self.settings.llm_model, "prompt_version": "v0"},
-        }
-        plan = StrategyPlan.model_validate(plan_payload)
+        now = datetime.now(timezone.utc)
+        plan = StrategyPlan(
+            generated_at=now,
+            valid_until=now + timedelta(days=1),
+            global_view=f"Auto plan for {request.symbol}",
+            regime="range",
+            triggers=[
+                TriggerCondition(
+                    id=f"baseline_{request.symbol}",
+                    symbol=request.symbol,
+                    direction="long",
+                    timeframe=payload["timeframe"],
+                    entry_rule="timeframe=='1h'",
+                    exit_rule="False",
+                )
+            ],
+            risk_constraints=RiskConstraint(
+                max_position_risk_pct=20.0,
+                max_symbol_exposure_pct=50.0,
+                max_portfolio_exposure_pct=80.0,
+                max_daily_loss_pct=5.0,
+            ),
+            sizing_rules=[
+                PositionSizingRule(symbol=request.symbol, sizing_mode="fixed_fraction", target_risk_pct=2.0)
+            ],
+        )
         return PlannerResponse(plan=plan, metadata=metadata)

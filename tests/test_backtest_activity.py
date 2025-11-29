@@ -1,22 +1,51 @@
 from unittest.mock import MagicMock
 
-from backtesting.backtest_activity import run_backtest_activity, BacktestRequest
-from tests.test_llm_backtest_engine import _make_plan
+import pandas as pd
+
+from backtesting.backtest_activity import BacktestRequest, run_backtest_activity
 
 
-def test_run_backtest_activity_uses_llm(monkeypatch):
+class _FakeResult:
+    def __init__(self) -> None:
+        self.equity_curve = pd.Series([1000.0, 1010.0])
+        self.fills = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2024-01-01T00:00:00Z"),
+                    "symbol": "BTC-USD",
+                    "side": "buy",
+                    "qty": 0.1,
+                    "price": 100.0,
+                    "fee": 0.0,
+                    "reason": "test",
+                }
+            ]
+        )
+        self.plan_log = []
+        self.summary = {"final_equity": 1010.0}
+        self.llm_costs = {"num_llm_calls": 0}
+        self.final_cash = 900.0
+        self.final_positions = {"BTC-USD": 0.1}
+        self.daily_reports = [{"date": "2024-01-01", "return_pct": 1.0, "judge_feedback": {"score": 55.0}}]
+
+
+class _FakeBacktester:
+    def __init__(self, *args, **kwargs) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def run(self, run_id: str) -> _FakeResult:  # noqa: D401
+        return _FakeResult()
+
+
+def test_run_backtest_activity(monkeypatch):
     candles = [
-        {"open": 100 + (i % 5), "high": 101 + (i % 5), "low": 99 + (i % 5), "close": 100 + (i % 5), "volume": 1000 + i}
-        for i in range(80)
+        {"timestamp": f"2024-01-01T0{i}:00:00Z", "open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i, "volume": 1000}
+        for i in range(5)
     ]
-    fake_plan = _make_plan()
-    fake_plan.lookback = fake_plan.lookback.model_copy(update={"preferred_bars": 40, "min_bars": 30, "max_bars": 60})
-    fake_client = MagicMock()
-    fake_client.responses.create.return_value = MagicMock(
-        output=[MagicMock(content=[MagicMock(text=fake_plan.model_dump_json())])]
-    )
-    monkeypatch.setattr("backtesting.backtest_activity._get_llm_client", lambda: fake_client)
+    monkeypatch.setattr("backtesting.backtest_activity.LLMStrategistBacktester", _FakeBacktester)
     request = BacktestRequest(symbol="BTC-USD", timeframe="1h", candles=candles, initial_cash=5000)
     response = run_backtest_activity(request.model_dump())
     assert response["symbol"] == "BTC-USD"
-    assert response["final_cash"] <= 5000
+    assert response["num_trades"] == 1
+    assert response["final_positions"]["BTC-USD"] == 0.1

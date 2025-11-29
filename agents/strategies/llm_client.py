@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Protocol
+from typing import Any, Callable, Dict, List, Protocol
 
 from openai import OpenAI
+from pydantic import ValidationError
 
+from agents.langfuse_utils import langfuse_span
 from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint, StrategyPlan
 
 
@@ -19,9 +22,19 @@ class CompletionTransport(Protocol):
 class LLMClient:
     """Thin wrapper over OpenAI's Responses API with a deterministic fallback."""
 
-    def __init__(self, transport: CompletionTransport | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        transport: CompletionTransport | None = None,
+        model: str | None = None,
+        allow_fallback: bool | None = None,
+    ) -> None:
         self.transport = transport
         self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        env_flag = os.environ.get("LLM_CLIENT_ALLOW_FALLBACK")
+        if allow_fallback is None and env_flag is not None:
+            allow_fallback = env_flag.lower() not in {"0", "false", "no"}
+        self.allow_fallback = True if allow_fallback is None else allow_fallback
+        self.max_retries = int(os.environ.get("LLM_CLIENT_MAX_RETRIES", "2"))
         self._client = None
 
     @property
@@ -34,21 +47,39 @@ class LLMClient:
         if self.transport:
             raw = self.transport(llm_input.to_json())
             return StrategyPlan.from_json(raw)
-        try:
-            system_prompt = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "")
-            completion = self.client.responses.create(
-                model=self.model,
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": llm_input.to_json()},
-                ],
-                temperature=0.1,
-                max_output_tokens=1200,
-            )
-            content = completion.output[0].content[0].text
-            return StrategyPlan.model_validate_json(content)
-        except Exception:
-            return self._fallback_plan(llm_input)
+        last_error: Exception | None = None
+        attempts = max(1, self.max_retries)
+        for attempt in range(1, attempts + 1):
+            try:
+                system_prompt = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "")
+                with langfuse_span("llm_strategist.backtest", metadata={"model": self.model}) as span:
+                    completion = self.client.responses.create(
+                        model=self.model,
+                        input=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": llm_input.to_json()},
+                        ],
+                        temperature=0.1,
+                        max_output_tokens=1200,
+                    )
+                    content = completion.output[0].content[0].text
+                    if span:
+                        span.end(output=content)
+                    plan_dict = json.loads(content)
+                    plan_dict = self._sanitize_plan_dict(plan_dict)
+                    return StrategyPlan.model_validate(plan_dict)
+            except ValidationError as exc:
+                last_error = exc
+                logging.warning("Strategy plan validation failed (attempt %s/%s): %s", attempt, attempts, exc)
+                continue
+            except Exception as exc:
+                last_error = exc
+                logging.warning("LLM strategist call failed (attempt %s/%s): %s", attempt, attempts, exc)
+                continue
+        if not self.allow_fallback and last_error:
+            raise last_error
+        logging.warning("LLM strategist fallback triggered after retries: %s", last_error)
+        return self._fallback_plan(llm_input)
 
     def _fallback_plan(self, llm_input: LLMInput) -> StrategyPlan:
         now = datetime.now(timezone.utc)
@@ -72,3 +103,18 @@ class LLMClient:
             risk_constraints=constraints,
             sizing_rules=sizing_rules,
         )
+
+    def _sanitize_plan_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        triggers = data.get("triggers", [])
+        cleaned: List[Dict[str, Any]] = []
+        allowed = {"long", "short", "flat"}
+        for trig in triggers:
+            direction = trig.get("direction")
+            if direction not in allowed:
+                if isinstance(direction, str) and direction.lower() == "exit":
+                    trig["direction"] = "flat"
+                else:
+                    continue
+            cleaned.append(trig)
+        data["triggers"] = cleaned
+        return data

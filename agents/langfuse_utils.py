@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
-from typing import Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Optional
 
 from langfuse import Langfuse
 from langfuse.openai import openai as langfuse_openai
@@ -39,3 +40,22 @@ def create_openai_client() -> Optional[langfuse_openai.OpenAI]:
         logger.warning("OPENAI_API_KEY not set; unable to create OpenAI client.")
         return None
     return langfuse_openai.OpenAI(api_key=api_key)
+
+
+@contextmanager
+def langfuse_span(name: str, metadata: Optional[Dict[str, Any]] = None):
+    """Context manager that yields a Langfuse span if the client is initialised."""
+    client = init_langfuse()
+    if not client:
+        yield None
+        return
+    span_factory = getattr(client, "span", None)
+    if span_factory is None:
+        logger.warning("Langfuse client missing span() API; skipping span creation.")
+        yield None
+        return
+    span = span_factory(name=name, metadata=metadata or {})
+    try:
+        yield span
+    finally:
+        span.end()

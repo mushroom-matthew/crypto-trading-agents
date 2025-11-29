@@ -21,3 +21,10 @@ Write commits in the present tense and keep subjects under ~72 characters, follo
 
 ## Environment & Secrets
 Store `OPENAI_API_KEY`, Coinbase credentials, Temporal settings, and other secrets in a local `.env`. Update `.env.example` when adding variables and call out new requirements in PR descriptions. Never commit real keys or production endpoints.
+
+## Agent Operating Principles
+- Always begin substantial tasks with a lightweight written plan that breaks work into PR-sized chunks; confirm or adjust with reviewers before diving in.
+- Close each chunk by proposing the exact git commit message you intend to use and pause for human review/approval before proceeding.
+- When issues persist after an initial fix, proactively suggest concrete workarounds (toggling flags, clearing caches, alternative flows, etc.) instead of retrying the same approach.
+- Log unexpected fallbacks or degraded modes and surface them explicitly to downstream operators so they can decide whether to continue.
+- Instrument every LLM call via Langfuse (`agents/langfuse_utils.py`) so audit trails capture prompts, responses, and token usage. Do not add new OpenAI clients without wrapping them in Langfuse spans.

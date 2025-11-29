@@ -17,3 +17,5 @@ logs/
 .DS_Store
 data/market_cache/
 data/
+AGENTS.md
+.cache/

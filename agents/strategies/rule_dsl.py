@@ -40,7 +40,7 @@ class RuleEvaluator:
             tree = ast.parse(normalized, mode="eval")
         except SyntaxError as exc:
             raise RuleSyntaxError(f"invalid rule syntax: {expr}") from exc
-        allowed = set(context.keys()) | self.allowed_names | {"True", "False"}
+        allowed = set(context.keys()) | self.allowed_names | {"True", "False", "true", "false", "None", "none"}
         return bool(self._eval_node(tree.body, context, allowed))
 
     def _eval_node(self, node: ast.AST, ctx: Mapping[str, Any], allowed: set[str]) -> Any:
@@ -62,11 +62,15 @@ class RuleEvaluator:
                 left = right
             return result
         if isinstance(node, ast.Name):
-            if node.id not in allowed:
+            name = node.id
+            lower = name.lower()
+            if lower in {"true", "false"}:
+                return lower == "true"
+            if lower == "none":
+                return None
+            if name not in allowed and lower not in allowed:
                 raise RuleSyntaxError(f"unknown identifier '{node.id}' in rule")
-            if node.id in {"True", "False"}:
-                return node.id == "True"
-            return ctx.get(node.id)
+            return ctx.get(name)
         if isinstance(node, ast.Constant):
             return node.value
         raise RuleSyntaxError(f"unsupported expression in rule: {ast.dump(node)}")

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+if __package__ is None:  # allow running as `python backtesting/cli.py`
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from services.strategy_config_store import load_all_plans
 from agents.strategies.llm_client import LLMClient
@@ -30,7 +34,7 @@ def main() -> None:
     parser.add_argument("--plan-file", help="Path to JSON file with planner plans")
     parser.add_argument("--use-saved-plans", action="store_true", help="Load plan metadata from data/strategy_configs.json")
     parser.add_argument("--llm-strategist", choices=["enabled", "disabled"], default="disabled", help="Enable the LLM strategist workflow")
-    parser.add_argument("--llm-calls-per-day", type=int, default=1)
+    parser.add_argument("--llm-calls-per-day", type=int, default=8)
     parser.add_argument("--llm-cache-dir", default=".cache/strategy_plans")
     parser.add_argument("--llm-run-id", default="default")
     parser.add_argument("--llm-prompt", help="Optional prompt template path for the strategist")
@@ -38,6 +42,7 @@ def main() -> None:
     parser.add_argument("--max-symbol-exposure-pct", type=float, default=25.0)
     parser.add_argument("--max-portfolio-exposure-pct", type=float, default=80.0)
     parser.add_argument("--max-daily-loss-pct", type=float, default=3.0)
+    parser.add_argument("--timeframes", nargs="+", default=["1h", "4h", "1d"], help="Timeframe list for strategist indicators")
     args = parser.parse_args()
 
     start = datetime.fromisoformat(args.start)
@@ -99,6 +104,7 @@ def main() -> None:
             llm_calls_per_day=args.llm_calls_per_day,
             risk_params=risk_params,
             prompt_template_path=prompt_path,
+            timeframes=args.timeframes,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")
