@@ -86,6 +86,8 @@ class TriggerCondition(SerializableModel):
 
     id: str
     symbol: str
+    category: Literal["trend_continuation", "reversal", "volatility_breakout", "mean_reversion", "emergency_exit", "other"] | None = Field(default=None)
+    confidence_grade: Literal["A", "B", "C"] | None = Field(default=None)
     direction: Literal["long", "short", "flat"]
     timeframe: str
     entry_rule: str

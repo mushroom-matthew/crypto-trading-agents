@@ -44,10 +44,19 @@ class TriggerEngine:
         self.evaluator = evaluator or RuleEvaluator()
 
     def _context(self, indicator: IndicatorSnapshot, asset_state: AssetState | None) -> dict[str, float | str | None]:
+        """Build evaluation context, including cross-timeframe aliases."""
+
         context = indicator.model_dump()
         if asset_state:
             context["trend_state"] = asset_state.trend_state
             context["vol_state"] = asset_state.vol_state
+            for snapshot in asset_state.indicators:
+                prefix = f"tf_{snapshot.timeframe.replace('-', '_')}"
+                snapshot_dict = snapshot.model_dump()
+                for key, value in snapshot_dict.items():
+                    if key in {"symbol", "timeframe", "as_of"}:
+                        continue
+                    context[f"{prefix}_{key}"] = value
         return context
 
     def _position_direction(self, symbol: str, portfolio: PortfolioState) -> Literal["long", "short", "flat"]:
