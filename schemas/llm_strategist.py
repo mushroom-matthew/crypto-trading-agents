@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -81,14 +82,25 @@ class LLMInput(SerializableModel):
     global_context: Dict[str, Any] = Field(default_factory=dict)
 
 
+TriggerDirection = Literal["long", "short", "flat"]
+TriggerCategory = Literal[
+    "trend_continuation",
+    "reversal",
+    "volatility_breakout",
+    "mean_reversion",
+    "emergency_exit",
+    "other",
+]
+
+
 class TriggerCondition(SerializableModel):
     """Entry/exit specification provided by the LLM."""
 
     id: str
     symbol: str
-    category: Literal["trend_continuation", "reversal", "volatility_breakout", "mean_reversion", "emergency_exit", "other"] | None = Field(default=None)
+    category: TriggerCategory | None = Field(default=None)
     confidence_grade: Literal["A", "B", "C"] | None = Field(default=None)
-    direction: Literal["long", "short", "flat"]
+    direction: TriggerDirection
     timeframe: str
     entry_rule: str
     exit_rule: str
@@ -116,6 +128,8 @@ class PositionSizingRule(SerializableModel):
 class StrategyPlan(SerializableModel):
     """Complete plan payload returned by the LLM."""
 
+    plan_id: str = Field(default_factory=lambda: f"plan_{uuid4().hex}")
+    run_id: str | None = None
     generated_at: datetime
     valid_until: datetime
     global_view: Optional[str] = None
@@ -123,3 +137,7 @@ class StrategyPlan(SerializableModel):
     triggers: List[TriggerCondition]
     risk_constraints: RiskConstraint
     sizing_rules: List[PositionSizingRule] = Field(default_factory=list)
+    max_trades_per_day: int | None = Field(default=None, ge=0)
+    allowed_symbols: List[str] = Field(default_factory=list)
+    allowed_directions: List[TriggerDirection] = Field(default_factory=list)
+    allowed_trigger_categories: List[TriggerCategory] = Field(default_factory=list)

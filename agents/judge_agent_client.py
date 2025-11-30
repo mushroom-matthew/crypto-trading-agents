@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
 from temporalio.client import Client, RPCError, RPCStatusCode
@@ -15,6 +15,8 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from agents.workflows.judge_agent_workflow import JudgeAgentWorkflow
 from agents.workflows.execution_ledger_workflow import ExecutionLedgerWorkflow
+from pydantic import ValidationError
+
 from tools.performance_analysis import PerformanceAnalyzer, format_performance_report
 from tools.agent_logger import AgentLogger
 from agents.utils import check_and_process_feedback, tool_result_data
@@ -27,11 +29,32 @@ from agents.constants import (
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import create_openai_client, init_langfuse
+from schemas.judge_feedback import JudgeFeedback
 
 logger = setup_logging(__name__, level="INFO")
 
 init_langfuse()
 openai_client = create_openai_client()
+
+
+def _split_notes_and_json(response_text: str) -> Tuple[str, str]:
+    """Return (notes, json_str) from a two-section judge response."""
+
+    if not isinstance(response_text, str):
+        raise ValueError("Judge response must be text")
+    if "JSON:" not in response_text:
+        raise ValueError("Missing JSON section in judge response")
+    notes_segment, json_segment = response_text.split("JSON:", 1)
+    if "NOTES:" in notes_segment:
+        notes_text = notes_segment.split("NOTES:", 1)[1].strip()
+    else:
+        notes_text = notes_segment.strip()
+    start_idx = json_segment.find("{")
+    end_idx = json_segment.rfind("}")
+    if start_idx < 0 or end_idx <= start_idx:
+        raise ValueError("Could not locate JSON object in judge response")
+    json_block = json_segment[start_idx : end_idx + 1]
+    return notes_text, json_block
 
 
 class JudgeAgent:
@@ -162,34 +185,14 @@ class JudgeAgent:
     async def analyze_decision_quality(self, transaction_history: List[Dict], performance_snapshot: Dict[str, Any]) -> Dict:
         """Use LLM to analyze decision quality from transaction patterns."""
 
-        def _default_component_scores() -> Dict[str, float]:
-            return {
-                "timing": 50.0,
-                "sizing": 50.0,
-                "risk_discipline": 50.0,
-                "diversification": 50.0,
-                "adaptability": 50.0,
-            }
-
         if not transaction_history:
+            feedback = JudgeFeedback(score=50.0)
             return {
+                "notes": "No transactions to analyze; keep collecting executions before judging quality.",
                 "decision_score": 50.0,
-                "component_scores": _default_component_scores(),
-                "reasoning": "No transactions to analyze",
-                "trigger_reviews": [],
-                "regime_assessment": {
-                    "declared_regime": "unknown",
-                    "observed_regime": "unknown",
-                    "correction": "insufficient_data",
-                    "confidence": 0.0,
-                },
-                "strategist_constraints": {
-                    "must_fix": ["Collect qualified trades before next evaluation cycle"],
-                    "vetoes": [],
-                    "boost": [],
-                    "regime_correction": "insufficient_data",
-                    "sizing_adjustments": {},
-                },
+                "judge_feedback": feedback.model_dump(),
+                "constraints": feedback.constraints.model_dump(),
+                "strategist_constraints": feedback.strategist_constraints.model_dump(),
                 "recommendations": ["Wait for new trades before drawing conclusions"],
             }
 
@@ -239,55 +242,36 @@ TRADING STATISTICS:
 - Sell orders: {sell_count}
 - Symbols traded: {', '.join(symbols)}
 
-Tasks:
-1. Score five components — timing (35%), sizing (25%), risk_discipline (20%), diversification (10%), adaptability (10%).
-2. Produce trigger-level feedback across trend_continuation, reversal, volatility_breakout, mean_reversion, and emergency_exit archetypes. If a category had no observable trades, mark the issue as "insufficient_data".
-3. Judge whether the strategist labelled the market regime correctly. Provide observed regime, a correction string, and confidence 0-1.
-4. Generate actionable constraints for the next plan:
-   - must_fix: concrete behaviors to repair immediately
-   - vetoes: triggers or tactics to pause
-   - boost: tactics to emphasize
-   - regime_correction: single sentence instruction
-   - sizing_adjustments: dict mapping symbols to new sizing guidance (plain text)
-5. Provide concise recommendations (max 3).
+Respond with **two sections only**:
 
-Respond in JSON ONLY:
+NOTES:
+- Provide up to five concise sentences covering momentum/timing, sizing discipline, volatility handling, and any regime corrections needed. Reference concrete metrics above when possible.
+
+JSON:
 {{
-  "decision_score": <0-100 composite weighted score>,
-  "component_scores": {{
-      "timing": <0-100>,
-      "sizing": <0-100>,
-      "risk_discipline": <0-100>,
-      "diversification": <0-100>,
-      "adaptability": <0-100>
-  }},
-  "reasoning": "<overview>",
-  "trigger_reviews": [
-      {{
-          "trigger_type": "trend_continuation|reversal|volatility_breakout|mean_reversion|emergency_exit|other",
-          "assessment": "good|late|missed|overtrade|blocked|insufficient_data",
-          "issues": ["text"],
-          "sizing_feedback": "<text>",
-          "volatility_read": "<text>"
-      }}
-  ],
-  "regime_assessment": {{
-      "declared_regime": "bull|bear|range|high_vol|mixed|unknown",
-      "observed_regime": "<text>",
-      "correction": "<text>",
-      "confidence": <0-1 float>
+  "score": <float 0-100 representing overall decision quality>,
+  "constraints": {{
+    "max_trades_per_day": <integer or null>,
+    "risk_mode": "normal" | "conservative" | "emergency",
+    "disabled_trigger_ids": ["trigger_id"],
+    "disabled_categories": ["trend_continuation", "reversal", "volatility_breakout", "mean_reversion", "emergency_exit", "other"]
   }},
   "strategist_constraints": {{
-      "must_fix": ["text"],
-      "vetoes": ["text"],
-      "boost": ["text"],
-      "regime_correction": "<text>",
-      "sizing_adjustments": {{"BTC-USD": "<instruction>", "ETH-USD": "<instruction>"}}
-  }},
-  "recommendations": ["text"]
+    "must_fix": ["text"],
+    "vetoes": ["text"],
+    "boost": ["text"],
+    "regime_correction": "<text or null>",
+    "sizing_adjustments": {{"SYMBOL": "<instruction>"}}
+  }}
 }}
 
-If information is missing for a field, explicitly state "insufficient_data" in that field instead of hallucinating."""
+Rules:
+- Always include every key above even if arrays are empty.
+- Use null for unknown numeric limits.
+- disabled_trigger_ids should name concrete trigger IDs observed; leave empty if none.
+- disabled_categories must use the provided category names.
+- Base risk_mode on drawdown/volatility evidence from the snapshot.
+- Keep the JSON compact, valid, and free of commentary after the closing brace."""
         
         try:
             response = openai_client.chat.completions.create(
@@ -304,51 +288,29 @@ If information is missing for a field, explicitly state "insufficient_data" in t
                 ],
                 max_completion_tokens=800
             )
-            
+
             analysis_text = response.choices[0].message.content
-            # Extract JSON from response
-            start_idx = analysis_text.find('{')
-            end_idx = analysis_text.rfind('}') + 1
-            
-            if start_idx >= 0 and end_idx > start_idx:
-                parsed = json.loads(analysis_text[start_idx:end_idx])
-                parsed.setdefault("component_scores", _default_component_scores())
-                parsed.setdefault("trigger_reviews", [])
-                parsed.setdefault("regime_assessment", {
-                    "declared_regime": "unknown",
-                    "observed_regime": "unknown",
-                    "correction": "insufficient_data",
-                    "confidence": 0.0,
-                })
-                parsed.setdefault(
-                    "strategist_constraints",
-                    {"must_fix": [], "vetoes": [], "boost": [], "regime_correction": "", "sizing_adjustments": {}},
-                )
-                return parsed
-            raise ValueError("No valid JSON found in LLM response")
-                
+            if not analysis_text:
+                raise ValueError("Empty judge response")
+            notes_text, json_block = _split_notes_and_json(analysis_text)
+            feedback = JudgeFeedback.model_validate_json(json_block)
+            decision_score = feedback.score if feedback.score is not None else 50.0
+            display_constraints = feedback.strategist_constraints.model_dump()
+            machine_constraints = feedback.constraints.model_dump()
+            return {
+                "notes": notes_text,
+                "decision_score": decision_score,
+                "judge_feedback": feedback.model_dump(),
+                "constraints": machine_constraints,
+                "strategist_constraints": display_constraints,
+                "recommendations": display_constraints.get("must_fix", [])[:3],
+            }
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            logger.error("Judge feedback JSON invalid: %s", exc)
+            raise
         except Exception as exc:
             logger.error("Failed to analyze decision quality: %s", exc)
-            return {
-                "decision_score": 50.0,
-                "component_scores": _default_component_scores(),
-                "reasoning": f"Analysis failed: {exc}",
-                "trigger_reviews": [],
-                "regime_assessment": {
-                    "declared_regime": "unknown",
-                    "observed_regime": "unknown",
-                    "correction": "analysis_failed",
-                    "confidence": 0.0,
-                },
-                "strategist_constraints": {
-                    "must_fix": ["Stabilize analysis pipeline"],
-                    "vetoes": [],
-                    "boost": [],
-                    "regime_correction": "analysis_failed",
-                    "sizing_adjustments": {},
-                },
-                "recommendations": ["Review decision analysis system"]
-            }
+            raise
     
     async def generate_evaluation_report(self, performance_data: Dict) -> Dict:
         """Generate comprehensive evaluation report."""
@@ -363,23 +325,6 @@ If information is missing for a field, explicitly state "insufficient_data" in t
             risk_metrics=risk_metrics
         )
         
-        # Analyze decision quality using LLM
-        decision_analysis = await self.analyze_decision_quality(transaction_history, performance_report_dict)
-        
-        # Calculate overall evaluation score
-        return_score = min(100.0, max(0.0, (performance_report.annualized_return + 1) * 50))
-        risk_score = performance_report.risk_management_score
-        decision_score = decision_analysis.get("decision_score", 50.0)
-        consistency_score = performance_report.consistency_score
-        
-        overall_score = (
-            return_score * self.criteria_weights["returns"] +
-            risk_score * self.criteria_weights["risk_management"] +
-            decision_score * self.criteria_weights["decision_quality"] +
-            consistency_score * self.criteria_weights["consistency"]
-        )
-        
-        # Convert performance_report to JSON-serializable dict using only actual attributes
         performance_report_dict = {
             "start_date": performance_report.start_date.isoformat(),
             "end_date": performance_report.end_date.isoformat(),
@@ -401,6 +346,22 @@ If information is missing for a field, explicitly state "insufficient_data" in t
             "consistency_score": performance_report.consistency_score,
             "overall_grade": performance_report.overall_grade
         }
+
+        # Analyze decision quality using LLM
+        decision_analysis = await self.analyze_decision_quality(transaction_history, performance_report_dict)
+
+        # Calculate overall evaluation score
+        return_score = min(100.0, max(0.0, (performance_report.annualized_return + 1) * 50))
+        risk_score = performance_report.risk_management_score
+        decision_score = decision_analysis.get("decision_score", 50.0)
+        consistency_score = performance_report.consistency_score
+        
+        overall_score = (
+            return_score * self.criteria_weights["returns"] +
+            risk_score * self.criteria_weights["risk_management"] +
+            decision_score * self.criteria_weights["decision_quality"] +
+            consistency_score * self.criteria_weights["consistency"]
+        )
         
         return {
             "timestamp": int(datetime.now(timezone.utc).timestamp()),
