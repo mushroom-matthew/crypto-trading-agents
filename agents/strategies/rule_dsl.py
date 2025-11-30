@@ -44,6 +44,10 @@ class RuleEvaluator:
         return bool(self._eval_node(tree.body, context, allowed))
 
     def _eval_node(self, node: ast.AST, ctx: Mapping[str, Any], allowed: set[str]) -> Any:
+        if isinstance(node, ast.BinOp):
+            left = self._eval_node(node.left, ctx, allowed)
+            right = self._eval_node(node.right, ctx, allowed)
+            return self._eval_binop(node.op, left, right)
         if isinstance(node, ast.BoolOp):
             values = [self._eval_node(value, ctx, allowed) for value in node.values]
             if isinstance(node.op, ast.And):
@@ -91,3 +95,18 @@ class RuleEvaluator:
         if isinstance(op, ast.NotEq):
             return left != right
         raise RuleSyntaxError("unsupported comparison operator")
+
+    def _eval_binop(self, op: ast.operator, left: Any, right: Any) -> Any:
+        if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
+            return None
+        if isinstance(op, ast.Add):
+            return left + right
+        if isinstance(op, ast.Sub):
+            return left - right
+        if isinstance(op, ast.Mult):
+            return left * right
+        if isinstance(op, ast.Div):
+            if right == 0:
+                return None
+            return left / right
+        raise RuleSyntaxError("unsupported arithmetic operator")

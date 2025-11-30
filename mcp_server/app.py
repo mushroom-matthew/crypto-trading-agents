@@ -649,132 +649,136 @@ async def compute_technical_metrics(
     }
 
 
+def _empty_portfolio_snapshot(reason: str) -> Dict[str, Any]:
+    return {
+        "cash": 0.0,
+        "positions": {},
+        "entry_prices": {},
+        "position_details": {},
+        "total_position_value": 0.0,
+        "total_portfolio_value": 0.0,
+        "total_pnl": 0.0,
+        "pnl": 0.0,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "scraped_profits": 0.0,
+        "available_cash": 0.0,
+        "total_cash_value": 0.0,
+        "price_data_quality": {
+            "live_prices_used": 0,
+            "total_positions": 0,
+            "using_stale_fallback": False,
+            "price_fetch_errors": [reason],
+        },
+        "live_prices_used": {},
+        "status": "fallback",
+    }
+
+
 @app.tool(annotations={"title": "Get Portfolio Status", "readOnlyHint": True})
 async def get_portfolio_status() -> Dict[str, Any]:
-    """Retrieve current portfolio cash and positions from the ledger.
+    """Retrieve current portfolio cash and positions from the ledger."""
 
-    Returns
-    -------
-    Dict[str, Any]
-        Cash balance, open positions, entry prices, total PnL, realized PnL, and unrealized PnL.
-        - cash: Current cash balance
-        - positions: Current position sizes by symbol
-        - entry_prices: Weighted average entry prices for positions
-        - total_pnl: Total profit/loss (realized + unrealized)
-        - realized_pnl: Realized profit/loss from completed trades
-        - unrealized_pnl: Unrealized profit/loss from open positions
-    """
-    client = await get_temporal_client()
-    wf_id = os.environ.get("LEDGER_WF_ID", "mock-ledger")
-    logger.info("Fetching portfolio status from %s", wf_id)
+    def _fallback(reason: str) -> Dict[str, Any]:
+        return _empty_portfolio_snapshot(reason)
+
     try:
-        handle = client.get_workflow_handle(wf_id)
-        await handle.describe()
-    except RPCError as err:
-        if err.status == RPCStatusCode.NOT_FOUND:
-            handle = await client.start_workflow(
-                ExecutionLedgerWorkflow.run,
-                id=wf_id,
-                task_queue="mcp-tools",
-            )
-        else:
-            raise
-    
-    # Get basic data first
-    cash = await handle.query("get_cash")
-    positions = await handle.query("get_positions")
-    entry_prices = await handle.query("get_entry_prices")
-    realized_pnl = await handle.query("get_realized_pnl")
-    scraped_profits = await handle.query("get_scraped_profits")
-    
-    # Get live market prices for all positions using efficient get_latest_price query
-    live_prices = {}
-    price_fetch_errors = []
-    if positions:
-        symbols = list(positions.keys())
         client = await get_temporal_client()
-        
-        for symbol in symbols:
-            wf_id = f"feature-{symbol.replace('/', '-')}"
-            try:
-                feature_handle = client.get_workflow_handle(wf_id)
-                price_info = await feature_handle.query("get_latest_price")
-                
-                if price_info["price"] is not None and price_info["age_seconds"] <= 60:
-                    # Fresh price available
-                    live_prices[symbol] = price_info["price"]
-                elif price_info["price"] is not None:
-                    # Stale price - note the issue but don't use it
-                    price_fetch_errors.append(f"{symbol}: price is {price_info['age_seconds']:.1f}s stale")
-                else:
-                    # No price data available
-                    price_fetch_errors.append(f"{symbol}: no price data from feature workflow")
-                    
-            except Exception as e:
-                price_fetch_errors.append(f"{symbol}: failed to query feature workflow - {str(e)}")
-                logger.warning("Failed to get latest price for %s: %s", symbol, e)
-    
-    # Calculate P&L with live prices if available, otherwise fall back
-    if live_prices:
-        pnl = await handle.query("get_pnl_with_live_prices", live_prices)
-        unrealized_pnl = await handle.query("get_unrealized_pnl_with_live_prices", live_prices)
-        logger.info("Portfolio status retrieved with live prices for %d symbols", len(live_prices))
-    else:
-        pnl = await handle.query("get_pnl")
-        unrealized_pnl = await handle.query("get_unrealized_pnl")
-        logger.info("Portfolio status retrieved with last fill prices")
-    
-    # Calculate detailed position information
-    position_details = {}
-    total_position_value = 0.0
-    
-    for symbol, quantity in positions.items():
-        entry_price = entry_prices.get(symbol, 0.0)
-        current_price = live_prices.get(symbol, entry_price)  # Fallback to entry price if no live price
-        
-        # Calculate position values
-        entry_value = quantity * entry_price
-        current_value = quantity * current_price
-        position_pnl = current_value - entry_value
-        position_pnl_pct = (position_pnl / entry_value * 100) if entry_value > 0 else 0.0
-        
-        total_position_value += current_value
-        
-        position_details[symbol] = {
-            "quantity": quantity,
-            "entry_price": entry_price,
-            "current_price": current_price,
-            "entry_value": entry_value,
-            "current_value": current_value,
-            "position_pnl": position_pnl,
-            "position_pnl_pct": position_pnl_pct,
-            "price_is_live": symbol in live_prices
-        }
-    
-    # Calculate total portfolio value
-    total_portfolio_value = cash + total_position_value + scraped_profits
+        wf_id = os.environ.get("LEDGER_WF_ID", "mock-ledger")
+        logger.info("Fetching portfolio status from %s", wf_id)
+        try:
+            handle = client.get_workflow_handle(wf_id)
+            await handle.describe()
+        except RPCError as err:
+            if err.status == RPCStatusCode.NOT_FOUND:
+                handle = await client.start_workflow(
+                    ExecutionLedgerWorkflow.run,
+                    id=wf_id,
+                    task_queue="mcp-tools",
+                )
+            else:
+                raise
 
-    return {
-        "cash": cash,
-        "positions": positions,  # Legacy format for compatibility
-        "entry_prices": entry_prices,  # Legacy format for compatibility
-        "position_details": position_details,  # New detailed format
-        "total_position_value": total_position_value,
-        "total_portfolio_value": total_portfolio_value,
-        "total_pnl": pnl,
-        "realized_pnl": realized_pnl,
-        "unrealized_pnl": unrealized_pnl,
-        "scraped_profits": scraped_profits,
-        "available_cash": cash,  # Cash available for trading
-        "total_cash_value": cash + scraped_profits,  # Total cash including scraped profits
-        "price_data_quality": {
-            "live_prices_used": len(live_prices),
-            "total_positions": len(positions),
-            "using_stale_fallback": len(live_prices) < len(positions),
-            "price_fetch_errors": price_fetch_errors
-        },
-        "live_prices_used": live_prices,
-    }
+        cash = await handle.query("get_cash")
+        positions = await handle.query("get_positions")
+        entry_prices = await handle.query("get_entry_prices")
+        realized_pnl = await handle.query("get_realized_pnl")
+        scraped_profits = await handle.query("get_scraped_profits")
+
+        live_prices: Dict[str, float] = {}
+        price_fetch_errors: List[str] = []
+        if positions:
+            symbols = list(positions.keys())
+            for symbol in symbols:
+                wf_id = f"feature-{symbol.replace('/', '-')}"
+                try:
+                    feature_handle = client.get_workflow_handle(wf_id)
+                    price_info = await feature_handle.query("get_latest_price")
+                    if price_info["price"] is not None and price_info["age_seconds"] <= 60:
+                        live_prices[symbol] = price_info["price"]
+                    elif price_info["price"] is not None:
+                        price_fetch_errors.append(f"{symbol}: price is {price_info['age_seconds']:.1f}s stale")
+                    else:
+                        price_fetch_errors.append(f"{symbol}: no price data from feature workflow")
+                except Exception as exc:
+                    price_fetch_errors.append(f"{symbol}: failed to query feature workflow - {exc}")
+                    logger.warning("Failed to get latest price for %s: %s", symbol, exc)
+
+        if live_prices:
+            pnl = await handle.query("get_pnl_with_live_prices", live_prices)
+            unrealized_pnl = await handle.query("get_unrealized_pnl_with_live_prices", live_prices)
+        else:
+            pnl = await handle.query("get_pnl")
+            unrealized_pnl = await handle.query("get_unrealized_pnl")
+
+        position_details: Dict[str, Dict[str, float]] = {}
+        total_position_value = 0.0
+        for symbol, quantity in positions.items():
+            entry_price = entry_prices.get(symbol, 0.0)
+            current_price = live_prices.get(symbol, entry_price)
+            entry_value = quantity * entry_price
+            current_value = quantity * current_price
+            position_pnl = current_value - entry_value
+            position_pnl_pct = (position_pnl / entry_value * 100) if entry_value else 0.0
+            total_position_value += current_value
+            position_details[symbol] = {
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "entry_value": entry_value,
+                "current_value": current_value,
+                "position_pnl": position_pnl,
+                "position_pnl_pct": position_pnl_pct,
+                "price_is_live": symbol in live_prices,
+            }
+
+        total_portfolio_value = cash + total_position_value + scraped_profits
+        return {
+            "cash": cash,
+            "positions": positions,
+            "entry_prices": entry_prices,
+            "position_details": position_details,
+            "total_position_value": total_position_value,
+            "total_portfolio_value": total_portfolio_value,
+            "total_pnl": pnl,
+            "pnl": pnl,
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": unrealized_pnl,
+            "scraped_profits": scraped_profits,
+            "available_cash": cash,
+            "total_cash_value": cash + scraped_profits,
+            "price_data_quality": {
+                "live_prices_used": len(live_prices),
+                "total_positions": len(positions),
+                "using_stale_fallback": len(live_prices) < len(positions),
+                "price_fetch_errors": price_fetch_errors,
+            },
+            "live_prices_used": live_prices,
+            "status": "ok",
+        }
+    except Exception as exc:
+        logger.warning("Portfolio status fallback triggered: %s", exc)
+        return _fallback(str(exc))
 
 
 @app.tool(annotations={"title": "Get Transaction History", "readOnlyHint": True})
@@ -1476,6 +1480,15 @@ async def http_start_market_stream(request: Request) -> Response:
     interval_sec = int(body.get("interval_sec", 1))
     load_historical = bool(body.get("load_historical", True))
     result = await start_market_stream(symbols, interval_sec, load_historical)
+    return JSONResponse(result)
+
+
+@app.custom_route("/tools/subscribe_cex_stream", methods=["POST"])
+async def http_subscribe_cex_stream(request: Request) -> Response:
+    body = await request.json()
+    symbols = body.get("symbols") or []
+    interval_sec = int(body.get("interval_sec", 1))
+    result = await subscribe_cex_stream(symbols, interval_sec)
     return JSONResponse(result)
 
 @app.custom_route("/tools/get_portfolio_status", methods=["GET", "POST"])

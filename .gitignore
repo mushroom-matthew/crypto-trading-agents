@@ -19,3 +19,4 @@ data/market_cache/
 data/
 AGENTS.md
 .cache/
+strategy_export.json

@@ -155,8 +155,8 @@ class ContextManager:
         
         current_tokens = self.count_tokens(conversation)
         
-        # If we're under the threshold, return as-is
-        if current_tokens <= self.summary_threshold:
+        should_summarize = current_tokens > self.summary_threshold or len(messages) > (self.min_recent_messages * 2)
+        if not should_summarize:
             return conversation
         
         # Ensure we keep minimum recent messages
@@ -174,7 +174,7 @@ class ContextManager:
         
         if len(messages) > self.min_recent_messages:
             older_messages = messages[:-self.min_recent_messages]
-            
+
             # Binary search to find optimal split point
             left, right = 0, len(older_messages)
             best_split = 0
@@ -189,9 +189,14 @@ class ContextManager:
                     right = mid - 1
                 else:
                     left = mid + 1
-            
+
             messages_to_summarize = older_messages[:best_split]
             messages_to_keep = older_messages[best_split:]
+            if not messages_to_summarize and older_messages:
+                # Force summarization of at least the earliest chunk when triggered
+                forced_split = max(1, len(older_messages) // 2)
+                messages_to_summarize = older_messages[:forced_split]
+                messages_to_keep = older_messages[forced_split:]
         
         # Create the new conversation
         result = []

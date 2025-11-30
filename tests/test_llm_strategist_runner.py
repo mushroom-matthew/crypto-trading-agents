@@ -89,3 +89,4 @@ def test_backtester_executes_trigger(monkeypatch):
     assert result.fills.shape[0] == 1
     assert result.daily_reports
     assert "judge_feedback" in result.daily_reports[-1]
+    assert "strategist_constraints" in result.daily_reports[-1]["judge_feedback"]

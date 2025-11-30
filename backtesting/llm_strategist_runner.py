@@ -16,6 +16,7 @@ from agents.analytics import IndicatorWindowConfig, PortfolioHistory, build_asse
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import StrategyPlanProvider
 from agents.strategies.risk_engine import RiskEngine
+from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
 from backtesting.dataset import load_ohlcv
 from schemas.llm_strategist import AssetState, LLMInput, PortfolioState, StrategyPlan
@@ -187,6 +188,8 @@ class LLMStrategistBacktester:
         self.current_day_key: str | None = None
         self.latest_daily_summary: Dict[str, Any] | None = None
         self.last_slot_report: Dict[str, Any] | None = None
+        self.memory_history: List[Dict[str, Any]] = []
+        self.judge_constraints: Dict[str, Any] = {}
         self.trigger_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.current_day_key: str | None = None
         self.latest_daily_summary: Dict[str, Any] | None = None
@@ -298,6 +301,9 @@ class LLMStrategistBacktester:
         if self.latest_daily_summary:
             context["latest_daily_report"] = self.latest_daily_summary
             context["judge_feedback"] = self.latest_daily_summary.get("judge_feedback")
+        context["strategy_memory"] = build_strategy_memory(self.memory_history)
+        if self.judge_constraints:
+            context["strategist_constraints"] = self.judge_constraints
         return LLMInput(
             portfolio=portfolio_state,
             assets=list(asset_states.values()),
@@ -347,6 +353,10 @@ class LLMStrategistBacktester:
                     summary = self._finalize_day(self.current_day_key, daily_dir)
                     if summary:
                         self.latest_daily_summary = summary
+                        self.memory_history.append(summary)
+                        judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
+                        if judge_constraints:
+                            self.judge_constraints = judge_constraints
                         daily_reports.append(summary)
                 self.current_day_key = day_key
                 asset_states = self._asset_states(ts)
@@ -432,6 +442,10 @@ class LLMStrategistBacktester:
             summary = self._finalize_day(self.current_day_key, daily_dir)
             if summary:
                 self.latest_daily_summary = summary
+                self.memory_history.append(summary)
+                judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
+                if judge_constraints:
+                    self.judge_constraints = judge_constraints
                 daily_reports.append(summary)
 
         equity_df = pd.DataFrame(self.portfolio.equity_records)
@@ -517,7 +531,33 @@ class LLMStrategistBacktester:
             notes.append("Positive daily performance.")
         elif return_pct < -0.5:
             notes.append("Drawdown detected; tighten stops.")
+        constraints = {
+            "must_fix": [],
+            "vetoes": [],
+            "boost": [],
+            "regime_correction": "Maintain discipline until equity stabilizes.",
+            "sizing_adjustments": {},
+        }
+        if trade_count == 0:
+            constraints["must_fix"].append("Increase selectivity but avoid paralysis; at least one qualified trigger per day.")
+        if trade_count > 12:
+            constraints["vetoes"].append("Disable redundant scalp triggers bleeding cost.")
+            constraints["must_fix"].append("Cap total trades at 10 until judge score > 65.")
+        if return_pct > 0.5:
+            constraints["boost"].append("Favor trend_continuation setups when volatility is orderly.")
+            constraints["regime_correction"] = "Lean pro-trend but protect gains with trailing exits."
+        if return_pct < -0.5:
+            constraints["must_fix"].append("Tighten exits after 0.8% adverse move.")
+            constraints["vetoes"].append("Pause volatility_breakout triggers during drawdown.")
+            constraints["regime_correction"] = "Assume mixed regime until positive close recorded."
+        positions = summary.get("positions_end", {})
+        for symbol in positions.keys():
+            if return_pct < 0:
+                constraints["sizing_adjustments"][symbol] = "Cut risk by 25% until two winning days post drawdown."
+            elif return_pct > 0.5:
+                constraints["sizing_adjustments"][symbol] = "Allow full allocation for grade A triggers only."
         return {
             "score": max(0.0, min(100.0, round(score, 1))),
             "notes": " ".join(notes),
+            "strategist_constraints": constraints,
         }
