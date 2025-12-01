@@ -71,11 +71,11 @@ class ExecutionEngine:
         self,
         plan: CompiledPlan,
         run: StrategyRun,
-        strategy_plan: StrategyPlan | None,
+        strategy_plan: StrategyPlan,
         constraints: JudgeConstraints | None,
     ) -> Dict[str, Optional[int]]:
         judge_limit = constraints.max_trades_per_day if constraints else None
-        plan_limit = strategy_plan.max_trades_per_day if strategy_plan else None
+        plan_limit = strategy_plan.max_trades_per_day
         effective = None
         if judge_limit is not None:
             effective = judge_limit
@@ -83,15 +83,26 @@ class ExecutionEngine:
             effective = plan_limit if effective is None else min(effective, plan_limit)
         return {"max_trades_per_day": effective}
 
+    def _validate_plan_limits(self, strategy_plan: StrategyPlan) -> None:
+        if strategy_plan.max_trades_per_day is None:
+            raise ValueError("StrategyPlan missing max_trades_per_day")
+        if not strategy_plan.allowed_symbols:
+            raise ValueError("StrategyPlan missing allowed_symbols")
+        if not strategy_plan.allowed_directions:
+            raise ValueError("StrategyPlan missing allowed_directions")
+        if not strategy_plan.allowed_trigger_categories:
+            raise ValueError("StrategyPlan missing allowed_trigger_categories")
+
     def evaluate_trigger(
         self,
         run: StrategyRun,
         compiled_plan: CompiledPlan,
-        strategy_plan: StrategyPlan | None,
+        strategy_plan: StrategyPlan,
         constraints: JudgeConstraints | None,
         trigger: CompiledTrigger,
         bar_timestamp: datetime,
     ) -> TradeEvent | None:
+        self._validate_plan_limits(strategy_plan)
         state = self._get_state(run.run_id, bar_timestamp)
         limits = self._effective_limits(compiled_plan, run, strategy_plan, constraints)
 

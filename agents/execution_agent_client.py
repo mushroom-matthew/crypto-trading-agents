@@ -379,6 +379,7 @@ def _plan_payload_for_spec(run: StrategyRun, spec: StrategySpec) -> Dict[str, An
             }
         ],
         "max_trades_per_day": EXECUTION_PLAN_MAX_TRADES,
+        "min_trades_per_day": None,
         "allowed_symbols": run.config.symbols or [spec.market],
         "allowed_directions": ["long"],
         "allowed_trigger_categories": [_spec_category(spec)],

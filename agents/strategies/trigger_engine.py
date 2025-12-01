@@ -46,7 +46,17 @@ class TriggerEngine:
     def _context(self, indicator: IndicatorSnapshot, asset_state: AssetState | None) -> dict[str, float | str | None]:
         """Build evaluation context, including cross-timeframe aliases."""
 
+        def _alias_key(key: str) -> str | None:
+            parts = key.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                return parts[0]
+            return None
+
         context = indicator.model_dump()
+        for key, value in list(context.items()):
+            alias = _alias_key(key)
+            if alias and alias not in context:
+                context[alias] = value
         upper = context.get("bollinger_upper")
         lower = context.get("bollinger_lower")
         if upper is not None and lower is not None:
@@ -65,6 +75,9 @@ class TriggerEngine:
                         if other is not None:
                             context[f"{prefix}_bollinger_middle"] = (value + other) / 2.0
                     context[f"{prefix}_{key}"] = value
+                    alias = _alias_key(key)
+                    if alias:
+                        context[f"{prefix}_{alias}"] = value
         return context
 
     def _position_direction(self, symbol: str, portfolio: PortfolioState) -> Literal["long", "short", "flat"]:
@@ -88,6 +101,7 @@ class TriggerEngine:
         indicator: IndicatorSnapshot,
         portfolio: PortfolioState,
         bar: Bar,
+        risk_blocks: list[tuple[str, str]] | None = None,
     ) -> Order | None:
         desired = trigger.direction
         current = self._position_direction(trigger.symbol, portfolio)
@@ -99,6 +113,9 @@ class TriggerEngine:
             return None
         qty = self.risk_engine.size_position(trigger.symbol, bar.close, portfolio, indicator)
         if qty <= 0:
+            reason = self.risk_engine.last_block_reason
+            if risk_blocks is not None and reason:
+                risk_blocks.append((trigger.id, reason))
             return None
         side: Literal["buy", "sell"] = "buy" if desired == "long" else "sell"
         return Order(symbol=trigger.symbol, side=side, quantity=qty, price=bar.close, timeframe=bar.timeframe, reason=trigger.id, timestamp=bar.timestamp)
@@ -109,8 +126,9 @@ class TriggerEngine:
         indicator: IndicatorSnapshot,
         portfolio: PortfolioState,
         asset_state: AssetState | None = None,
-    ) -> List[Order]:
+    ) -> tuple[List[Order], List[tuple[str, str]]]:
         orders: List[Order] = []
+        risk_blocks: List[tuple[str, str]] = []
         context = self._context(indicator, asset_state)
         for trigger in self.plan.triggers:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
@@ -121,7 +139,7 @@ class TriggerEngine:
                     orders.append(exit_order)
                     continue
             if trigger.entry_rule and self.evaluator.evaluate(trigger.entry_rule, context):
-                entry = self._entry_order(trigger, indicator, portfolio, bar)
+                entry = self._entry_order(trigger, indicator, portfolio, bar, risk_blocks)
                 if entry:
                     orders.append(entry)
-        return orders
+        return orders, risk_blocks

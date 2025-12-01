@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -74,13 +75,47 @@ class StrategyPlanProvider:
         cache_path = self._cache_path(run_id, plan_date, llm_input)
         cached = self._load_cached(cache_path)
         if cached:
-            return cached
+            plan = self._enrich_plan(cached, llm_input)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(plan.to_json(indent=2))
+            return plan
         date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
             raise RuntimeError(f"LLM call budget exhausted for {date_key[1]}")
         plan = self.llm_client.generate_plan(llm_input, prompt_template=prompt_template)
+        plan = self._enrich_plan(plan, llm_input)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(plan.to_json(indent=2))
         self.daily_counts[date_key] += 1
         self.cost_tracker.record(llm_input.to_json(), plan.to_json())
+        return plan
+
+    def _enrich_plan(self, plan: StrategyPlan, llm_input: LLMInput) -> StrategyPlan:
+        """Ensure plan defaults (limits and allowed sets) are populated."""
+
+        plan = plan.model_copy(deep=True)
+        universe = sorted({asset.symbol for asset in llm_input.assets})
+        default_max = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "10"))
+        if plan.max_trades_per_day is None:
+            plan.max_trades_per_day = default_max
+        if not plan.allowed_symbols:
+            plan.allowed_symbols = universe
+        if not plan.allowed_directions:
+            plan.allowed_directions = ["long", "short"]
+        else:
+            plan.allowed_directions = sorted({direction for direction in plan.allowed_directions if direction})
+        if not plan.allowed_trigger_categories:
+            plan.allowed_trigger_categories = [
+                "trend_continuation",
+                "mean_reversion",
+                "volatility_breakout",
+                "reversal",
+                "emergency_exit",
+                "other",
+            ]
+        else:
+            plan.allowed_trigger_categories = sorted({category for category in plan.allowed_trigger_categories if category})
+        if any(trigger.category is None for trigger in plan.triggers):
+            if "other" not in plan.allowed_trigger_categories:
+                plan.allowed_trigger_categories.append("other")
         return plan

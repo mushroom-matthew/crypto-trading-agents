@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -84,8 +85,16 @@ def _base_plan(run_id: str) -> StrategyPlan:
 
 
 class StubPlanProvider:
+    def __init__(self, cache_dir: Path) -> None:
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
     def get_plan(self, run_id, plan_date, llm_input, prompt_template=None):
         return _base_plan(run_id)
+
+    def _cache_path(self, run_id, plan_date, llm_input):
+        ident = f"{run_id}_{plan_date.isoformat().replace(':', '-')}"
+        return self.cache_dir / f"{ident}.json"
 
 
 def _events(count: int) -> list[dict]:
@@ -101,7 +110,7 @@ async def test_strategy_tools_server_end_to_end(monkeypatch, tmp_path):
     engine = ExecutionEngine()
     monkeypatch.setattr(execution_tools, "engine", engine)
 
-    service = StrategistPlanService(plan_provider=StubPlanProvider(), registry=registry)
+    service = StrategistPlanService(plan_provider=StubPlanProvider(tmp_path / "plan_cache"), registry=registry)
     monkeypatch.setattr(strategy_run_tools, "plan_service", service)
 
     config = {
@@ -120,10 +129,12 @@ async def test_strategy_tools_server_end_to_end(monkeypatch, tmp_path):
     simulation = await mcp_simulate_day(run_id, plan_payload, compiled_payload, _events(3))
     assert simulation["executed"] == 2
     assert simulation["skipped"]["max_trades_per_day"] == 1
+    assert simulation["trades_attempted"] == 3
 
     next_day_event = [{"trigger_id": "btc_long", "timestamp": "2024-01-02T00:00:00+00:00"}]
     step = await mcp_run_live_step(run_id, plan_payload, compiled_payload, next_day_event)
     assert step["executed"] == 1
+    assert step["trades_attempted"] == 1
 
 
 @pytest.mark.asyncio

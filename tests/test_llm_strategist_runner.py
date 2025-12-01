@@ -20,9 +20,14 @@ class StubPlanProvider:
         self.plan = plan
         self.cost_tracker = LLMCostTracker()
         self.cache_dir = Path(".cache/strategy_plans")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def get_plan(self, run_id, plan_date, llm_input, prompt_template=None):  # noqa: D401
         return self.plan
+
+    def _cache_path(self, run_id, plan_date, llm_input):
+        ident = f"{run_id}_{plan_date.isoformat().replace(':', '-')}"
+        return self.cache_dir / f"{ident}.json"
 
 
 def _build_candles() -> pd.DataFrame:
@@ -100,5 +105,8 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
     assert result.final_positions["BTC-USD"] > 0
     assert result.fills.shape[0] == 1
     assert result.daily_reports
-    assert "judge_feedback" in result.daily_reports[-1]
-    assert "strategist_constraints" in result.daily_reports[-1]["judge_feedback"]
+    summary = result.daily_reports[-1]
+    assert "judge_feedback" in summary
+    assert "strategist_constraints" in summary["judge_feedback"]
+    assert "plan_limits" in summary
+    assert "limit_enforcement" in summary

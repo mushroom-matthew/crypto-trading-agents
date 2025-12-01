@@ -88,10 +88,12 @@ def simulate_day_tool(
         elif event.reason:
             skip_counts[event.reason] = skip_counts.get(event.reason, 0) + 1
 
+    trades_attempted = executed + sum(skip_counts.values())
     return {
         "run_id": run_id,
         "plan_id": strategy_plan.plan_id,
         "executed": executed,
+        "trades_attempted": trades_attempted,
         "skipped": skip_counts,
         "events": processed,
         "plan_trades": engine.plan_trades(run_id, strategy_plan.plan_id, last_day),
@@ -142,10 +144,12 @@ def run_live_step_tool(
         elif event.reason:
             skip_counts[event.reason] = skip_counts.get(event.reason, 0) + 1
 
+    trades_attempted = executed + sum(skip_counts.values())
     return {
         "run_id": run_id,
         "plan_id": strategy_plan.plan_id,
         "executed": executed,
+        "trades_attempted": trades_attempted,
         "skipped": skip_counts,
         "events": processed,
         "plan_trades": engine.plan_trades(run_id, strategy_plan.plan_id, last_day),

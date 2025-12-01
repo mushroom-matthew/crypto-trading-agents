@@ -42,6 +42,7 @@ def test_strategy_plan_assigns_defaults_for_legacy_json() -> None:
     assert plan.plan_id.startswith("plan_")
     assert plan.run_id is None
     assert plan.max_trades_per_day is None
+    assert plan.min_trades_per_day is None
     assert plan.allowed_symbols == []
     assert plan.allowed_directions == []
     assert plan.allowed_trigger_categories == []

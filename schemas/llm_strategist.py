@@ -138,6 +138,7 @@ class StrategyPlan(SerializableModel):
     risk_constraints: RiskConstraint
     sizing_rules: List[PositionSizingRule] = Field(default_factory=list)
     max_trades_per_day: int | None = Field(default=None, ge=0)
+    min_trades_per_day: int | None = Field(default=None, ge=0)
     allowed_symbols: List[str] = Field(default_factory=list)
     allowed_directions: List[TriggerDirection] = Field(default_factory=list)
     allowed_trigger_categories: List[TriggerCategory] = Field(default_factory=list)

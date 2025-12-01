@@ -20,6 +20,7 @@ class RiskEngine:
         self.constraints = constraints
         self.sizing_rules: Dict[str, PositionSizingRule] = dict(sizing_rules)
         self.daily_anchor_equity = daily_anchor_equity
+        self.last_block_reason: str | None = None
 
     def _fraction(self, pct: float | None) -> float:
         return (pct or 0.0) / 100.0
@@ -94,17 +95,39 @@ class RiskEngine:
         portfolio: PortfolioState,
         indicator: IndicatorSnapshot,
     ) -> float:
-        if price <= 0 or not self._within_daily_loss(portfolio.equity):
+        self.last_block_reason = None
+        if price <= 0:
+            self.last_block_reason = "invalid_price"
+            return 0.0
+        if not self._within_daily_loss(portfolio.equity):
+            self.last_block_reason = "max_daily_loss_pct"
             return 0.0
         rule = self._rule_for(symbol)
         desired_notional = self._notional_from_rule(rule, portfolio, indicator)
         if desired_notional <= 0:
+            self.last_block_reason = "sizing_zero"
             return 0.0
-        caps = [
-            self._position_risk_cap(portfolio),
-            self._available_symbol_capacity(symbol, price, portfolio),
-            self._available_portfolio_capacity(portfolio),
-        ]
-        allowed_notional = min(filter(lambda val: val > 0, caps), default=0.0)
-        final = min(desired_notional, allowed_notional) if allowed_notional > 0 else 0.0
-        return max(0.0, final / price)
+
+        caps = {
+            "max_position_risk_pct": self._position_risk_cap(portfolio),
+            "max_symbol_exposure_pct": self._available_symbol_capacity(symbol, price, portfolio),
+            "max_portfolio_exposure_pct": self._available_portfolio_capacity(portfolio),
+        }
+        positive_caps = {name: value for name, value in caps.items() if value > 0}
+        if not positive_caps:
+            self.last_block_reason = "insufficient_capacity"
+            return 0.0
+        limiting_name, limiting_value = min(positive_caps.items(), key=lambda item: item[1])
+        if limiting_value <= 0:
+            self.last_block_reason = limiting_name
+            return 0.0
+        final = min(desired_notional, limiting_value)
+        if final <= 0:
+            self.last_block_reason = limiting_name
+            return 0.0
+        quantity = max(0.0, final / price)
+        if quantity <= 0:
+            self.last_block_reason = limiting_name
+        else:
+            self.last_block_reason = None
+        return quantity

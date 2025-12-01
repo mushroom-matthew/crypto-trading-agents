@@ -25,6 +25,15 @@ from tools import execution_tools
 from trading_core.trigger_compiler import compile_plan
 
 
+def _new_limit_entry() -> Dict[str, Any]:
+    return {
+        "trades_attempted": 0,
+        "trades_executed": 0,
+        "skipped": defaultdict(int),
+        "risk_block_breakdown": defaultdict(int),
+    }
+
+
 def _ensure_timestamp_index(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.index, pd.DatetimeIndex):
         return df
@@ -197,6 +206,8 @@ class LLMStrategistBacktester:
         self.last_slot_report: Dict[str, Any] | None = None
         self.memory_history: List[Dict[str, Any]] = []
         self.judge_constraints: Dict[str, Any] = {}
+        self.limit_enforcement_by_day: Dict[str, Dict[str, Any]] = defaultdict(_new_limit_entry)
+        self.plan_limits_by_day: Dict[str, Dict[str, Any]] = {}
 
     def _normalize_market_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
         normalized: Dict[str, Dict[str, pd.DataFrame]] = {}
@@ -345,10 +356,20 @@ class LLMStrategistBacktester:
         orders: List[Order],
         plan_payload: Dict[str, Any] | None,
         compiled_payload: Dict[str, Any] | None,
+        risk_blocks: List[tuple[str, str]] | None = None,
     ) -> List[Dict[str, Any]]:
         executed_records: List[Dict[str, Any]] = []
+        limit_entry = self.limit_enforcement_by_day[day_key]
+        if risk_blocks:
+            for _, reason in risk_blocks:
+                limit_entry["trades_attempted"] += 1
+                limit_entry["skipped"][reason] += 1
+                limit_entry["risk_block_breakdown"][reason] += 1
+                self.skipped_activity_by_day[day_key][reason] += 1
         if not plan_payload or not compiled_payload:
             for order in orders:
+                limit_entry["trades_attempted"] += 1
+                limit_entry["trades_executed"] += 1
                 self.portfolio.execute(order)
                 executed_records.append(
                     {
@@ -374,7 +395,9 @@ class LLMStrategistBacktester:
             )
             events = result.get("events", [])
             event = events[-1] if events else None
+            limit_entry["trades_attempted"] += 1
             if event and event.get("action") == "executed":
+                limit_entry["trades_executed"] += 1
                 self.portfolio.execute(order)
                 executed_records.append(
                     {
@@ -389,6 +412,7 @@ class LLMStrategistBacktester:
                 self.trigger_activity_by_day[day_key][order.reason] += 1
             else:
                 reason = event.get("reason") if event and event.get("reason") else "blocked"
+                limit_entry["skipped"][reason] += 1
                 self.skipped_activity_by_day[day_key][reason] += 1
         return executed_records
 
@@ -412,6 +436,8 @@ class LLMStrategistBacktester:
         self.slot_reports_by_day.clear()
         self.trigger_activity_by_day.clear()
         self.skipped_activity_by_day.clear()
+        self.limit_enforcement_by_day.clear()
+        self.plan_limits_by_day.clear()
         self.current_day_key = None
         self.latest_daily_summary = None
         self.last_slot_report = None
@@ -473,8 +499,15 @@ class LLMStrategistBacktester:
                         "regime": current_plan.regime,
                         "num_triggers": len(current_plan.triggers),
                         "max_trades_per_day": current_plan.max_trades_per_day,
+                        "min_trades_per_day": current_plan.min_trades_per_day,
                     }
                 )
+                self.plan_limits_by_day[day_key] = {
+                    "plan_id": current_plan.plan_id,
+                    "max_trades_per_day": current_plan.max_trades_per_day,
+                    "min_trades_per_day": current_plan.min_trades_per_day,
+                    "allowed_symbols": current_plan.allowed_symbols,
+                }
             if trigger_engine is None or current_plan is None:
                 continue
 
@@ -490,13 +523,14 @@ class LLMStrategistBacktester:
                     indicator = compute_indicator_snapshot(subset, symbol=pair, timeframe=timeframe, config=self.window_configs[timeframe])
                     portfolio_state = self.portfolio.portfolio_state(ts)
                     asset_state = active_assets.get(pair)
-                    orders = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state)
+                    orders, risk_blocks = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state)
                     executed_records = self._process_orders_with_limits(
                         run_id,
                         day_key,
                         orders,
                         current_plan_payload,
                         current_compiled_payload,
+                        risk_blocks,
                     )
                     slot_orders.extend(executed_records)
                     if timeframe == self.timeframes[0]:
@@ -575,7 +609,11 @@ class LLMStrategistBacktester:
         indicator_context = reports[-1].get("indicator_context", {})
         triggers = self.trigger_activity_by_day.pop(day_key, {})
         top_triggers = sorted(triggers.items(), key=lambda kv: kv[1], reverse=True)[:3]
-        skipped_limits = self.skipped_activity_by_day.pop(day_key, {})
+        limit_entry = self.limit_enforcement_by_day.pop(day_key, _new_limit_entry())
+        skipped_counts = dict(limit_entry["skipped"])
+        skipped_limits = self.skipped_activity_by_day.pop(day_key, skipped_counts)
+        risk_breakdown = dict(limit_entry["risk_block_breakdown"])
+        plan_limits = self.plan_limits_by_day.pop(day_key, None)
         summary = {
             "date": day_key,
             "start_equity": start_equity,
@@ -587,6 +625,23 @@ class LLMStrategistBacktester:
             "top_triggers": top_triggers,
             "skipped_due_to_limits": skipped_limits,
         }
+        blocked_daily_cap = skipped_counts.get("max_trades_per_day", 0)
+        blocked_symbol_veto = skipped_counts.get("judge_disabled_trigger", 0) + skipped_counts.get("judge_disabled_category", 0)
+        blocked_risk = sum(risk_breakdown.values())
+        summary["limit_enforcement"] = {
+            "trades_attempted": limit_entry["trades_attempted"],
+            "trades_executed": limit_entry["trades_executed"],
+            "trades_blocked": skipped_counts,
+            "trades_blocked_by_daily_cap": blocked_daily_cap,
+            "trades_blocked_by_symbol_veto": blocked_symbol_veto,
+            "trades_blocked_by_risk": blocked_risk,
+            "risk_block_breakdown": risk_breakdown,
+        }
+        if plan_limits:
+            summary["plan_limits"] = plan_limits
+            min_trades = plan_limits.get("min_trades_per_day") or 0
+            if min_trades and summary["limit_enforcement"]["trades_executed"] < min_trades:
+                summary["missed_min_trades"] = True
         summary["judge_feedback"] = self._judge_feedback(summary)
         (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))
         return summary

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agents.strategies.plan_provider import StrategyPlanProvider
-from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
+from schemas.judge_feedback import DisplayConstraints, JudgeFeedback, JudgeConstraints
 from schemas.llm_strategist import (
     AssetState,
     IndicatorSnapshot,
@@ -71,11 +71,17 @@ def _base_plan() -> StrategyPlan:
 
 
 class StubPlanProvider:
-    def __init__(self, plan: StrategyPlan) -> None:
+    def __init__(self, plan: StrategyPlan, cache_dir: Path | None = None) -> None:
         self.plan = plan
+        self.cache_dir = cache_dir or Path(".cache/test_plans")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def get_plan(self, run_id, plan_date, llm_input, prompt_template=None):
         return self.plan.model_copy(deep=True)
+
+    def _cache_path(self, run_id, plan_date, llm_input):
+        ident = f"{run_id}_{plan_date.isoformat().replace(':', '-')}"
+        return self.cache_dir / f"{ident}.json"
 
 
 def test_plan_service_respects_judge_cap(tmp_path, monkeypatch):
@@ -93,7 +99,7 @@ def test_plan_service_respects_judge_cap(tmp_path, monkeypatch):
     assert result.run_id == run.run_id
     assert result.max_trades_per_day == 10
     assert set(result.allowed_symbols) == {"BTC-USD", "ETH-USD"}
-    assert result.allowed_directions == ["long"]
+    assert result.allowed_directions == ["long", "short"]
     stored = registry.get_strategy_run(run.run_id)
     assert stored.current_plan_id == result.plan_id
 
@@ -122,3 +128,26 @@ def test_generate_plan_tool_updates_run(tmp_path, monkeypatch):
     assert result["max_trades_per_day"] == 5
     stored = registry.get_strategy_run(run.run_id)
     assert stored.current_plan_id == result["plan_id"]
+
+
+def test_plan_service_applies_strategist_constraints(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7)
+    )
+    feedback = JudgeFeedback(
+        constraints=JudgeConstraints(max_trades_per_day=6, risk_mode="normal"),
+        strategist_constraints=DisplayConstraints(
+            must_fix=["At least one qualified trigger per day"],
+            sizing_adjustments={"BTC-USD": "Cut risk by 25% until two winning days"},
+        ),
+    )
+    run.latest_judge_feedback = feedback
+    registry.update_strategy_run(run)
+    plan = StrategistPlanService(plan_provider=StubPlanProvider(_base_plan()), registry=registry).generate_plan_for_run(
+        run.run_id, _llm_input()
+    )
+    assert plan.min_trades_per_day == 1
+    assert plan.max_trades_per_day == 3
+    sizing_rule = plan.sizing_rules[0]
+    assert sizing_rule.target_risk_pct == pytest.approx(0.75)
