@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional, Set
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 import logging
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -32,13 +32,16 @@ from agents.constants import (
     ORANGE, PINK, RESET, DEFAULT_OPENAI_MODEL, 
     DEFAULT_TEMPORAL_ADDRESS, DEFAULT_TEMPORAL_NAMESPACE,
     DEFAULT_TASK_QUEUE, EXECUTION_WF_ID, NUDGE_SCHEDULE_ID,
-    EXECUTION_AGENT
+EXECUTION_AGENT
 )
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import create_openai_client, init_langfuse
 from tools.strategy_executor import evaluate_signals, TradeSignal
 from tools.strategy_spec import PositionState, StrategySpec
+from tools import execution_tools
+from schemas.strategy_run import StrategyRun, StrategyRunConfig
+from services.strategy_run_registry import strategy_run_registry
 
 # Tools this agent is allowed to call
 ALLOWED_TOOLS = {
@@ -62,6 +65,8 @@ openai_client = create_openai_client()
 
 DEFAULT_STRATEGY_TIMEFRAME = os.environ.get("STRATEGY_TIMEFRAME", "15m")
 USE_LEGACY_LLM_EXECUTION = os.environ.get("USE_LEGACY_LLM_EXECUTION", "0") == "1"
+EXECUTION_STRATEGY_RUN_ID = os.environ.get("EXECUTION_STRATEGY_RUN_ID", "live-strategy-run")
+EXECUTION_PLAN_MAX_TRADES = int(os.environ.get("EXECUTION_PLAN_MAX_TRADES", "10"))
 
 SYSTEM_PROMPT = (
     "You are an autonomous portfolio management agent that analyzes market data and executes trading decisions "
@@ -311,6 +316,121 @@ def _build_position_state(
     )
 
 
+def _ensure_execution_run(symbols: Set[str]) -> StrategyRun:
+    ordered = sorted(symbols) or []
+    try:
+        run = strategy_run_registry.get_strategy_run(EXECUTION_STRATEGY_RUN_ID)
+    except KeyError:
+        config = StrategyRunConfig(
+            symbols=ordered,
+            timeframes=[DEFAULT_STRATEGY_TIMEFRAME],
+            history_window_days=30,
+            plan_cadence_hours=24,
+        )
+        run = strategy_run_registry.create_strategy_run(config=config, run_id=EXECUTION_STRATEGY_RUN_ID)
+        return run
+    if ordered and ordered != run.config.symbols:
+        run.config.symbols = ordered
+        run = strategy_run_registry.update_strategy_run(run)
+    return run
+
+
+def _spec_category(spec: StrategySpec) -> str:
+    mapping = {
+        "trend": "trend_continuation",
+        "mean_revert": "mean_reversion",
+        "breakout": "volatility_breakout",
+    }
+    return mapping.get(spec.mode, "other")
+
+
+def _plan_payload_for_spec(run: StrategyRun, spec: StrategySpec) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    risk = spec.risk
+    return {
+        "plan_id": spec.strategy_id,
+        "run_id": run.run_id,
+        "generated_at": now.isoformat(),
+        "valid_until": (now + timedelta(hours=24)).isoformat(),
+        "global_view": f"Spec-driven plan for {spec.market}",
+        "regime": "mixed",
+        "triggers": [
+            {
+                "id": spec.strategy_id,
+                "symbol": spec.market,
+                "direction": "long",
+                "timeframe": spec.timeframe,
+                "entry_rule": "True",
+                "exit_rule": "False",
+                "category": _spec_category(spec),
+            }
+        ],
+        "risk_constraints": {
+            "max_position_risk_pct": max(risk.risk_per_trade_fraction * 100.0, 0.0),
+            "max_symbol_exposure_pct": max(risk.max_fraction_of_balance * 100.0, 0.0),
+            "max_portfolio_exposure_pct": min(100.0, risk.max_fraction_of_balance * 100.0),
+            "max_daily_loss_pct": risk.max_drawdown_pct,
+        },
+        "sizing_rules": [
+            {
+                "symbol": spec.market,
+                "sizing_mode": "fixed_fraction",
+                "target_risk_pct": max(risk.risk_per_trade_fraction * 100.0, 0.0),
+            }
+        ],
+        "max_trades_per_day": EXECUTION_PLAN_MAX_TRADES,
+        "allowed_symbols": run.config.symbols or [spec.market],
+        "allowed_directions": ["long"],
+        "allowed_trigger_categories": [_spec_category(spec)],
+    }
+
+
+def _compiled_payload_for_spec(plan_payload: Dict[str, Any]) -> Dict[str, Any]:
+    trigger = plan_payload["triggers"][0]
+    return {
+        "plan_id": plan_payload["plan_id"],
+        "run_id": plan_payload["run_id"],
+        "triggers": [
+            {
+                "trigger_id": trigger["id"],
+                "symbol": trigger["symbol"],
+                "direction": trigger["direction"],
+                "category": trigger.get("category"),
+                "entry": {"source": "True", "normalized": "True"},
+                "exit": None,
+            }
+        ],
+    }
+
+
+def _should_execute_signal(run: StrategyRun, spec: StrategySpec, ts: int) -> Tuple[bool, str]:
+    if spec.strategy_id is None:
+        return True, ""
+    plan_payload = _plan_payload_for_spec(run, spec)
+    compiled_payload = _compiled_payload_for_spec(plan_payload)
+    judge_payload = run.latest_judge_feedback.model_dump() if run.latest_judge_feedback else None
+    events = [
+        {
+            "trigger_id": spec.strategy_id,
+            "timestamp": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+        }
+    ]
+    result = execution_tools.run_live_step_tool(
+        run.run_id,
+        plan_payload,
+        compiled_payload,
+        events,
+        judge_feedback_payload=judge_payload,
+    )
+    event_list = result.get("events", [])
+    if not event_list:
+        return True, ""
+    outcome = event_list[-1]
+    if outcome.get("action") == "executed":
+        return True, ""
+    return False, outcome.get("reason", "blocked")
+
+
 def _build_order_payload(
     symbol: str,
     signal: TradeSignal,
@@ -371,6 +491,7 @@ async def _execute_strategy_specs(
 ) -> None:
     if not symbols:
         return
+    run = _ensure_execution_run(symbols)
     try:
         strategy_handle = temporal.get_workflow_handle("strategy-spec-store")
         await strategy_handle.describe()
@@ -416,6 +537,15 @@ async def _execute_strategy_specs(
             )
             if not payload:
                 continue
+            if signal.side == "buy":
+                allowed, skip_reason = _should_execute_signal(run, spec, ts)
+                if not allowed:
+                    logger.info(
+                        "[ExecutionAgent] Skipping %s due to %s",
+                        spec.strategy_id,
+                        skip_reason or "limit",
+                    )
+                    continue
             if signal.side == "buy":
                 spend = payload["orders"][0]["qty"] * features["price"]
                 cash_available = max(cash_available - spend, 0.0)

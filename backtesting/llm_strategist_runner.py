@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
@@ -20,6 +19,10 @@ from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
 from backtesting.dataset import load_ohlcv
 from schemas.llm_strategist import AssetState, LLMInput, PortfolioState, StrategyPlan
+from services.strategy_run_registry import StrategyRunConfig, StrategyRunRegistry, strategy_run_registry
+from services.strategist_plan_service import StrategistPlanService
+from tools import execution_tools
+from trading_core.trigger_compiler import compile_plan
 
 
 def _ensure_timestamp_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -151,6 +154,7 @@ class LLMStrategistBacktester:
         prompt_template_path: Path | None = None,
         plan_provider: StrategyPlanProvider | None = None,
         market_data: Dict[str, Dict[str, pd.DataFrame]] | None = None,
+        run_registry: StrategyRunRegistry | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -180,24 +184,19 @@ class LLMStrategistBacktester:
         self.calls_per_day = max(1, llm_calls_per_day)
         self.plan_interval = timedelta(hours=24 / self.calls_per_day)
         self.plan_provider = plan_provider or StrategyPlanProvider(llm_client, cache_dir=cache_dir, llm_calls_per_day=self.calls_per_day)
+        self.run_registry = run_registry or strategy_run_registry
+        self.plan_service = StrategistPlanService(plan_provider=self.plan_provider, registry=self.run_registry)
         self.window_configs = {tf: IndicatorWindowConfig(timeframe=tf) for tf in self.timeframes}
         self.risk_params = risk_params
         self.prompt_template = prompt_template_path.read_text() if prompt_template_path and prompt_template_path.exists() else None
         self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.trigger_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.skipped_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.current_day_key: str | None = None
         self.latest_daily_summary: Dict[str, Any] | None = None
         self.last_slot_report: Dict[str, Any] | None = None
         self.memory_history: List[Dict[str, Any]] = []
         self.judge_constraints: Dict[str, Any] = {}
-        self.trigger_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        self.current_day_key: str | None = None
-        self.latest_daily_summary: Dict[str, Any] | None = None
-        self.last_slot_report: Dict[str, Any] | None = None
-        self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self.current_day_key: str | None = None
-        self.latest_daily_summary: Dict[str, Any] | None = None
-        self.last_slot_report: Dict[str, Any] | None = None
 
     def _normalize_market_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
         normalized: Dict[str, Dict[str, pd.DataFrame]] = {}
@@ -311,6 +310,20 @@ class LLMStrategistBacktester:
             global_context=context,
         )
 
+    def _ensure_strategy_run(self, run_id: str) -> None:
+        try:
+            self.run_registry.get_strategy_run(run_id)
+        except KeyError:
+            history_days = max(1, (self.end - self.start).days if self.start and self.end else 30)
+            cadence_hours = max(1, int(self.plan_interval.total_seconds() // 3600) or 1)
+            config = StrategyRunConfig(
+                symbols=self.pairs,
+                timeframes=self.timeframes,
+                history_window_days=history_days,
+                plan_cadence_hours=cadence_hours,
+            )
+            self.run_registry.create_strategy_run(config=config, run_id=run_id)
+
     def _build_bar(self, pair: str, timeframe: str, timestamp: datetime) -> Bar:
         df = self.market_data[pair][timeframe]
         row = df.loc[timestamp]
@@ -325,11 +338,68 @@ class LLMStrategistBacktester:
             volume=float(row.get("volume", 0.0)),
         )
 
+    def _process_orders_with_limits(
+        self,
+        run_id: str,
+        day_key: str,
+        orders: List[Order],
+        plan_payload: Dict[str, Any] | None,
+        compiled_payload: Dict[str, Any] | None,
+    ) -> List[Dict[str, Any]]:
+        executed_records: List[Dict[str, Any]] = []
+        if not plan_payload or not compiled_payload:
+            for order in orders:
+                self.portfolio.execute(order)
+                executed_records.append(
+                    {
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "quantity": order.quantity,
+                        "price": order.price,
+                        "timeframe": order.timeframe,
+                        "reason": order.reason,
+                    }
+                )
+                self.trigger_activity_by_day[day_key][order.reason] += 1
+            return executed_records
+
+        for order in orders:
+            timestamp = order.timestamp.isoformat()
+            events_payload = [{"trigger_id": order.reason, "timestamp": timestamp}]
+            result = execution_tools.run_live_step_tool(
+                run_id,
+                plan_payload,
+                compiled_payload,
+                events_payload,
+            )
+            events = result.get("events", [])
+            event = events[-1] if events else None
+            if event and event.get("action") == "executed":
+                self.portfolio.execute(order)
+                executed_records.append(
+                    {
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "quantity": order.quantity,
+                        "price": order.price,
+                        "timeframe": order.timeframe,
+                        "reason": order.reason,
+                    }
+                )
+                self.trigger_activity_by_day[day_key][order.reason] += 1
+            else:
+                reason = event.get("reason") if event and event.get("reason") else "blocked"
+                self.skipped_activity_by_day[day_key][reason] += 1
+        return executed_records
+
     def run(self, run_id: str) -> StrategistBacktestResult:
+        self._ensure_strategy_run(run_id)
         all_timestamps = sorted(
             {ts for pair in self.market_data.values() for df in pair.values() for ts in df.index if self.start <= ts <= self.end}
         )
         current_plan: StrategyPlan | None = None
+        current_plan_payload: Dict[str, Any] | None = None
+        current_compiled_payload: Dict[str, Any] | None = None
         trigger_engine: TriggerEngine | None = None
         plan_log: List[Dict[str, Any]] = []
         latest_prices: Dict[str, float] = {symbol: 0.0 for symbol in self.pairs}
@@ -341,24 +411,28 @@ class LLMStrategistBacktester:
         daily_dir.mkdir(parents=True, exist_ok=True)
         self.slot_reports_by_day.clear()
         self.trigger_activity_by_day.clear()
+        self.skipped_activity_by_day.clear()
         self.current_day_key = None
         self.latest_daily_summary = None
         self.last_slot_report = None
 
         for ts in all_timestamps:
-            new_day = current_plan is None or ts >= current_plan.valid_until
-            if new_day:
-                day_key = ts.date().isoformat()
-                if self.current_day_key and self.current_day_key != day_key:
-                    summary = self._finalize_day(self.current_day_key, daily_dir)
-                    if summary:
-                        self.latest_daily_summary = summary
-                        self.memory_history.append(summary)
-                        judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
-                        if judge_constraints:
-                            self.judge_constraints = judge_constraints
-                        daily_reports.append(summary)
+            day_key = ts.date().isoformat()
+            if self.current_day_key and self.current_day_key != day_key:
+                summary = self._finalize_day(self.current_day_key, daily_dir)
+                if summary:
+                    self.latest_daily_summary = summary
+                    self.memory_history.append(summary)
+                    judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
+                    if judge_constraints:
+                        self.judge_constraints = judge_constraints
+                    daily_reports.append(summary)
+            if self.current_day_key != day_key:
                 self.current_day_key = day_key
+                execution_tools.reset_run_state(run_id)
+
+            new_plan_needed = current_plan is None or ts >= current_plan.valid_until
+            if new_plan_needed:
                 asset_states = self._asset_states(ts)
                 if not asset_states:
                     continue
@@ -370,13 +444,21 @@ class LLMStrategistBacktester:
                 slot_index = elapsed // slot_seconds
                 slot_start = day_start + timedelta(seconds=slot_index * slot_seconds)
                 slot_end = min(slot_start + self.plan_interval, day_start + timedelta(days=1))
-                current_plan = self.plan_provider.get_plan(run_id, slot_start, llm_input, prompt_template=self.prompt_template)
+                current_plan = self.plan_service.generate_plan_for_run(
+                    run_id,
+                    llm_input,
+                    plan_date=slot_start,
+                    prompt_template=self.prompt_template,
+                )
                 current_plan = current_plan.model_copy(
                     update={
                         "generated_at": slot_start,
                         "valid_until": slot_end,
                     }
                 )
+                compiled_plan = compile_plan(current_plan)
+                current_plan_payload = current_plan.model_dump()
+                current_compiled_payload = compiled_plan.model_dump()
                 risk_engine = RiskEngine(
                     current_plan.risk_constraints,
                     {rule.symbol: rule for rule in current_plan.sizing_rules},
@@ -385,10 +467,12 @@ class LLMStrategistBacktester:
                 trigger_engine = TriggerEngine(current_plan, risk_engine)
                 plan_log.append(
                     {
+                        "plan_id": current_plan.plan_id,
                         "generated_at": current_plan.generated_at.isoformat(),
                         "valid_until": current_plan.valid_until.isoformat(),
                         "regime": current_plan.regime,
                         "num_triggers": len(current_plan.triggers),
+                        "max_trades_per_day": current_plan.max_trades_per_day,
                     }
                 )
             if trigger_engine is None or current_plan is None:
@@ -399,9 +483,7 @@ class LLMStrategistBacktester:
             for pair in self.pairs:
                 for timeframe in self.timeframes:
                     df = self.market_data.get(pair, {}).get(timeframe)
-                    if df is None:
-                        continue
-                    if ts not in df.index:
+                    if df is None or ts not in df.index:
                         continue
                     bar = self._build_bar(pair, timeframe, ts)
                     subset = df[df.index <= ts]
@@ -409,19 +491,14 @@ class LLMStrategistBacktester:
                     portfolio_state = self.portfolio.portfolio_state(ts)
                     asset_state = active_assets.get(pair)
                     orders = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state)
-                    for order in orders:
-                        self.portfolio.execute(order)
-                        slot_orders.append(
-                            {
-                                "symbol": order.symbol,
-                                "side": order.side,
-                                "quantity": order.quantity,
-                                "price": order.price,
-                                "timeframe": order.timeframe,
-                                "reason": order.reason,
-                            }
-                        )
-                        self.trigger_activity_by_day[day_key][order.reason] += 1
+                    executed_records = self._process_orders_with_limits(
+                        run_id,
+                        day_key,
+                        orders,
+                        current_plan_payload,
+                        current_compiled_payload,
+                    )
+                    slot_orders.extend(executed_records)
                     if timeframe == self.timeframes[0]:
                         latest_prices[pair] = bar.close
             self.portfolio.mark_to_market(ts, latest_prices)
@@ -434,7 +511,6 @@ class LLMStrategistBacktester:
                 "orders": slot_orders,
                 "indicator_context": indicator_briefs,
             }
-            day_key = ts.date().isoformat()
             self.slot_reports_by_day[day_key].append(slot_report)
             self.last_slot_report = slot_report
 
@@ -499,6 +575,7 @@ class LLMStrategistBacktester:
         indicator_context = reports[-1].get("indicator_context", {})
         triggers = self.trigger_activity_by_day.pop(day_key, {})
         top_triggers = sorted(triggers.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        skipped_limits = self.skipped_activity_by_day.pop(day_key, {})
         summary = {
             "date": day_key,
             "start_equity": start_equity,
@@ -508,6 +585,7 @@ class LLMStrategistBacktester:
             "positions_end": reports[-1]["positions"],
             "indicator_context": indicator_context,
             "top_triggers": top_triggers,
+            "skipped_due_to_limits": skipped_limits,
         }
         summary["judge_feedback"] = self._judge_feedback(summary)
         (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))

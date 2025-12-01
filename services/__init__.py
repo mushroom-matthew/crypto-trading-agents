@@ -6,7 +6,7 @@ from .planner_agent import PlannerPreferences, PlannerRequest, PlannerResponse, 
 from .signal_agent_service import build_market_snapshots, SignalAgentService
 from .judge_agent_service import JudgeAgentService
 from .execution_agent_service import ExecutionAgentService
-from .backtester_service import BacktesterService
+from .strategy_run_registry import StrategyRunRegistry, registry as strategy_run_registry
 
 __all__ = [
     "Candle",
@@ -21,5 +21,6 @@ __all__ = [
     "SignalAgentService",
     "JudgeAgentService",
     "ExecutionAgentService",
-    "BacktesterService",
+    "StrategyRunRegistry",
+    "strategy_run_registry",
 ]

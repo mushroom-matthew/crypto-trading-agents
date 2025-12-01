@@ -47,6 +47,10 @@ class TriggerEngine:
         """Build evaluation context, including cross-timeframe aliases."""
 
         context = indicator.model_dump()
+        upper = context.get("bollinger_upper")
+        lower = context.get("bollinger_lower")
+        if upper is not None and lower is not None:
+            context["bollinger_middle"] = (upper + lower) / 2.0
         if asset_state:
             context["trend_state"] = asset_state.trend_state
             context["vol_state"] = asset_state.vol_state
@@ -56,6 +60,10 @@ class TriggerEngine:
                 for key, value in snapshot_dict.items():
                     if key in {"symbol", "timeframe", "as_of"}:
                         continue
+                    if key == "bollinger_upper":
+                        other = snapshot_dict.get("bollinger_lower")
+                        if other is not None:
+                            context[f"{prefix}_bollinger_middle"] = (value + other) / 2.0
                     context[f"{prefix}_{key}"] = value
         return context
 

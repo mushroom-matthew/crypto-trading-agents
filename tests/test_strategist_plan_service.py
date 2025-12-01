@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from agents.strategies.plan_provider import StrategyPlanProvider
+from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
+from schemas.llm_strategist import (
+    AssetState,
+    IndicatorSnapshot,
+    LLMInput,
+    PortfolioState,
+    PositionSizingRule,
+    RiskConstraint,
+    StrategyPlan,
+    TriggerCondition,
+)
+from schemas.strategy_run import StrategyRunConfig
+from services.strategy_run_registry import StrategyRunRegistry
+from services.strategist_plan_service import StrategistPlanService
+from tools import strategy_run_tools
+
+
+def _llm_input() -> LLMInput:
+    ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    indicator = IndicatorSnapshot(symbol="BTC-USD", timeframe="1h", as_of=ts, close=40000.0)
+    asset = AssetState(symbol="BTC-USD", indicators=[indicator], trend_state="uptrend", vol_state="normal")
+    portfolio = PortfolioState(
+        timestamp=ts,
+        equity=100000.0,
+        cash=100000.0,
+        positions={},
+        realized_pnl_7d=0.0,
+        realized_pnl_30d=0.0,
+        sharpe_30d=0.0,
+        max_drawdown_90d=0.0,
+        win_rate_30d=0.0,
+        profit_factor_30d=0.0,
+    )
+    return LLMInput(portfolio=portfolio, assets=[asset], risk_params={"max_position_risk_pct": 1.0})
+
+
+def _base_plan() -> StrategyPlan:
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trigger = TriggerCondition(
+        id="btc_long",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="False",
+        category="trend_continuation",
+    )
+    return StrategyPlan(
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[trigger],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=1.0,
+            max_symbol_exposure_pct=25.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=None,
+    )
+
+
+class StubPlanProvider:
+    def __init__(self, plan: StrategyPlan) -> None:
+        self.plan = plan
+
+    def get_plan(self, run_id, plan_date, llm_input, prompt_template=None):
+        return self.plan.model_copy(deep=True)
+
+
+def test_plan_service_respects_judge_cap(tmp_path, monkeypatch):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD", "ETH-USD"], timeframes=["1h"], history_window_days=7)
+    )
+    run.latest_judge_feedback = JudgeFeedback(constraints=JudgeConstraints(max_trades_per_day=10, risk_mode="normal"))
+    registry.update_strategy_run(run)
+
+    plan = _base_plan()
+    service = StrategistPlanService(plan_provider=StubPlanProvider(plan), registry=registry)
+
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.run_id == run.run_id
+    assert result.max_trades_per_day == 10
+    assert set(result.allowed_symbols) == {"BTC-USD", "ETH-USD"}
+    assert result.allowed_directions == ["long"]
+    stored = registry.get_strategy_run(run.run_id)
+    assert stored.current_plan_id == result.plan_id
+
+
+def test_plan_service_applies_default_when_max_trades_missing(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    service = StrategistPlanService(plan_provider=StubPlanProvider(_base_plan()), registry=registry)
+    plan = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert plan.max_trades_per_day is not None
+
+
+def test_generate_plan_tool_updates_run(tmp_path, monkeypatch):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    run.latest_judge_feedback = JudgeFeedback(constraints=JudgeConstraints(max_trades_per_day=5, risk_mode="normal"))
+    registry.update_strategy_run(run)
+
+    plan = _base_plan()
+    service = StrategistPlanService(plan_provider=StubPlanProvider(plan), registry=registry)
+    monkeypatch.setattr(strategy_run_tools, "plan_service", service)
+    monkeypatch.setattr(strategy_run_tools, "registry", registry)
+
+    llm_input = _llm_input().model_dump()
+    result = strategy_run_tools.generate_plan_for_run_tool(run.run_id, llm_input)
+    assert result["max_trades_per_day"] == 5
+    stored = registry.get_strategy_run(run.run_id)
+    assert stored.current_plan_id == result["plan_id"]

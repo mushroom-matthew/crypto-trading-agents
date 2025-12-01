@@ -4,11 +4,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from agents.strategies.plan_provider import LLMCostTracker
 from backtesting.llm_strategist_runner import LLMStrategistBacktester
 from agents.strategies.llm_client import LLMClient
 from schemas.llm_strategist import PositionSizingRule, RiskConstraint, StrategyPlan, TriggerCondition
+from services.strategy_run_registry import StrategyRunRegistry
+from tools import execution_tools
+from trading_core.execution_engine import ExecutionEngine
 
 
 class StubPlanProvider:
@@ -43,7 +47,7 @@ def _risk_params() -> dict[str, float]:
     }
 
 
-def test_backtester_executes_trigger(monkeypatch):
+def test_backtester_executes_trigger(monkeypatch, tmp_path):
     now = datetime(2024, 1, 1, tzinfo=timezone.utc)
     plan = StrategyPlan(
         generated_at=now,
@@ -69,8 +73,15 @@ def test_backtester_executes_trigger(monkeypatch):
         sizing_rules=[
             PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=5.0)
         ],
+        max_trades_per_day=5,
+        allowed_symbols=["BTC-USD"],
+        allowed_directions=["long"],
+        allowed_trigger_categories=["trend_continuation"],
     )
     market_data = {"BTC-USD": {"1h": _build_candles()}}
+    run_registry = StrategyRunRegistry(tmp_path / "runs")
+    monkeypatch.setattr(execution_tools, "registry", run_registry)
+    monkeypatch.setattr(execution_tools, "engine", ExecutionEngine())
     backtester = LLMStrategistBacktester(
         pairs=["BTC-USD"],
         start=None,
@@ -83,6 +94,7 @@ def test_backtester_executes_trigger(monkeypatch):
         risk_params=_risk_params(),
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
+        run_registry=run_registry,
     )
     result = backtester.run(run_id="test-run")
     assert result.final_positions["BTC-USD"] > 0
