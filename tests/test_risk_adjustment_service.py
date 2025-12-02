@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+import pytest
+
+from schemas.judge_feedback import DisplayConstraints, JudgeFeedback
+from schemas.strategy_run import RiskLimitSettings, StrategyRun, StrategyRunConfig
+from services.risk_adjustment_service import (
+    apply_judge_risk_feedback,
+    effective_risk_limits,
+    multiplier_from_instruction,
+)
+
+
+def _run() -> StrategyRun:
+    return StrategyRun(
+        run_id="run_test",
+        config=StrategyRunConfig(
+            symbols=["BTC-USD"],
+            timeframes=["1h"],
+            history_window_days=7,
+            risk_limits=RiskLimitSettings(max_position_risk_pct=2.0),
+        ),
+    )
+
+
+def test_apply_feedback_tracks_and_restores_adjustments():
+    run = _run()
+    feedback = JudgeFeedback(
+        strategist_constraints=DisplayConstraints(
+            sizing_adjustments={"BTC-USD": "Cut risk by 25% until two winning days post drawdown."}
+        )
+    )
+    changed = apply_judge_risk_feedback(run, feedback, winning_day=False)
+    assert changed is True
+    assert "BTC-USD" in run.risk_adjustments
+    state = run.risk_adjustments["BTC-USD"]
+    assert state.multiplier == pytest.approx(0.75)
+    limits = effective_risk_limits(run)
+    assert limits.max_position_risk_pct == pytest.approx(1.5)
+    no_instruction_feedback = JudgeFeedback(strategist_constraints=DisplayConstraints())
+    apply_judge_risk_feedback(run, no_instruction_feedback, winning_day=True)
+    assert run.risk_adjustments["BTC-USD"].wins_progress == 1
+    apply_judge_risk_feedback(run, no_instruction_feedback, winning_day=True)
+    assert "BTC-USD" not in run.risk_adjustments
+    assert effective_risk_limits(run).max_position_risk_pct == pytest.approx(2.0)
+
+
+def test_multiplier_parser_handles_cap():
+    assert multiplier_from_instruction("Cap risk at 10% until calm returns.") == pytest.approx(0.10)
+    assert multiplier_from_instruction("Allow full allocation for grade A setups.") == pytest.approx(1.0)

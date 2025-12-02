@@ -13,7 +13,7 @@ from .llm_strategist import (
     TriggerDirection,
 )
 from .judge_feedback import DisplayConstraints, JudgeConstraints, JudgeFeedback
-from .strategy_run import StrategyRun, StrategyRunConfig
+from .strategy_run import RiskAdjustmentState, RiskLimitSettings, StrategyRun, StrategyRunConfig
 from .compiled_plan import CompiledPlan, CompiledTrigger, CompiledExpression
 
 __all__ = [
@@ -30,6 +30,8 @@ __all__ = [
     "DisplayConstraints",
     "JudgeConstraints",
     "JudgeFeedback",
+    "RiskAdjustmentState",
+    "RiskLimitSettings",
     "StrategyRun",
     "StrategyRunConfig",
     "CompiledPlan",

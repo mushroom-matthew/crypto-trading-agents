@@ -14,6 +14,8 @@ if __package__ is None:  # allow running as `python backtesting/cli.py`
 
 from services.strategy_config_store import load_all_plans
 from agents.strategies.llm_client import LLMClient
+from backtesting.risk_config import resolve_risk_limits
+from schemas.strategy_run import RiskLimitSettings
 from .llm_strategist_runner import LLMStrategistBacktester
 from .simulator import run_backtest, run_portfolio_backtest
 from .strategies import StrategyWrapperConfig, StrategyParameters
@@ -38,10 +40,11 @@ def main() -> None:
     parser.add_argument("--llm-cache-dir", default=".cache/strategy_plans")
     parser.add_argument("--llm-run-id", default="default")
     parser.add_argument("--llm-prompt", help="Optional prompt template path for the strategist")
-    parser.add_argument("--max-position-risk-pct", type=float, default=2.0)
-    parser.add_argument("--max-symbol-exposure-pct", type=float, default=25.0)
-    parser.add_argument("--max-portfolio-exposure-pct", type=float, default=80.0)
-    parser.add_argument("--max-daily-loss-pct", type=float, default=3.0)
+    parser.add_argument("--max-position-risk-pct", type=float, default=None, help="Override per-trade risk (% of equity)")
+    parser.add_argument("--max-symbol-exposure-pct", type=float, default=None, help="Override max exposure per symbol (% of equity)")
+    parser.add_argument("--max-portfolio-exposure-pct", type=float, default=None, help="Override gross portfolio exposure (% of equity)")
+    parser.add_argument("--max-daily-loss-pct", type=float, default=None, help="Override daily loss cap (% drawdown from daily anchor)")
+    parser.add_argument("--risk-config", help="Optional JSON/YAML file containing risk limits (keys: max_position_risk_pct, etc.)")
     parser.add_argument("--timeframes", nargs="+", default=["1h", "4h", "1d"], help="Timeframe list for strategist indicators")
     args = parser.parse_args()
 
@@ -85,12 +88,17 @@ def main() -> None:
         strategy_cfg.per_symbol_parameters = per_symbol_params
 
     if args.llm_strategist == "enabled":
-        risk_params = {
+        cli_risk_overrides = {
             "max_position_risk_pct": args.max_position_risk_pct,
             "max_symbol_exposure_pct": args.max_symbol_exposure_pct,
             "max_portfolio_exposure_pct": args.max_portfolio_exposure_pct,
             "max_daily_loss_pct": args.max_daily_loss_pct,
         }
+        risk_limits: RiskLimitSettings = resolve_risk_limits(
+            Path(args.risk_config) if args.risk_config else None,
+            cli_risk_overrides,
+        )
+        risk_params = risk_limits.to_risk_params()
         pairs = args.pairs or [args.pair]
         prompt_path = Path(args.llm_prompt) if args.llm_prompt else None
         backtester = LLMStrategistBacktester(

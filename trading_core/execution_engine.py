@@ -35,6 +35,7 @@ class TradeEvent:
     symbol: str
     action: ExecutionAction
     reason: str
+    detail: str | None = None
 
 
 @dataclass
@@ -136,8 +137,9 @@ class ExecutionEngine:
         self._validate_plan_limits(strategy_plan)
         state = self._get_state(run.run_id, bar_timestamp)
         limits = self._build_limits(run, strategy_plan, constraints)
+        is_emergency_exit = trigger.category == "emergency_exit"
 
-        if limits.max_trades_per_day and state.trades_today >= limits.max_trades_per_day:
+        if not is_emergency_exit and limits.max_trades_per_day and state.trades_today >= limits.max_trades_per_day:
             state.log_skip(BlockReason.DAILY_CAP.value)
             return TradeEvent(
                 timestamp=bar_timestamp,
@@ -145,9 +147,10 @@ class ExecutionEngine:
                 symbol=trigger.symbol,
                 action="skipped",
                 reason=BlockReason.DAILY_CAP.value,
+                detail=f"Reached max trades per day ({limits.max_trades_per_day})",
             )
 
-        if constraints:
+        if constraints and not is_emergency_exit:
             if trigger.trigger_id in constraints.disabled_trigger_ids:
                 state.log_skip(BlockReason.SYMBOL_VETO.value)
                 return TradeEvent(
@@ -156,6 +159,7 @@ class ExecutionEngine:
                     symbol=trigger.symbol,
                     action="skipped",
                     reason=BlockReason.SYMBOL_VETO.value,
+                    detail=f"Trigger {trigger.trigger_id} disabled by judge",
                 )
             if trigger.category and trigger.category in constraints.disabled_categories:
                 state.log_skip(BlockReason.CATEGORY.value)
@@ -165,9 +169,10 @@ class ExecutionEngine:
                     symbol=trigger.symbol,
                     action="skipped",
                     reason=BlockReason.CATEGORY.value,
+                    detail=f"Category {trigger.category} disabled by judge",
                 )
 
-        if limits.allowed_symbols and trigger.symbol not in limits.allowed_symbols:
+        if not is_emergency_exit and limits.allowed_symbols and trigger.symbol not in limits.allowed_symbols:
             state.log_skip(BlockReason.SYMBOL_VETO.value)
             return TradeEvent(
                 timestamp=bar_timestamp,
@@ -175,9 +180,10 @@ class ExecutionEngine:
                 symbol=trigger.symbol,
                 action="skipped",
                 reason=BlockReason.SYMBOL_VETO.value,
+                detail=f"Symbol {trigger.symbol} not allowed by plan",
             )
 
-        if limits.allowed_directions and trigger.direction not in limits.allowed_directions:
+        if not is_emergency_exit and limits.allowed_directions and trigger.direction not in limits.allowed_directions:
             state.log_skip(BlockReason.DIRECTION.value)
             return TradeEvent(
                 timestamp=bar_timestamp,
@@ -185,9 +191,10 @@ class ExecutionEngine:
                 symbol=trigger.symbol,
                 action="skipped",
                 reason=BlockReason.DIRECTION.value,
+                detail=f"Direction {trigger.direction} not permitted",
             )
         category = trigger.category or "other"
-        if limits.allowed_categories and category not in limits.allowed_categories:
+        if not is_emergency_exit and limits.allowed_categories and category not in limits.allowed_categories:
             state.log_skip(BlockReason.CATEGORY.value)
             return TradeEvent(
                 timestamp=bar_timestamp,
@@ -195,6 +202,7 @@ class ExecutionEngine:
                 symbol=trigger.symbol,
                 action="skipped",
                 reason=BlockReason.CATEGORY.value,
+                detail=f"Category {category} excluded by plan",
             )
 
         state.trades_today += 1
@@ -207,4 +215,5 @@ class ExecutionEngine:
             symbol=trigger.symbol,
             action="executed",
             reason="",
+            detail=None,
         )

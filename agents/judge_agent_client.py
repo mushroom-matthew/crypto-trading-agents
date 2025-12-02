@@ -30,6 +30,7 @@ from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import create_openai_client, init_langfuse
 from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
+from services.risk_adjustment_service import multiplier_from_instruction
 
 logger = setup_logging(__name__, level="INFO")
 
@@ -939,8 +940,9 @@ Return ONLY the improved system prompt, no explanations."""
                 constraints.min_trades_per_day = max(constraints.min_trades_per_day or 0, 1)
         for symbol, instruction in (display.sizing_adjustments or {}).items():
             lowered = instruction.lower()
-            if "cut risk" in lowered and "25" in lowered:
-                constraints.symbol_risk_multipliers[symbol] = 0.75
+            multiplier = multiplier_from_instruction(instruction)
+            if multiplier is not None and multiplier < 1.0:
+                constraints.symbol_risk_multipliers[symbol] = multiplier
 
 
 async def _watch_judge_preferences(client: Client, current_preferences: dict, judge_agent: JudgeAgent) -> None:

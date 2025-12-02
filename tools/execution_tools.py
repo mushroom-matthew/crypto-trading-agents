@@ -81,6 +81,7 @@ def simulate_day_tool(
                 "symbol": event.symbol,
                 "action": event.action,
                 "reason": event.reason,
+                "detail": event.detail,
             }
         )
         if event.action == "executed":
@@ -137,6 +138,7 @@ def run_live_step_tool(
                 "symbol": event.symbol,
                 "action": event.action,
                 "reason": event.reason,
+                "detail": event.detail,
             }
         )
         if event.action == "executed":

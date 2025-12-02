@@ -113,6 +113,10 @@ class RiskEngine:
             "max_symbol_exposure_pct": self._available_symbol_capacity(symbol, price, portfolio),
             "max_portfolio_exposure_pct": self._available_portfolio_capacity(portfolio),
         }
+        for name, value in caps.items():
+            if value <= 0:
+                self.last_block_reason = name
+                return 0.0
         positive_caps = {name: value for name, value in caps.items() if value > 0}
         if not positive_caps:
             self.last_block_reason = "insufficient_capacity"

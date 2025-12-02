@@ -6,6 +6,8 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Protocol
 
 from openai import OpenAI
@@ -51,7 +53,7 @@ class LLMClient:
         attempts = max(1, self.max_retries)
         for attempt in range(1, attempts + 1):
             try:
-                system_prompt = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "")
+                system_prompt = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "") or self._default_prompt()
                 with langfuse_span("llm_strategist.backtest", metadata={"model": self.model}) as span:
                     completion = self.client.responses.create(
                         model=self.model,
@@ -118,3 +120,13 @@ class LLMClient:
             cleaned.append(trig)
         data["triggers"] = cleaned
         return data
+
+    @staticmethod
+    @lru_cache(1)
+    def _default_prompt() -> str:
+        """Load bundled strategist prompt when no template/env override is provided."""
+
+        prompt_path = Path(__file__).resolve().parents[2] / "prompts" / "llm_strategist_prompt.txt"
+        if prompt_path.exists():
+            return prompt_path.read_text(encoding="utf-8").strip()
+        return ""

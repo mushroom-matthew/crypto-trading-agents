@@ -17,7 +17,7 @@ from schemas.llm_strategist import (
     StrategyPlan,
     TriggerCondition,
 )
-from schemas.strategy_run import StrategyRunConfig
+from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings, StrategyRunConfig
 from services.strategy_run_registry import StrategyRunRegistry
 from services.strategist_plan_service import StrategistPlanService
 from tools import strategy_run_tools
@@ -75,8 +75,10 @@ class StubPlanProvider:
         self.plan = plan
         self.cache_dir = cache_dir or Path(".cache/test_plans")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.last_llm_input: LLMInput | None = None
 
     def get_plan(self, run_id, plan_date, llm_input, prompt_template=None):
+        self.last_llm_input = llm_input
         return self.plan.model_copy(deep=True)
 
     def _cache_path(self, run_id, plan_date, llm_input):
@@ -171,3 +173,42 @@ def test_plan_service_respects_judge_structured_constraints(tmp_path):
     assert plan.min_trades_per_day == 2
     assert plan.max_trades_per_day == 6
     assert plan.sizing_rules[0].target_risk_pct == pytest.approx(0.5)
+
+
+def test_plan_service_overrides_risk_constraints_and_injects_llm_input(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    risk_limits = RiskLimitSettings(
+        max_position_risk_pct=3.5,
+        max_symbol_exposure_pct=40.0,
+        max_portfolio_exposure_pct=70.0,
+        max_daily_loss_pct=2.0,
+    )
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7, risk_limits=risk_limits)
+    )
+    plan = _base_plan()
+    stub = StubPlanProvider(plan)
+    service = StrategistPlanService(plan_provider=stub, registry=registry)
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.risk_constraints.max_position_risk_pct == pytest.approx(risk_limits.max_position_risk_pct)
+    assert result.risk_constraints.max_symbol_exposure_pct == pytest.approx(risk_limits.max_symbol_exposure_pct)
+    assert result.risk_constraints.max_portfolio_exposure_pct == pytest.approx(risk_limits.max_portfolio_exposure_pct)
+    assert result.risk_constraints.max_daily_loss_pct == pytest.approx(risk_limits.max_daily_loss_pct)
+    assert stub.last_llm_input is not None
+    assert stub.last_llm_input.risk_params["max_position_risk_pct"] == pytest.approx(risk_limits.max_position_risk_pct)
+
+
+def test_plan_service_scales_limits_with_active_adjustments(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7, risk_limits=RiskLimitSettings(max_position_risk_pct=2.0))
+    )
+    run.risk_adjustments = {"BTC-USD": RiskAdjustmentState(multiplier=0.5, instruction="Cut risk by 50%")}
+    registry.update_strategy_run(run)
+    plan = _base_plan()
+    stub = StubPlanProvider(plan)
+    service = StrategistPlanService(plan_provider=stub, registry=registry)
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert stub.last_llm_input is not None
+    assert stub.last_llm_input.risk_params["max_position_risk_pct"] == pytest.approx(1.0)
+    assert result.risk_constraints.max_position_risk_pct == pytest.approx(1.0)

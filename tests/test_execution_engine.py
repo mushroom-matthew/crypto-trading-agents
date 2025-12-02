@@ -116,3 +116,29 @@ def test_run_live_step_accumulates_day_state(tmp_path, monkeypatch):
     third = execution_tools.run_live_step_tool(run.run_id, plan.model_dump(), compiled.model_dump(), third_event)
     assert third["executed"] == 0
     assert third["skipped"][BlockReason.DAILY_CAP.value] == 1
+
+
+def test_emergency_exit_bypasses_daily_cap(tmp_path, monkeypatch):
+    registry, engine = _setup(monkeypatch, tmp_path)
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    registry.update_strategy_run(run)
+    plan = _strategy_plan(run.run_id, plan_limit=1)
+    emergency = TriggerCondition(
+        id="btc_exit",
+        symbol="BTC-USD",
+        direction="flat",
+        timeframe="1h",
+        entry_rule="timeframe=='1h'",
+        exit_rule="",
+        category="emergency_exit",
+    )
+    plan.triggers.append(emergency)
+    plan.allowed_trigger_categories.append("emergency_exit")
+    compiled = compile_plan(plan)
+
+    first = execution_tools.run_live_step_tool(run.run_id, plan.model_dump(), compiled.model_dump(), _events(1))
+    assert first["executed"] == 1
+    # Daily cap reached now; emergency exit should still execute
+    exit_event = [{"trigger_id": "btc_exit", "timestamp": "2024-01-01T01:00:00+00:00"}]
+    second = execution_tools.run_live_step_tool(run.run_id, plan.model_dump(), compiled.model_dump(), exit_event)
+    assert second["executed"] == 1

@@ -10,8 +10,10 @@ from typing import Optional
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import StrategyPlanProvider
 from schemas.judge_feedback import DisplayConstraints, JudgeFeedback
-from schemas.llm_strategist import LLMInput, StrategyPlan
+from schemas.llm_strategist import LLMInput, RiskConstraint, StrategyPlan
 from services.strategy_run_registry import StrategyRunRegistry, strategy_run_registry
+from services.risk_adjustment_service import effective_risk_limits
+from schemas.strategy_run import RiskLimitSettings
 
 
 def _default_plan_provider() -> StrategyPlanProvider:
@@ -42,8 +44,11 @@ class StrategistPlanService:
     ) -> StrategyPlan:
         run = self.registry.get_strategy_run(run_id)
         plan_date = plan_date or datetime.now(timezone.utc)
+        risk_limits = effective_risk_limits(run)
+        llm_input = self._llm_input_with_risk_overrides(llm_input, risk_limits)
         plan = self.plan_provider.get_plan(run_id, plan_date, llm_input, prompt_template=prompt_template)
         plan = plan.model_copy(deep=True)
+        plan.risk_constraints = self._merge_plan_risk_constraints(plan.risk_constraints, risk_limits)
         plan.run_id = run.run_id
         combined_symbols = sorted({*(run.config.symbols or []), *(asset.symbol for asset in llm_input.assets)})
         if not plan.allowed_symbols:
@@ -84,6 +89,18 @@ class StrategistPlanService:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(plan.to_json(indent=2))
         return plan
+
+    def _llm_input_with_risk_overrides(self, llm_input: LLMInput, risk_limits: RiskLimitSettings) -> LLMInput:
+        payload = llm_input.model_copy(deep=True)
+        params = dict(payload.risk_params or {})
+        params.update(risk_limits.to_risk_params())
+        payload.risk_params = params
+        return payload
+
+    @staticmethod
+    def _merge_plan_risk_constraints(plan_constraints: RiskConstraint, risk_limits: RiskLimitSettings) -> RiskConstraint:
+        overrides = risk_limits.to_risk_params()
+        return plan_constraints.model_copy(update=overrides)
 
     def _resolve_max_trades(
         self,
