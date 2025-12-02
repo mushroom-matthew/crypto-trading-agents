@@ -184,10 +184,12 @@ class TriggerEngine:
             try:
                 exit_fired = bool(trigger.exit_rule and self.evaluator.evaluate(trigger.exit_rule, context))
             except MissingIndicatorError as exc:
-                self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, str(exc), bar)
+                detail = f"{exc}; exit_rule='{trigger.exit_rule}'"
+                self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, detail, bar)
                 continue
             except RuleSyntaxError as exc:
-                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, str(exc), bar)
+                detail = f"{exc}; exit_rule='{trigger.exit_rule}'"
+                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar)
                 continue
             if exit_fired:
                 exit_order = self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_exit", block_entries)
@@ -197,10 +199,12 @@ class TriggerEngine:
             try:
                 entry_fired = bool(trigger.entry_rule and self.evaluator.evaluate(trigger.entry_rule, context))
             except MissingIndicatorError as exc:
-                self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, str(exc), bar)
+                detail = f"{exc}; entry_rule='{trigger.entry_rule}'"
+                self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, detail, bar)
                 continue
             except RuleSyntaxError as exc:
-                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, str(exc), bar)
+                detail = f"{exc}; entry_rule='{trigger.entry_rule}'"
+                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar)
                 continue
             if entry_fired:
                 entry = self._entry_order(trigger, indicator, portfolio, bar, block_entries)

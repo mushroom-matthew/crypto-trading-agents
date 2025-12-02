@@ -15,6 +15,7 @@ if __package__ is None:  # allow running as `python backtesting/cli.py`
 from services.strategy_config_store import load_all_plans
 from agents.strategies.llm_client import LLMClient
 from backtesting.risk_config import resolve_risk_limits
+from backtesting.logging_config import setup_backtest_logging
 from schemas.strategy_run import RiskLimitSettings
 from .llm_strategist_runner import LLMStrategistBacktester
 from .simulator import run_backtest, run_portfolio_backtest
@@ -46,7 +47,12 @@ def main() -> None:
     parser.add_argument("--max-daily-loss-pct", type=float, default=None, help="Override daily loss cap (% drawdown from daily anchor)")
     parser.add_argument("--risk-config", help="Optional JSON/YAML file containing risk limits (keys: max_position_risk_pct, etc.)")
     parser.add_argument("--timeframes", nargs="+", default=["1h", "4h", "1d"], help="Timeframe list for strategist indicators")
+    parser.add_argument("--log-level", default="INFO", help="Backtest log level (DEBUG, INFO, etc.)")
+    parser.add_argument("--log-file", help="Optional file path to append logs")
+    parser.add_argument("--log-json", action="store_true", help="Emit JSON-formatted logs")
     args = parser.parse_args()
+
+    setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
 
     start = datetime.fromisoformat(args.start)
     end = datetime.fromisoformat(args.end)

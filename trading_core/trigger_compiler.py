@@ -76,7 +76,9 @@ def _compile_expression(expr: str, allowed_names: Set[str]) -> CompiledExpressio
     try:
         parsed = ast.parse(normalized, mode="eval")
     except SyntaxError as exc:
-        raise TriggerCompilationError(f"Invalid syntax in expression '{expr}'") from exc
+        raise TriggerCompilationError(
+            f"Invalid syntax in expression '{expr}': {exc.msg} at {exc.offset}"
+        ) from exc
     _validate_ast(parsed, allowed_names)
     return CompiledExpression(source=expr, normalized=normalized)
 

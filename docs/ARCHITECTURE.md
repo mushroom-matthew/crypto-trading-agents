@@ -222,6 +222,7 @@ By reusing the same components across production agents, tests, and backtests, t
     --risk-config configs/risk_limits.example.json
   ```
   You can still override individual keys on the CLI (e.g., `--max-position-risk-pct 0.75`) to test alternate guardrails without editing the file.
+- **Verbose logging**: pass `--log-level DEBUG` (and optionally `--log-file logs/backtest.log` or `--log-json`) to `backtesting/cli.py` to enable rich tracing of data ingestion, strategy evaluation, trigger decisions, and portfolio updates. The new logging utilities stream to stdout and/or file with consistent formatting, making it straightforward to audit backtest behavior.
 - **Unified risk enforcement**: `TradeRiskEvaluator` funnels every trigger category through the same sizing/risk gate so trend, mean-reversion, reversal, and breakout entries all respect position and exposure limits. Emergency exits always pass through the helper but may bypass daily caps inside `ExecutionEngine` so that protective “flatten” actions execute instantly even if other constraints (daily trades, symbol vetoes) would normally block them.
 
 This layered architecture lets the team evolve agents, tools, or analytics independently while guaranteeing every high-level action flows through Temporal for replayability and through Langfuse/logs for auditability.

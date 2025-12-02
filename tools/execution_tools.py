@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List
-
-import json
 
 from schemas.compiled_plan import CompiledPlan
 from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
 from schemas.llm_strategist import StrategyPlan
 from services.strategy_run_registry import registry
-from trading_core.execution_engine import ExecutionEngine
+from trading_core.execution_engine import ExecutionEngine, TradeEvent
 
 
 engine = ExecutionEngine()
@@ -38,6 +37,17 @@ def _determine_constraints(run, judge_payload: Any | None) -> JudgeConstraints:
     if run.latest_judge_feedback:
         return run.latest_judge_feedback.constraints
     return JudgeFeedback().constraints
+
+
+def _serialize_event(event: TradeEvent) -> Dict[str, Any]:
+    return {
+        "timestamp": event.timestamp.isoformat(),
+        "trigger_id": event.trigger_id,
+        "symbol": event.symbol,
+        "action": event.action,
+        "reason": event.reason,
+        "detail": event.detail,
+    }
 
 
 def simulate_day_tool(
@@ -74,16 +84,7 @@ def simulate_day_tool(
         event = engine.evaluate_trigger(run, compiled_plan, strategy_plan, constraints, trigger, timestamp)
         if not event:
             continue
-        processed.append(
-            {
-                "timestamp": event.timestamp.isoformat(),
-                "trigger_id": event.trigger_id,
-                "symbol": event.symbol,
-                "action": event.action,
-                "reason": event.reason,
-                "detail": event.detail,
-            }
-        )
+        processed.append(_serialize_event(event))
         if event.action == "executed":
             executed += 1
         elif event.reason:
@@ -131,16 +132,7 @@ def run_live_step_tool(
         event = engine.evaluate_trigger(run, compiled_plan, strategy_plan, constraints, trigger, timestamp)
         if not event:
             continue
-        processed.append(
-            {
-                "timestamp": event.timestamp.isoformat(),
-                "trigger_id": event.trigger_id,
-                "symbol": event.symbol,
-                "action": event.action,
-                "reason": event.reason,
-                "detail": event.detail,
-            }
-        )
+        processed.append(_serialize_event(event))
         if event.action == "executed":
             executed += 1
         elif event.reason:

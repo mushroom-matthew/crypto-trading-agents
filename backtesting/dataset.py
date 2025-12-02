@@ -7,11 +7,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+import logging
+
 import ccxt
 import pandas as pd
 
 
 OHLCVColumns = Literal["open", "high", "low", "close", "volume"]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,6 +48,13 @@ def _download(pair: str, timeframe: str, start: datetime, end: datetime) -> pd.D
     since = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
     data: list[list[float]] = []
+    logger.debug(
+        "Downloading OHLCV pair=%s timeframe=%s start=%s end=%s",
+        pair,
+        timeframe,
+        start.isoformat(),
+        end.isoformat(),
+    )
     while since < end_ms:
         batch = exchange.fetch_ohlcv(pair, timeframe, since=since)
         if not batch:
@@ -87,11 +98,22 @@ def load_ohlcv(
     cache_path = _cache_path(pair, timeframe)
     df = _load_from_cache(cache_path) if use_cache else None
     if df is None:
+        logger.info("Cache miss for %s %s, downloading data", pair, timeframe)
         df = _download(pair, timeframe, start, end)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(cache_path, index=True, index_label="time")
+    else:
+        logger.debug("Loaded cached OHLCV rows=%s from %s", len(df), cache_path)
     filtered = df.loc[(df.index >= start) & (df.index <= end)]
     if filtered.empty:
         # fallback: fetch with explicit start/end if cache doesn't cover range
         filtered = _download(pair, timeframe, start, end)
+    logger.info(
+        "Loaded OHLCV window pair=%s timeframe=%s rows=%s start=%s end=%s",
+        pair,
+        timeframe,
+        len(filtered),
+        start.isoformat(),
+        end.isoformat(),
+    )
     return filtered

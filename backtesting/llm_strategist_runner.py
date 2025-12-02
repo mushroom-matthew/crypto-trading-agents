@@ -17,6 +17,7 @@ from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import StrategyPlanProvider
 from agents.strategies.risk_engine import RiskEngine
 from agents.strategies.strategy_memory import build_strategy_memory
+from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
 from backtesting.dataset import load_ohlcv
 from schemas.judge_feedback import JudgeFeedback
@@ -225,6 +226,14 @@ class LLMStrategistBacktester:
         self.limit_enforcement_by_day: Dict[str, Dict[str, Any]] = defaultdict(_new_limit_entry)
         self.plan_limits_by_day: Dict[str, Dict[str, Any]] = {}
         self.current_run_id: str | None = None
+        logger.debug(
+            "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
+            self.pairs,
+            self.timeframes,
+            self.start,
+            self.end,
+            self.plan_interval.total_seconds() / 3600,
+        )
 
     def _normalize_market_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
         normalized: Dict[str, Dict[str, pd.DataFrame]] = {}
@@ -447,6 +456,9 @@ class LLMStrategistBacktester:
                 "detail": data.get("detail"),
                 "source": source,
             }
+            if normalized == BlockReason.OTHER.value and not entry["detail"]:
+                logger.error("Blocked trade missing reason detail: %s", entry)
+                raise RuntimeError(f"Blocked trade missing reason detail: {entry}")
             limit_entry["blocked_details"].append(entry)
             msg = data.get("detail")
             if msg:
@@ -480,6 +492,14 @@ class LLMStrategistBacktester:
                     }
                 )
                 self.trigger_activity_by_day[day_key][order.reason] += 1
+                logger.debug(
+                    "Executed order (no plan gating) trigger=%s symbol=%s side=%s qty=%.6f price=%.2f",
+                    order.reason,
+                    order.symbol,
+                    order.side,
+                    order.quantity,
+                    order.price,
+                )
             return executed_records
 
         for order in orders:
@@ -509,6 +529,14 @@ class LLMStrategistBacktester:
                     }
                 )
                 self.trigger_activity_by_day[day_key][order.reason] += 1
+                logger.debug(
+                    "Executed order trigger=%s symbol=%s side=%s qty=%.6f price=%.2f",
+                    order.reason,
+                    order.symbol,
+                    order.side,
+                    order.quantity,
+                    order.price,
+                )
             else:
                 detail = event.get("detail") if event else None
                 reason = event.get("reason") if event else None
@@ -522,13 +550,20 @@ class LLMStrategistBacktester:
                         "timeframe": order.timeframe,
                         "trigger_id": order.reason,
                         "reason": reason,
-                        "detail": detail or f"Order blocked for reason {reason or 'unknown'}",
+                        "detail": detail,
                     },
                     "execution_engine",
                 )
         return executed_records
 
     def run(self, run_id: str) -> StrategistBacktestResult:
+        logger.info(
+            "Starting backtest run_id=%s pairs=%s date_range=%s->%s",
+            run_id,
+            self.pairs,
+            self.start,
+            self.end,
+        )
         self._ensure_strategy_run(run_id)
         all_timestamps = sorted(
             {ts for pair in self.market_data.values() for df in pair.values() for ts in df.index if self.start <= ts <= self.end}
@@ -603,7 +638,7 @@ class LLMStrategistBacktester:
                     {rule.symbol: rule for rule in current_plan.sizing_rules},
                     daily_anchor_equity=self.portfolio.portfolio_state(ts).equity,
                 )
-                trigger_engine = TriggerEngine(current_plan, risk_engine)
+                trigger_engine = TriggerEngine(current_plan, risk_engine, trade_risk=TradeRiskEvaluator(risk_engine))
                 plan_log.append(
                     {
                         "plan_id": current_plan.plan_id,
@@ -621,6 +656,13 @@ class LLMStrategistBacktester:
                     "min_trades_per_day": current_plan.min_trades_per_day,
                     "allowed_symbols": current_plan.allowed_symbols,
                 }
+                logger.info(
+                    "Generated plan plan_id=%s slot_start=%s slot_end=%s triggers=%s",
+                    current_plan.plan_id,
+                    slot_start.isoformat(),
+                    slot_end.isoformat(),
+                    len(current_plan.triggers),
+                )
             if trigger_engine is None or current_plan is None:
                 continue
 
@@ -636,6 +678,14 @@ class LLMStrategistBacktester:
                     indicator = compute_indicator_snapshot(subset, symbol=pair, timeframe=timeframe, config=self.window_configs[timeframe])
                     portfolio_state = self.portfolio.portfolio_state(ts)
                     asset_state = active_assets.get(pair)
+                    logger.debug(
+                        "Evaluating triggers ts=%s pair=%s timeframe=%s equity=%.2f cash=%.2f",
+                        ts.isoformat(),
+                        pair,
+                        timeframe,
+                        portfolio_state.equity,
+                        portfolio_state.cash,
+                    )
                     orders, blocked_entries = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state)
                     executed_records = self._process_orders_with_limits(
                         run_id,
