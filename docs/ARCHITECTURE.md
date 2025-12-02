@@ -206,7 +206,7 @@ By reusing the same components across production agents, tests, and backtests, t
 ## Risk Controls & Diagnostics
 
 - **Risk knobs**: Every `StrategyRun` carries `risk_limits` (max per-trade risk, per-symbol exposure, portfolio exposure, daily loss). Judge feedback can scale these limits temporarily via `risk_adjustments`, mirroring how real desks taper risk after drawdowns.
-- **Backtester telemetry**: `LLMStrategistBacktester` writes `limit_enforcement` entries for each simulated day that now include:
+- **Backtester telemetry**: `LLMStrategistBacktester` writes `limit_stats` entries (aliased to the legacy `limit_enforcement` key) for each simulated day that now include:
   - `trades_blocked_by_*` counters for every constraint dimension (daily caps, symbol vetoes, direction/category vetos, plan errors, missing indicators, risk caps, etc.).
   - `risk_block_breakdown` showing how often each risk parameter (e.g., `max_symbol_exposure_pct`) prevented sizing.
   - `blocked_details`, a per-trade log with timestamps, symbols, sides, and human-readable detail strings (“Reached max trades per day (5)”, “Risk constraint max_symbol_exposure_pct prevented sizing”).

@@ -109,9 +109,9 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
     assert "judge_feedback" in summary
     assert "strategist_constraints" in summary["judge_feedback"]
     assert "plan_limits" in summary
-    assert "limit_enforcement" in summary
-    assert "risk_limit_hints" in summary["limit_enforcement"]
-    assert "blocked_details" in summary["limit_enforcement"]
+    assert "limit_stats" in summary
+    assert "risk_limit_hints" in summary["limit_stats"]
+    assert "blocked_details" in summary["limit_stats"]
     assert "risk_adjustments" in summary
 
 

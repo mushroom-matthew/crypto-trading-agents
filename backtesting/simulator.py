@@ -100,7 +100,8 @@ def _compute_metrics_summary(
     initial_cash: float,
 ) -> Dict[str, Any]:
     final_equity = float(equity_series.iloc[-1]) if not equity_series.empty else initial_cash
-    return_pct = (final_equity / initial_cash - 1) * 100 if initial_cash else 0.0
+    equity_return_pct = (final_equity / initial_cash - 1) * 100 if initial_cash else 0.0
+    gross_trade_return_pct = equity_return_pct
     analyzer = PerformanceAnalyzer()
     returns = equity_series.pct_change().dropna().tolist()
     sharpe = analyzer.calculate_sharpe_ratio(returns) if returns else 0.0
@@ -124,7 +125,9 @@ def _compute_metrics_summary(
 
     return {
         "final_equity": final_equity,
-        "return_pct": return_pct,
+        "equity_return_pct": equity_return_pct,
+        "gross_trade_return_pct": gross_trade_return_pct,
+        "return_pct": equity_return_pct,
         "sharpe_ratio": sharpe,
         "max_drawdown_pct": max_drawdown * 100,
         "win_rate": win_rate * 100,

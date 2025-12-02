@@ -26,7 +26,20 @@ class _FakeResult:
         self.llm_costs = {"num_llm_calls": 0}
         self.final_cash = 900.0
         self.final_positions = {"BTC-USD": 0.1}
-        self.daily_reports = [{"date": "2024-01-01", "return_pct": 1.0, "judge_feedback": {"score": 55.0}}]
+        self.daily_reports = [
+            {
+                "date": "2024-01-01",
+                "start_equity": 1000.0,
+                "end_equity": 1010.0,
+                "return_pct": 1.0,
+                "equity_return_pct": 1.0,
+                "gross_trade_return_pct": 1.0,
+                "attempted_triggers": 1,
+                "executed_trades": 1,
+                "limit_stats": {"blocked_by_daily_cap": 0, "blocked_by_risk_limits": 0, "blocked_details": [], "executed_details": []},
+                "judge_feedback": {"score": 55.0},
+            }
+        ]
 
 
 class _FakeBacktester:

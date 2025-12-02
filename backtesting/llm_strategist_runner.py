@@ -41,6 +41,7 @@ def _new_limit_entry() -> Dict[str, Any]:
         "risk_block_breakdown": defaultdict(int),
         "risk_limit_hints": defaultdict(int),
         "blocked_details": [],
+        "executed_details": [],
     }
 
 
@@ -464,6 +465,20 @@ class LLMStrategistBacktester:
             if msg:
                 logger.info("Blocked trade (%s): %s", entry["reason"], msg)
 
+        def _record_execution_detail(order: Order, source: str) -> None:
+            limit_entry["executed_details"].append(
+                {
+                    "timestamp": order.timestamp.isoformat(),
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "price": order.price,
+                    "quantity": order.quantity,
+                    "timeframe": order.timeframe,
+                    "trigger_id": order.reason,
+                    "source": source,
+                }
+            )
+
         if blocked_entries:
             for block in blocked_entries:
                 limit_entry["trades_attempted"] += 1
@@ -480,6 +495,7 @@ class LLMStrategistBacktester:
                 limit_entry["trades_attempted"] += 1
                 _record_hints(order)
                 limit_entry["trades_executed"] += 1
+                _record_execution_detail(order, "trigger_engine")
                 self.portfolio.execute(order)
                 executed_records.append(
                     {
@@ -524,6 +540,7 @@ class LLMStrategistBacktester:
             if event and event.get("action") == "executed":
                 _record_hints(order)
                 limit_entry["trades_executed"] += 1
+                _record_execution_detail(order, "execution_engine")
                 self.portfolio.execute(order)
                 executed_records.append(
                     {
@@ -736,9 +753,15 @@ class LLMStrategistBacktester:
             else pd.Series([self.initial_cash], index=[self.start])
         )
         fills_df = pd.DataFrame(self.portfolio.fills)
+        final_equity = float(equity_curve.iloc[-1])
+        equity_return_pct = (final_equity / self.initial_cash - 1) * 100 if self.initial_cash else 0.0
+        gross_trade_pnl = sum(float(entry.get("pnl", 0.0)) for entry in self.portfolio.trade_log)
+        gross_trade_return_pct = (gross_trade_pnl / self.initial_cash * 100.0) if self.initial_cash else 0.0
         summary = {
-            "final_equity": float(equity_curve.iloc[-1]),
-            "return_pct": (float(equity_curve.iloc[-1]) / self.initial_cash - 1) * 100 if self.initial_cash else 0.0,
+            "final_equity": final_equity,
+            "equity_return_pct": equity_return_pct,
+            "gross_trade_return_pct": gross_trade_return_pct,
+            "return_pct": equity_return_pct,
         }
         return StrategistBacktestResult(
             equity_curve=equity_curve,
@@ -769,13 +792,30 @@ class LLMStrategistBacktester:
             }
         return briefs
 
+    def _daily_trade_pnl(self, day_key: str) -> float:
+        """Aggregate realized trade PnL for a calendar day."""
+
+        pnl = 0.0
+        for entry in self.portfolio.trade_log:
+            timestamp = entry.get("timestamp")
+            if timestamp is None:
+                continue
+            if hasattr(timestamp, "to_pydatetime"):
+                timestamp = timestamp.to_pydatetime()
+            trade_day = timestamp.date().isoformat()
+            if trade_day == day_key:
+                pnl += float(entry.get("pnl", 0.0))
+        return pnl
+
     def _finalize_day(self, day_key: str, daily_dir: Path, run_id: str) -> Dict[str, Any] | None:
         reports = self.slot_reports_by_day.pop(day_key, [])
         if not reports:
             return None
         start_equity = reports[0]["equity"]
         end_equity = reports[-1]["equity"]
-        day_return = ((end_equity - start_equity) / start_equity * 100.0) if start_equity else 0.0
+        equity_return_pct = ((end_equity / start_equity - 1) * 100.0) if start_equity else 0.0
+        gross_trade_pnl = self._daily_trade_pnl(day_key)
+        gross_trade_return_pct = (gross_trade_pnl / start_equity * 100.0) if start_equity else 0.0
         trade_count = sum(len(report.get("orders", [])) for report in reports)
         indicator_context = reports[-1].get("indicator_context", {})
         triggers = self.trigger_activity_by_day.pop(day_key, {})
@@ -790,12 +830,16 @@ class LLMStrategistBacktester:
             "date": day_key,
             "start_equity": start_equity,
             "end_equity": end_equity,
-            "return_pct": day_return,
+            "return_pct": equity_return_pct,
+            "equity_return_pct": equity_return_pct,
+            "gross_trade_return_pct": gross_trade_return_pct,
             "trade_count": trade_count,
             "positions_end": reports[-1]["positions"],
             "indicator_context": indicator_context,
             "top_triggers": top_triggers,
             "skipped_due_to_limits": skipped_limits,
+            "attempted_triggers": limit_entry["trades_attempted"],
+            "executed_trades": limit_entry["trades_executed"],
         }
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
@@ -805,33 +849,36 @@ class LLMStrategistBacktester:
         blocked_missing_indicator = skipped_counts.get(BlockReason.MISSING_INDICATOR.value, 0)
         blocked_plan = skipped_counts.get(BlockReason.PLAN_LIMIT.value, 0)
         blocked_other = skipped_counts.get(BlockReason.OTHER.value, 0)
+        blocked_risk_budget = skipped_counts.get("risk_budget", 0)
         blocked_risk = sum(risk_breakdown.values())
-        summary["limit_enforcement"] = {
-            "trades_attempted": limit_entry["trades_attempted"],
-            "trades_executed": limit_entry["trades_executed"],
-            "trades_blocked": skipped_counts,
-            "trades_blocked_by_daily_cap": blocked_daily_cap,
-            "trades_blocked_by_symbol_veto": blocked_symbol_veto,
-            "trades_blocked_by_direction": blocked_direction,
-            "trades_blocked_by_category": blocked_category,
-            "trades_blocked_by_expression": blocked_expression,
-            "trades_blocked_by_missing_indicator": blocked_missing_indicator,
-            "trades_blocked_by_plan": blocked_plan,
-            "trades_blocked_other": blocked_other,
-            "trades_blocked_by_risk": blocked_risk,
+        limit_stats = {
+            "blocked_by_daily_cap": blocked_daily_cap,
+            "blocked_by_symbol_veto": blocked_symbol_veto,
+            "blocked_by_direction": blocked_direction,
+            "blocked_by_category": blocked_category,
+            "blocked_by_expression": blocked_expression,
+            "blocked_by_missing_indicator": blocked_missing_indicator,
+            "blocked_by_plan_limits": blocked_plan,
+            "blocked_by_other": blocked_other,
+            "blocked_by_risk_limits": blocked_risk,
+            "blocked_by_risk_budget": blocked_risk_budget,
+            "blocked_totals": skipped_counts,
             "risk_block_breakdown": risk_breakdown,
             "risk_limit_hints": risk_limit_hints,
             "blocked_details": list(limit_entry["blocked_details"]),
+            "executed_details": list(limit_entry["executed_details"]),
         }
+        summary["limit_stats"] = limit_stats
+        summary["limit_enforcement"] = limit_stats
         if plan_limits:
             summary["plan_limits"] = plan_limits
             min_trades = plan_limits.get("min_trades_per_day") or 0
-            if min_trades and summary["limit_enforcement"]["trades_executed"] < min_trades:
+            if min_trades and summary["executed_trades"] < min_trades:
                 summary["missed_min_trades"] = True
         raw_feedback = self._judge_feedback(summary)
         summary["judge_feedback"] = raw_feedback
         feedback_obj = JudgeFeedback.model_validate(raw_feedback)
-        run = self._apply_feedback_adjustments(run_id, feedback_obj, day_return > 0)
+        run = self._apply_feedback_adjustments(run_id, feedback_obj, equity_return_pct > 0)
         summary["risk_adjustments"] = list(snapshot_adjustments(run.risk_adjustments or {}))
         (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))
         return summary

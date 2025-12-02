@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import argparse
 import json
 import sys
@@ -20,6 +21,97 @@ from schemas.strategy_run import RiskLimitSettings
 from .llm_strategist_runner import LLMStrategistBacktester
 from .simulator import run_backtest, run_portfolio_backtest
 from .strategies import StrategyWrapperConfig, StrategyParameters
+
+
+def _emit_limit_debug(
+    daily_reports: List[Dict[str, Any]],
+    mode: str,
+    output_dir: Path,
+    run_id: str,
+) -> None:
+    if mode == "off":
+        return
+    if not daily_reports:
+        print("\n(No daily limit stats available.)")
+        return
+
+    print("\n=== Limit Enforcement Stats ===")
+    header = f"{'date':<12} {'attempted':>9} {'executed':>9} {'blocked_cap':>12} {'blocked_risk':>13} {'blocked_plan':>13}"
+    print(header)
+    print("-" * len(header))
+    for report in daily_reports:
+        stats = report.get("limit_stats") or {}
+        attempted = report.get("attempted_triggers", stats.get("attempted_triggers", 0))
+        executed = report.get("executed_trades", stats.get("executed_trades", 0))
+        print(
+            f"{report.get('date',''): <12}"
+            f"{attempted:>9}"
+            f"{executed:>9}"
+            f"{stats.get('blocked_by_daily_cap', 0):>12}"
+            f"{stats.get('blocked_by_risk_limits', 0):>13}"
+            f"{stats.get('blocked_by_plan_limits', 0):>13}"
+        )
+
+    if mode != "verbose":
+        return
+    target_dir = output_dir / run_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = target_dir / "limits.csv"
+    fieldnames = [
+        "date",
+        "timestamp",
+        "symbol",
+        "side",
+        "price",
+        "quantity",
+        "timeframe",
+        "trigger_id",
+        "outcome",
+        "reason",
+        "detail",
+        "source",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for report in daily_reports:
+            date = report.get("date")
+            stats = report.get("limit_stats") or {}
+            for entry in stats.get("blocked_details", []):
+                writer.writerow(
+                    {
+                        "date": date,
+                        "timestamp": entry.get("timestamp"),
+                        "symbol": entry.get("symbol"),
+                        "side": entry.get("side"),
+                        "price": entry.get("price"),
+                        "quantity": entry.get("quantity"),
+                        "timeframe": entry.get("timeframe"),
+                        "trigger_id": entry.get("trigger_id"),
+                        "outcome": "blocked",
+                        "reason": entry.get("reason"),
+                        "detail": entry.get("detail"),
+                        "source": entry.get("source"),
+                    }
+                )
+            for entry in stats.get("executed_details", []):
+                writer.writerow(
+                    {
+                        "date": date,
+                        "timestamp": entry.get("timestamp"),
+                        "symbol": entry.get("symbol"),
+                        "side": entry.get("side"),
+                        "price": entry.get("price"),
+                        "quantity": entry.get("quantity"),
+                        "timeframe": entry.get("timeframe"),
+                        "trigger_id": entry.get("trigger_id"),
+                        "outcome": "executed",
+                        "reason": "",
+                        "detail": "",
+                        "source": entry.get("source"),
+                    }
+                )
+    print(f"Verbose limit log written to {csv_path}")
 
 
 def main() -> None:
@@ -50,6 +142,8 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO", help="Backtest log level (DEBUG, INFO, etc.)")
     parser.add_argument("--log-file", help="Optional file path to append logs")
     parser.add_argument("--log-json", action="store_true", help="Emit JSON-formatted logs")
+    parser.add_argument("--debug-limits", choices=["off", "basic", "verbose"], default="off", help="Enable limit-enforcement diagnostics")
+    parser.add_argument("--debug-output-dir", default=".debug/backtests", help="Directory for verbose limit debug files")
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -132,6 +226,8 @@ def main() -> None:
         if not result.fills.empty:
             print("\nSample fills:")
             print(result.fills.tail())
+        if args.debug_limits != "off":
+            _emit_limit_debug(result.daily_reports, args.debug_limits, Path(args.debug_output_dir), args.llm_run_id)
         return
 
     if args.pairs:

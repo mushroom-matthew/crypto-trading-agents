@@ -105,8 +105,12 @@ def test_simple_plan_executes_one_trade(tmp_path, monkeypatch):
     assert result.final_positions["BTC-USD"] > 0
     report = next(entry for entry in result.daily_reports if entry["date"] == "2024-01-01")
     assert report["trade_count"] == 1
-    limits = report["limit_enforcement"]
-    assert limits["trades_blocked_by_daily_cap"] == 0
+    assert report["return_pct"] == report["equity_return_pct"]
+    expected_return = ((report["end_equity"] / report["start_equity"]) - 1) * 100
+    assert abs(report["equity_return_pct"] - expected_return) < 1e-9
+    limit_stats = report["limit_stats"]
+    assert limit_stats["blocked_by_daily_cap"] == 0
+    assert report["attempted_triggers"] >= report["executed_trades"]
     assert not report.get("missed_min_trades")
 
 
@@ -137,7 +141,7 @@ def test_logs_risk_block_details(tmp_path, monkeypatch):
     )
     result = backtester.run(run_id="risk-test")
     report = next(entry for entry in result.daily_reports if entry["date"] == "2024-01-01")
-    limits = report["limit_enforcement"]
-    assert limits["trades_blocked_by_risk"] > 0
-    assert limits["risk_block_breakdown"]["max_position_risk_pct"] > 0
-    assert any(detail["reason"] == "max_position_risk_pct" for detail in limits["blocked_details"])
+    limit_stats = report["limit_stats"]
+    assert limit_stats["blocked_by_risk_limits"] > 0
+    assert limit_stats["risk_block_breakdown"]["max_position_risk_pct"] > 0
+    assert any(detail["reason"] == "max_position_risk_pct" for detail in limit_stats["blocked_details"])
