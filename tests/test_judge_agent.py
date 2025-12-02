@@ -11,6 +11,7 @@ from agents.judge_agent_client import JudgeAgent, _split_notes_and_json
 from agents.workflows import JudgeAgentWorkflow, ExecutionLedgerWorkflow
 from agents.prompt_manager import PromptManager, PromptComponent, PromptTemplate
 from tools.performance_analysis import PerformanceAnalyzer, PerformanceReport
+from schemas.judge_feedback import DisplayConstraints, JudgeConstraints, JudgeFeedback
 
 
 class TestJudgeAgentWorkflow:
@@ -279,6 +280,19 @@ JSON:
 
         with pytest.raises(ValueError):
             await judge.analyze_decision_quality(tx_history, performance_snapshot)
+
+    def test_apply_structured_constraints(self):
+        judge = JudgeAgent(Mock(), AsyncMock())
+        feedback = JudgeFeedback(
+            constraints=JudgeConstraints(),
+            strategist_constraints=DisplayConstraints(
+                must_fix=["Increase selectivity but avoid paralysis; at least one qualified trigger per day."],
+                sizing_adjustments={"BTC-USD": "Cut risk by 25% until two winning days post drawdown."},
+            ),
+        )
+        judge._apply_structured_constraints(feedback)
+        assert feedback.constraints.min_trades_per_day == 1
+        assert feedback.constraints.symbol_risk_multipliers["BTC-USD"] == 0.75
 
 
 class TestExecutionLedgerWorkflowEnhancements:

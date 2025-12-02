@@ -128,7 +128,7 @@ async def test_strategy_tools_server_end_to_end(monkeypatch, tmp_path):
 
     simulation = await mcp_simulate_day(run_id, plan_payload, compiled_payload, _events(3))
     assert simulation["executed"] == 2
-    assert simulation["skipped"]["max_trades_per_day"] == 1
+    assert simulation["skipped"]["daily_cap"] == 1
     assert simulation["trades_attempted"] == 3
 
     next_day_event = [{"trigger_id": "btc_long", "timestamp": "2024-01-02T00:00:00+00:00"}]

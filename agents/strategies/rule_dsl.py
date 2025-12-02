@@ -17,6 +17,10 @@ _BETWEEN_PATTERN = re.compile(
 )
 
 
+class MissingIndicatorError(RuleSyntaxError):
+    """Raised when a required indicator is missing from the context."""
+
+
 class RuleEvaluator:
     """Safe expression evaluator supporting comparisons and boolean ops."""
 
@@ -74,6 +78,8 @@ class RuleEvaluator:
                 return None
             if name not in allowed and lower not in allowed:
                 raise RuleSyntaxError(f"unknown identifier '{node.id}' in rule")
+            if name not in ctx:
+                raise MissingIndicatorError(f"missing indicator '{name}' in rule")
             return ctx.get(name)
         if isinstance(node, ast.Constant):
             return node.value

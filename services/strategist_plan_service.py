@@ -69,6 +69,15 @@ class StrategistPlanService:
         if run.latest_judge_feedback:
             plan = self._apply_strategist_constraints(plan, run.latest_judge_feedback.strategist_constraints)
         plan.max_trades_per_day = self._resolve_max_trades(plan.max_trades_per_day, run.latest_judge_feedback)
+        constraint_min = run.latest_judge_feedback.constraints.min_trades_per_day if run.latest_judge_feedback else None
+        if constraint_min is not None:
+            plan.min_trades_per_day = max(plan.min_trades_per_day or 0, constraint_min)
+        multipliers = run.latest_judge_feedback.constraints.symbol_risk_multipliers if run.latest_judge_feedback else {}
+        if multipliers:
+            for rule in plan.sizing_rules:
+                multiplier = multipliers.get(rule.symbol)
+                if multiplier is not None and rule.target_risk_pct is not None:
+                    rule.target_risk_pct *= multiplier
         run.current_plan_id = plan.plan_id
         self.registry.update_strategy_run(run)
         cache_path = self.plan_provider._cache_path(run_id, plan_date, llm_input)

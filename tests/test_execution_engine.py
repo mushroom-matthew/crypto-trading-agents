@@ -10,7 +10,7 @@ from schemas.strategy_run import StrategyRunConfig
 from services.strategy_run_registry import StrategyRunRegistry
 from tools import execution_tools
 from trading_core.trigger_compiler import compile_plan
-from trading_core.execution_engine import ExecutionEngine
+from trading_core.execution_engine import ExecutionEngine, BlockReason
 
 
 def _strategy_plan(run_id: str, plan_limit: int | None = 3) -> StrategyPlan:
@@ -75,7 +75,7 @@ def test_simulate_day_enforces_judge_trade_cap(tmp_path, monkeypatch):
 
     result = execution_tools.simulate_day_tool(run.run_id, plan.model_dump(), compiled.model_dump(), _events(3))
     assert result["executed"] == 2
-    assert result["skipped"] == {"max_trades_per_day": 1}
+    assert result["skipped"] == {BlockReason.DAILY_CAP.value: 1}
 
 
 def test_simulate_day_respects_judge_disabled_category(tmp_path, monkeypatch):
@@ -95,7 +95,7 @@ def test_simulate_day_respects_judge_disabled_category(tmp_path, monkeypatch):
 
     result = execution_tools.simulate_day_tool(run.run_id, plan.model_dump(), compiled.model_dump(), _events(2))
     assert result["executed"] == 0
-    assert result["skipped"]["judge_disabled_category"] == 2
+    assert result["skipped"][BlockReason.CATEGORY.value] == 2
 
 
 def test_run_live_step_accumulates_day_state(tmp_path, monkeypatch):
@@ -115,4 +115,4 @@ def test_run_live_step_accumulates_day_state(tmp_path, monkeypatch):
     third_event = [{"trigger_id": "btc_long", "timestamp": "2024-01-01T02:00:00+00:00"}]
     third = execution_tools.run_live_step_tool(run.run_id, plan.model_dump(), compiled.model_dump(), third_event)
     assert third["executed"] == 0
-    assert third["skipped"]["max_trades_per_day"] == 1
+    assert third["skipped"][BlockReason.DAILY_CAP.value] == 1

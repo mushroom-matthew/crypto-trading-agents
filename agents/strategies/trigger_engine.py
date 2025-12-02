@@ -133,12 +133,28 @@ class TriggerEngine:
         for trigger in self.plan.triggers:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
                 continue
-            if trigger.exit_rule and self.evaluator.evaluate(trigger.exit_rule, context):
+            try:
+                exit_fired = bool(trigger.exit_rule and self.evaluator.evaluate(trigger.exit_rule, context))
+            except MissingIndicatorError:
+                risk_blocks.append((trigger.id, BlockReason.MISSING_INDICATOR.value))
+                continue
+            except RuleSyntaxError:
+                risk_blocks.append((trigger.id, BlockReason.EXPRESSION_ERROR.value))
+                continue
+            if exit_fired:
                 exit_order = self._flatten_order(trigger.symbol, bar.close, bar.timeframe, portfolio, f"{trigger.id}_exit", bar.timestamp)
                 if exit_order:
                     orders.append(exit_order)
                     continue
-            if trigger.entry_rule and self.evaluator.evaluate(trigger.entry_rule, context):
+            try:
+                entry_fired = bool(trigger.entry_rule and self.evaluator.evaluate(trigger.entry_rule, context))
+            except MissingIndicatorError:
+                risk_blocks.append((trigger.id, BlockReason.MISSING_INDICATOR.value))
+                continue
+            except RuleSyntaxError:
+                risk_blocks.append((trigger.id, BlockReason.EXPRESSION_ERROR.value))
+                continue
+            if entry_fired:
                 entry = self._entry_order(trigger, indicator, portfolio, bar, risk_blocks)
                 if entry:
                     orders.append(entry)

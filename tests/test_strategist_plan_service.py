@@ -151,3 +151,23 @@ def test_plan_service_applies_strategist_constraints(tmp_path):
     assert plan.max_trades_per_day == 3
     sizing_rule = plan.sizing_rules[0]
     assert sizing_rule.target_risk_pct == pytest.approx(0.75)
+
+
+def test_plan_service_respects_judge_structured_constraints(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    feedback = JudgeFeedback(
+        constraints=JudgeConstraints(
+            max_trades_per_day=6,
+            min_trades_per_day=2,
+            symbol_risk_multipliers={"BTC-USD": 0.5},
+        )
+    )
+    run.latest_judge_feedback = feedback
+    registry.update_strategy_run(run)
+    plan = StrategistPlanService(plan_provider=StubPlanProvider(_base_plan()), registry=registry).generate_plan_for_run(
+        run.run_id, _llm_input()
+    )
+    assert plan.min_trades_per_day == 2
+    assert plan.max_trades_per_day == 6
+    assert plan.sizing_rules[0].target_risk_pct == pytest.approx(0.5)

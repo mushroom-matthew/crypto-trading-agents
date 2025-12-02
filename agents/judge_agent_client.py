@@ -29,7 +29,7 @@ from agents.constants import (
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import create_openai_client, init_langfuse
-from schemas.judge_feedback import JudgeFeedback
+from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
 
 logger = setup_logging(__name__, level="INFO")
 
@@ -294,6 +294,7 @@ Rules:
                 raise ValueError("Empty judge response")
             notes_text, json_block = _split_notes_and_json(analysis_text)
             feedback = JudgeFeedback.model_validate_json(json_block)
+            self._apply_structured_constraints(feedback)
             decision_score = feedback.score if feedback.score is not None else 50.0
             display_constraints = feedback.strategist_constraints.model_dump()
             machine_constraints = feedback.constraints.model_dump()
@@ -928,6 +929,18 @@ Return ONLY the improved system prompt, no explanations."""
         except Exception as exc:
             logger.error("Evaluation cycle failed: %s", exc)
             print(f"{RED}[JudgeAgent] Evaluation cycle failed: {exc}{RESET}")
+
+    def _apply_structured_constraints(self, feedback: JudgeFeedback) -> None:
+        constraints = feedback.constraints
+        display = feedback.strategist_constraints
+        for entry in display.must_fix or []:
+            lowered = entry.lower()
+            if "at least" in lowered and "per day" in lowered:
+                constraints.min_trades_per_day = max(constraints.min_trades_per_day or 0, 1)
+        for symbol, instruction in (display.sizing_adjustments or {}).items():
+            lowered = instruction.lower()
+            if "cut risk" in lowered and "25" in lowered:
+                constraints.symbol_risk_multipliers[symbol] = 0.75
 
 
 async def _watch_judge_preferences(client: Client, current_preferences: dict, judge_agent: JudgeAgent) -> None:

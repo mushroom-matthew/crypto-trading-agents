@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Dict, Literal, Optional
 
 from schemas.compiled_plan import CompiledPlan, CompiledTrigger
@@ -13,6 +14,18 @@ from schemas.strategy_run import StrategyRun
 
 
 ExecutionAction = Literal["executed", "skipped"]
+
+
+class BlockReason(str, Enum):
+    DAILY_CAP = "daily_cap"
+    SYMBOL_VETO = "symbol_veto"
+    RISK = "risk"
+    DIRECTION = "direction"
+    CATEGORY = "category"
+    PLAN_LIMIT = "plan_limit"
+    EXPRESSION_ERROR = "expression_error"
+    MISSING_INDICATOR = "missing_indicator"
+    OTHER = "other"
 
 
 @dataclass
@@ -67,21 +80,39 @@ class ExecutionEngine:
     def _plan_key(self, run_id: str, plan_id: str, bar_time: datetime) -> tuple[str, str, str]:
         return (run_id, plan_id, bar_time.date().isoformat())
 
-    def _effective_limits(
+    @dataclass(frozen=True)
+    class PlanLimits:
+        max_trades_per_day: int
+        min_trades_per_day: Optional[int]
+        allowed_symbols: set[str]
+        allowed_directions: set[str]
+        allowed_categories: set[str]
+
+    def _build_limits(
         self,
-        plan: CompiledPlan,
         run: StrategyRun,
         strategy_plan: StrategyPlan,
         constraints: JudgeConstraints | None,
-    ) -> Dict[str, Optional[int]]:
+    ) -> "ExecutionEngine.PlanLimits":
         judge_limit = constraints.max_trades_per_day if constraints else None
         plan_limit = strategy_plan.max_trades_per_day
-        effective = None
-        if judge_limit is not None:
-            effective = judge_limit
-        if plan_limit is not None:
-            effective = plan_limit if effective is None else min(effective, plan_limit)
-        return {"max_trades_per_day": effective}
+        max_trades = plan_limit if judge_limit is None else (plan_limit if plan_limit is not None else judge_limit)
+        if judge_limit is not None and plan_limit is not None:
+            max_trades = min(judge_limit, plan_limit)
+        max_trades = max_trades if max_trades is not None else 0
+        min_trades = constraints.min_trades_per_day if constraints else None
+        if strategy_plan.min_trades_per_day is not None:
+            min_trades = max(min_trades or 0, strategy_plan.min_trades_per_day)
+        allowed_symbols = set(strategy_plan.allowed_symbols or run.config.symbols)
+        allowed_directions = set(strategy_plan.allowed_directions or ["long", "short"])
+        allowed_categories = set(strategy_plan.allowed_trigger_categories or ["other"])
+        return ExecutionEngine.PlanLimits(
+            max_trades_per_day=max_trades,
+            min_trades_per_day=min_trades,
+            allowed_symbols=allowed_symbols,
+            allowed_directions=allowed_directions,
+            allowed_categories=allowed_categories,
+        )
 
     def _validate_plan_limits(self, strategy_plan: StrategyPlan) -> None:
         if strategy_plan.max_trades_per_day is None:
@@ -104,70 +135,67 @@ class ExecutionEngine:
     ) -> TradeEvent | None:
         self._validate_plan_limits(strategy_plan)
         state = self._get_state(run.run_id, bar_timestamp)
-        limits = self._effective_limits(compiled_plan, run, strategy_plan, constraints)
+        limits = self._build_limits(run, strategy_plan, constraints)
 
-        if limits["max_trades_per_day"] is not None and state.trades_today >= limits["max_trades_per_day"]:
-            state.log_skip("max_trades_per_day")
+        if limits.max_trades_per_day and state.trades_today >= limits.max_trades_per_day:
+            state.log_skip(BlockReason.DAILY_CAP.value)
             return TradeEvent(
                 timestamp=bar_timestamp,
                 trigger_id=trigger.trigger_id,
                 symbol=trigger.symbol,
                 action="skipped",
-                reason="max_trades_per_day",
+                reason=BlockReason.DAILY_CAP.value,
             )
 
         if constraints:
             if trigger.trigger_id in constraints.disabled_trigger_ids:
-                state.log_skip("judge_disabled_trigger")
+                state.log_skip(BlockReason.SYMBOL_VETO.value)
                 return TradeEvent(
                     timestamp=bar_timestamp,
                     trigger_id=trigger.trigger_id,
                     symbol=trigger.symbol,
                     action="skipped",
-                    reason="judge_disabled_trigger",
+                    reason=BlockReason.SYMBOL_VETO.value,
                 )
             if trigger.category and trigger.category in constraints.disabled_categories:
-                state.log_skip("judge_disabled_category")
+                state.log_skip(BlockReason.CATEGORY.value)
                 return TradeEvent(
                     timestamp=bar_timestamp,
                     trigger_id=trigger.trigger_id,
                     symbol=trigger.symbol,
                     action="skipped",
-                    reason="judge_disabled_category",
+                    reason=BlockReason.CATEGORY.value,
                 )
 
-        allowed_symbols = strategy_plan.allowed_symbols if strategy_plan and strategy_plan.allowed_symbols else run.config.symbols
-        if allowed_symbols and trigger.symbol not in allowed_symbols:
-            state.log_skip("symbol_not_allowed")
+        if limits.allowed_symbols and trigger.symbol not in limits.allowed_symbols:
+            state.log_skip(BlockReason.SYMBOL_VETO.value)
             return TradeEvent(
                 timestamp=bar_timestamp,
                 trigger_id=trigger.trigger_id,
                 symbol=trigger.symbol,
                 action="skipped",
-                reason="symbol_not_allowed",
+                reason=BlockReason.SYMBOL_VETO.value,
             )
 
-        if strategy_plan:
-            if strategy_plan.allowed_directions and trigger.direction not in strategy_plan.allowed_directions:
-                state.log_skip("direction_not_allowed")
-                return TradeEvent(
-                    timestamp=bar_timestamp,
-                    trigger_id=trigger.trigger_id,
-                    symbol=trigger.symbol,
-                    action="skipped",
-                    reason="direction_not_allowed",
-                )
-            if strategy_plan.allowed_trigger_categories:
-                category = trigger.category or "other"
-                if category not in strategy_plan.allowed_trigger_categories:
-                    state.log_skip("category_not_allowed")
-                    return TradeEvent(
-                        timestamp=bar_timestamp,
-                        trigger_id=trigger.trigger_id,
-                        symbol=trigger.symbol,
-                        action="skipped",
-                        reason="category_not_allowed",
-                    )
+        if limits.allowed_directions and trigger.direction not in limits.allowed_directions:
+            state.log_skip(BlockReason.DIRECTION.value)
+            return TradeEvent(
+                timestamp=bar_timestamp,
+                trigger_id=trigger.trigger_id,
+                symbol=trigger.symbol,
+                action="skipped",
+                reason=BlockReason.DIRECTION.value,
+            )
+        category = trigger.category or "other"
+        if limits.allowed_categories and category not in limits.allowed_categories:
+            state.log_skip(BlockReason.CATEGORY.value)
+            return TradeEvent(
+                timestamp=bar_timestamp,
+                trigger_id=trigger.trigger_id,
+                symbol=trigger.symbol,
+                action="skipped",
+                reason=BlockReason.CATEGORY.value,
+            )
 
         state.trades_today += 1
         state.record_trade(trigger.symbol)

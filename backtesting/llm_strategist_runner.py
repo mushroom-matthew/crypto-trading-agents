@@ -23,6 +23,7 @@ from services.strategy_run_registry import StrategyRunConfig, StrategyRunRegistr
 from services.strategist_plan_service import StrategistPlanService
 from tools import execution_tools
 from trading_core.trigger_compiler import compile_plan
+from trading_core.execution_engine import BlockReason
 
 
 def _new_limit_entry() -> Dict[str, Any]:
@@ -361,14 +362,13 @@ class LLMStrategistBacktester:
         executed_records: List[Dict[str, Any]] = []
         limit_entry = self.limit_enforcement_by_day[day_key]
         if risk_blocks:
-            for _, reason in risk_blocks:
+            for _, detail in risk_blocks:
                 limit_entry["trades_attempted"] += 1
-                limit_entry["skipped"][reason] += 1
-                limit_entry["risk_block_breakdown"][reason] += 1
-                self.skipped_activity_by_day[day_key][reason] += 1
+                limit_entry["skipped"][BlockReason.RISK.value] += 1
+                limit_entry["risk_block_breakdown"][detail] += 1
+                self.skipped_activity_by_day[day_key][BlockReason.RISK.value] += 1
         if not plan_payload or not compiled_payload:
             for order in orders:
-                limit_entry["trades_attempted"] += 1
                 limit_entry["trades_executed"] += 1
                 self.portfolio.execute(order)
                 executed_records.append(
