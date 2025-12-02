@@ -36,6 +36,8 @@ class _FakeResult:
                 "gross_trade_return_pct": 1.0,
                 "attempted_triggers": 1,
                 "executed_trades": 1,
+                "flatten_positions_daily": False,
+                "overnight_exposure": {},
                 "limit_stats": {"blocked_by_daily_cap": 0, "blocked_by_risk_limits": 0, "blocked_details": [], "executed_details": []},
                 "judge_feedback": {"score": 55.0},
             }

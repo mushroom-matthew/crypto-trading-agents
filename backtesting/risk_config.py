@@ -35,6 +35,7 @@ def _filtered_payload(data: Mapping[str, Any]) -> Dict[str, float]:
         "max_symbol_exposure_pct",
         "max_portfolio_exposure_pct",
         "max_daily_loss_pct",
+        "max_daily_risk_budget_pct",
     }
     payload: Dict[str, float] = {}
     source = data.get("risk_limits") if isinstance(data.get("risk_limits"), Mapping) else data

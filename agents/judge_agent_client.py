@@ -253,6 +253,7 @@ JSON:
   "score": <float 0-100 representing overall decision quality>,
   "constraints": {{
     "max_trades_per_day": <integer or null>,
+    "max_triggers_per_symbol_per_day": <integer or null>,
     "risk_mode": "normal" | "conservative" | "emergency",
     "disabled_trigger_ids": ["trigger_id"],
     "disabled_categories": ["trend_continuation", "reversal", "volatility_breakout", "mean_reversion", "emergency_exit", "other"]

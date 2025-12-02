@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import StrategyPlanProvider
@@ -77,12 +77,11 @@ class StrategistPlanService:
         constraint_min = run.latest_judge_feedback.constraints.min_trades_per_day if run.latest_judge_feedback else None
         if constraint_min is not None:
             plan.min_trades_per_day = max(plan.min_trades_per_day or 0, constraint_min)
-        multipliers = run.latest_judge_feedback.constraints.symbol_risk_multipliers if run.latest_judge_feedback else {}
-        if multipliers:
-            for rule in plan.sizing_rules:
-                multiplier = multipliers.get(rule.symbol)
-                if multiplier is not None and rule.target_risk_pct is not None:
-                    rule.target_risk_pct *= multiplier
+        plan.max_triggers_per_symbol_per_day = self._resolve_symbol_trigger_cap(
+            plan.max_triggers_per_symbol_per_day,
+            run.latest_judge_feedback,
+        )
+        plan.trigger_budgets = self._sanitize_trigger_budgets(plan.trigger_budgets)
         run.current_plan_id = plan.plan_id
         self.registry.update_strategy_run(run)
         cache_path = self.plan_provider._cache_path(run_id, plan_date, llm_input)
@@ -116,6 +115,34 @@ class StrategistPlanService:
             return judge_limit
         return min(plan_value, judge_limit)
 
+    def _resolve_symbol_trigger_cap(
+        self,
+        plan_value: int | None,
+        judge_feedback: JudgeFeedback | None,
+    ) -> int | None:
+        judge_cap = None
+        if judge_feedback and judge_feedback.constraints.max_triggers_per_symbol_per_day is not None:
+            judge_cap = judge_feedback.constraints.max_triggers_per_symbol_per_day
+        if judge_cap is None:
+            return plan_value
+        if plan_value is None:
+            return judge_cap
+        return min(plan_value, judge_cap)
+
+    @staticmethod
+    def _sanitize_trigger_budgets(budgets: Dict[str, int] | None) -> Dict[str, int]:
+        cleaned: Dict[str, int] = {}
+        if not budgets:
+            return cleaned
+        for symbol, cap in budgets.items():
+            try:
+                val = int(cap)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                cleaned[symbol] = val
+        return cleaned
+
     def _apply_strategist_constraints(self, plan: StrategyPlan, constraints: DisplayConstraints) -> StrategyPlan:
         plan = plan.model_copy(deep=True)
         must_fix = [entry.lower() for entry in constraints.must_fix or []]
@@ -123,11 +150,6 @@ class StrategistPlanService:
             plan.min_trades_per_day = max(plan.min_trades_per_day or 0, 1)
             cap = self.min_trade_hint_cap or self.default_max_trades
             plan.max_trades_per_day = min(plan.max_trades_per_day or self.default_max_trades, cap)
-        sizing = constraints.sizing_adjustments or {}
-        for rule in plan.sizing_rules:
-            text = (sizing.get(rule.symbol) or "").lower()
-            if text and "cut risk" in text and "25" in text and rule.target_risk_pct is not None:
-                rule.target_risk_pct *= 0.75
         return plan
 
 

@@ -15,19 +15,20 @@ import pandas as pd
 from agents.analytics import IndicatorWindowConfig, PortfolioHistory, build_asset_state, compute_indicator_snapshot, compute_portfolio_state
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import StrategyPlanProvider
-from agents.strategies.risk_engine import RiskEngine
+from agents.strategies.risk_engine import RiskEngine, RiskProfile
 from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
 from backtesting.dataset import load_ohlcv
-from schemas.judge_feedback import JudgeFeedback
+from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
 from schemas.llm_strategist import AssetState, LLMInput, PortfolioState, StrategyPlan
 from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings
-from services.risk_adjustment_service import apply_judge_risk_feedback, effective_risk_limits, snapshot_adjustments
+from services.risk_adjustment_service import apply_judge_risk_feedback, effective_risk_limits, snapshot_adjustments, build_risk_profile
 from services.strategy_run_registry import StrategyRunConfig, StrategyRunRegistry, strategy_run_registry
 from services.strategist_plan_service import StrategistPlanService
 from tools import execution_tools
 from trading_core.trigger_compiler import compile_plan
+from trading_core.trigger_budget import enforce_trigger_budget
 from trading_core.execution_engine import BlockReason
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,7 @@ class LLMStrategistBacktester:
         plan_provider: StrategyPlanProvider | None = None,
         market_data: Dict[str, Dict[str, pd.DataFrame]] | None = None,
         run_registry: StrategyRunRegistry | None = None,
+        flatten_positions_daily: bool = False,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -215,6 +217,9 @@ class LLMStrategistBacktester:
         self.active_risk_limits = self.base_risk_limits
         self.active_risk_adjustments: Dict[str, RiskAdjustmentState] = {}
         self.risk_params = self.active_risk_limits.to_risk_params()
+        self.risk_profile = RiskProfile()
+        self.daily_risk_budget_state: Dict[str, Dict[str, float]] = {}
+        self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
         self.prompt_template = prompt_template_path.read_text() if prompt_template_path and prompt_template_path.exists() else None
         self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.trigger_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -227,6 +232,10 @@ class LLMStrategistBacktester:
         self.limit_enforcement_by_day: Dict[str, Dict[str, Any]] = defaultdict(_new_limit_entry)
         self.plan_limits_by_day: Dict[str, Dict[str, Any]] = {}
         self.current_run_id: str | None = None
+        self.default_symbol_trigger_cap = 6
+        self.latest_trigger_trim: Dict[str, int] = {}
+        self.flatten_positions_daily = flatten_positions_daily
+        self.flattened_days: set[str] = set()
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -356,6 +365,8 @@ class LLMStrategistBacktester:
         self.active_risk_adjustments = dict(run.risk_adjustments or {})
         self.active_risk_limits = effective_risk_limits(run)
         self.risk_params = self.active_risk_limits.to_risk_params()
+        self.risk_profile = build_risk_profile(run)
+        self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
 
     def _ensure_strategy_run(self, run_id: str) -> None:
         try:
@@ -494,6 +505,24 @@ class LLMStrategistBacktester:
             for order in orders:
                 limit_entry["trades_attempted"] += 1
                 _record_hints(order)
+                allowance = self._risk_budget_allowance(day_key, order)
+                if allowance is None:
+                    _record_block_entry(
+                        {
+                            "timestamp": order.timestamp.isoformat(),
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "price": order.price,
+                            "quantity": order.quantity,
+                            "timeframe": order.timeframe,
+                            "trigger_id": order.reason,
+                            "reason": BlockReason.RISK_BUDGET.value,
+                            "detail": "Daily risk budget exhausted",
+                        },
+                        "risk_budget",
+                    )
+                    continue
+                self._commit_risk_budget(day_key, allowance)
                 limit_entry["trades_executed"] += 1
                 _record_execution_detail(order, "trigger_engine")
                 self.portfolio.execute(order)
@@ -539,6 +568,24 @@ class LLMStrategistBacktester:
             limit_entry["trades_attempted"] += 1
             if event and event.get("action") == "executed":
                 _record_hints(order)
+                allowance = self._risk_budget_allowance(day_key, order)
+                if allowance is None:
+                    _record_block_entry(
+                        {
+                            "timestamp": order.timestamp.isoformat(),
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "price": order.price,
+                            "quantity": order.quantity,
+                            "timeframe": order.timeframe,
+                            "trigger_id": order.reason,
+                            "reason": BlockReason.RISK_BUDGET.value,
+                            "detail": "Daily risk budget exhausted",
+                        },
+                        "risk_budget",
+                    )
+                    continue
+                self._commit_risk_budget(day_key, allowance)
                 limit_entry["trades_executed"] += 1
                 _record_execution_detail(order, "execution_engine")
                 self.portfolio.execute(order)
@@ -609,6 +656,7 @@ class LLMStrategistBacktester:
         self.skipped_activity_by_day.clear()
         self.limit_enforcement_by_day.clear()
         self.plan_limits_by_day.clear()
+        self.daily_risk_budget_state.clear()
         self.current_day_key = None
         self.latest_daily_summary = None
         self.last_slot_report = None
@@ -617,6 +665,9 @@ class LLMStrategistBacktester:
         for ts in all_timestamps:
             day_key = ts.date().isoformat()
             if self.current_day_key and self.current_day_key != day_key:
+                if self.flatten_positions_daily and self.last_slot_report:
+                    flatten_ts = datetime.fromisoformat(self.last_slot_report["timestamp"])
+                    self._flatten_end_of_day(self.current_day_key, flatten_ts, latest_prices)
                 summary = self._finalize_day(self.current_day_key, daily_dir, run_id)
                 if summary:
                     self.latest_daily_summary = summary
@@ -627,6 +678,7 @@ class LLMStrategistBacktester:
                     daily_reports.append(summary)
             if self.current_day_key != day_key:
                 self.current_day_key = day_key
+                self._reset_risk_budget_for_day(day_key)
                 execution_tools.reset_run_state(run_id)
 
             new_plan_needed = current_plan is None or ts >= current_plan.valid_until
@@ -654,6 +706,7 @@ class LLMStrategistBacktester:
                         "valid_until": slot_end,
                     }
                 )
+                current_plan = self._apply_trigger_budget(current_plan)
                 compiled_plan = compile_plan(current_plan)
                 current_plan_payload = current_plan.model_dump()
                 current_compiled_payload = compiled_plan.model_dump()
@@ -661,6 +714,7 @@ class LLMStrategistBacktester:
                     current_plan.risk_constraints,
                     {rule.symbol: rule for rule in current_plan.sizing_rules},
                     daily_anchor_equity=self.portfolio.portfolio_state(ts).equity,
+                    risk_profile=self.risk_profile,
                 )
                 trigger_engine = TriggerEngine(current_plan, risk_engine, trade_risk=TradeRiskEvaluator(risk_engine))
                 plan_log.append(
@@ -672,6 +726,8 @@ class LLMStrategistBacktester:
                         "num_triggers": len(current_plan.triggers),
                         "max_trades_per_day": current_plan.max_trades_per_day,
                         "min_trades_per_day": current_plan.min_trades_per_day,
+                        "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
+                        "trigger_budgets": current_plan.trigger_budgets,
                     }
                 )
                 self.plan_limits_by_day[day_key] = {
@@ -679,6 +735,9 @@ class LLMStrategistBacktester:
                     "max_trades_per_day": current_plan.max_trades_per_day,
                     "min_trades_per_day": current_plan.min_trades_per_day,
                     "allowed_symbols": current_plan.allowed_symbols,
+                    "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
+                    "trigger_budgets": dict(current_plan.trigger_budgets or {}),
+                    "trigger_budget_trimmed": dict(self.latest_trigger_trim),
                 }
                 logger.info(
                     "Generated plan plan_id=%s slot_start=%s slot_end=%s triggers=%s",
@@ -737,6 +796,9 @@ class LLMStrategistBacktester:
             self.last_slot_report = slot_report
 
         if self.current_day_key:
+            if self.flatten_positions_daily and self.last_slot_report:
+                flatten_ts = datetime.fromisoformat(self.last_slot_report["timestamp"])
+                self._flatten_end_of_day(self.current_day_key, flatten_ts, latest_prices)
             summary = self._finalize_day(self.current_day_key, daily_dir, run_id)
             if summary:
                 self.latest_daily_summary = summary
@@ -792,6 +854,126 @@ class LLMStrategistBacktester:
             }
         return briefs
 
+    def _apply_trigger_budget(self, plan: StrategyPlan) -> StrategyPlan:
+        default_cap = plan.max_triggers_per_symbol_per_day or self.default_symbol_trigger_cap
+        trimmed_plan, stats = enforce_trigger_budget(plan, default_cap=default_cap, fallback_symbols=self.pairs)
+        trimmed = sum(stats.values())
+        meaningful = {symbol: count for symbol, count in stats.items() if count > 0}
+        self.latest_trigger_trim = meaningful
+        if trimmed > 0:
+            logger.info("Trimmed %s triggers via budget controls: %s", trimmed, meaningful)
+        return trimmed_plan
+
+    def _flatten_end_of_day(self, day_key: str, timestamp: datetime, price_map: Mapping[str, float]) -> None:
+        if not self.flatten_positions_daily or day_key in self.flattened_days:
+            return
+        orders: List[Order] = []
+        for symbol, qty in list(self.portfolio.positions.items()):
+            if abs(qty) <= 1e-9:
+                continue
+            price = price_map.get(symbol)
+            if price is None:
+                continue
+            side: Literal["buy", "sell"] = "sell" if qty > 0 else "buy"
+            order = Order(
+                symbol=symbol,
+                side=side,
+                quantity=abs(qty),
+                price=price,
+                timeframe=self.timeframes[0],
+                reason="eod_flatten",
+                timestamp=timestamp,
+            )
+            self.portfolio.execute(order)
+            orders.append(order)
+        if not orders:
+            self.flattened_days.add(day_key)
+            return
+        self.portfolio.mark_to_market(timestamp, price_map)
+        slot_report = {
+            "timestamp": timestamp.isoformat(),
+            "equity": self.portfolio.portfolio_state(timestamp).equity,
+            "cash": self.portfolio.cash,
+            "positions": dict(self.portfolio.positions),
+            "orders": [
+                {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "price": order.price,
+                    "timeframe": order.timeframe,
+                    "reason": order.reason,
+                }
+                for order in orders
+            ],
+            "indicator_context": self.last_slot_report.get("indicator_context", {}) if self.last_slot_report else {},
+        }
+        self.slot_reports_by_day[day_key].append(slot_report)
+        self.last_slot_report = slot_report
+        self.flattened_days.add(day_key)
+
+    def _reset_risk_budget_for_day(self, day_key: str) -> None:
+        pct = self.daily_risk_budget_pct or 0.0
+        if pct <= 0:
+            self.daily_risk_budget_state.pop(day_key, None)
+            return
+        if self.portfolio.equity_records:
+            equity = float(self.portfolio.equity_records[-1]["equity"])
+        else:
+            equity = float(self.initial_cash)
+        budget_abs = equity * (pct / 100.0)
+        self.daily_risk_budget_state[day_key] = {
+            "budget_pct": pct,
+            "start_equity": equity,
+            "budget_abs": budget_abs,
+            "used_abs": 0.0,
+        }
+
+    def _risk_budget_allowance(self, day_key: str, order: Order) -> float | None:
+        pct = self.daily_risk_budget_pct or 0.0
+        if pct <= 0:
+            return 0.0
+        entry = self.daily_risk_budget_state.get(day_key)
+        if not entry:
+            return 0.0
+        budget = entry.get("budget_abs", 0.0)
+        if budget <= 0:
+            return None
+        notional = max(order.quantity * order.price, 0.0)
+        if notional <= 0:
+            return 0.0
+        risk_fraction = max(self.active_risk_limits.max_position_risk_pct or 0.0, 0.0) / 100.0
+        if risk_fraction <= 0:
+            return 0.0
+        contribution = notional * risk_fraction
+        used = entry.get("used_abs", 0.0)
+        if used + contribution > budget + 1e-9:
+            return None
+        return contribution
+
+    def _commit_risk_budget(self, day_key: str, contribution: float) -> None:
+        if contribution <= 0:
+            return
+        entry = self.daily_risk_budget_state.get(day_key)
+        if not entry:
+            return
+        entry["used_abs"] = entry.get("used_abs", 0.0) + contribution
+
+    def _risk_budget_summary(self, day_key: str) -> Dict[str, float] | None:
+        entry = self.daily_risk_budget_state.pop(day_key, None)
+        if not entry:
+            return None
+        budget = entry.get("budget_abs", 0.0)
+        used = entry.get("used_abs", 0.0)
+        used_pct = (used / budget * 100.0) if budget > 0 else 0.0
+        return {
+            "budget_pct": entry.get("budget_pct", 0.0),
+            "budget_abs": budget,
+            "used_abs": used,
+            "used_pct": used_pct,
+            "start_equity": entry.get("start_equity", self.initial_cash),
+        }
+
     def _daily_trade_pnl(self, day_key: str) -> float:
         """Aggregate realized trade PnL for a calendar day."""
 
@@ -810,6 +992,7 @@ class LLMStrategistBacktester:
     def _finalize_day(self, day_key: str, daily_dir: Path, run_id: str) -> Dict[str, Any] | None:
         reports = self.slot_reports_by_day.pop(day_key, [])
         if not reports:
+            self.daily_risk_budget_state.pop(day_key, None)
             return None
         start_equity = reports[0]["equity"]
         end_equity = reports[-1]["equity"]
@@ -840,6 +1023,7 @@ class LLMStrategistBacktester:
             "skipped_due_to_limits": skipped_limits,
             "attempted_triggers": limit_entry["trades_attempted"],
             "executed_trades": limit_entry["trades_executed"],
+            "flatten_positions_daily": self.flatten_positions_daily,
         }
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
@@ -862,6 +1046,7 @@ class LLMStrategistBacktester:
             "blocked_by_other": blocked_other,
             "blocked_by_risk_limits": blocked_risk,
             "blocked_by_risk_budget": blocked_risk_budget,
+             "risk_budget_used_pct": 0.0,
             "blocked_totals": skipped_counts,
             "risk_block_breakdown": risk_breakdown,
             "risk_limit_hints": risk_limit_hints,
@@ -870,6 +1055,17 @@ class LLMStrategistBacktester:
         }
         summary["limit_stats"] = limit_stats
         summary["limit_enforcement"] = limit_stats
+        closes = {symbol: ctx.get("close") for symbol, ctx in indicator_context.items()}
+        overnight_exposure = {}
+        for symbol, qty in summary["positions_end"].items():
+            close = closes.get(symbol)
+            notional = qty * close if close is not None else None
+            overnight_exposure[symbol] = {"quantity": qty, "notional": notional}
+        summary["overnight_exposure"] = overnight_exposure
+        risk_budget_info = self._risk_budget_summary(day_key)
+        if risk_budget_info:
+            summary["risk_budget"] = risk_budget_info
+            limit_stats["risk_budget_used_pct"] = risk_budget_info["used_pct"]
         if plan_limits:
             summary["plan_limits"] = plan_limits
             min_trades = plan_limits.get("min_trades_per_day") or 0
@@ -881,6 +1077,7 @@ class LLMStrategistBacktester:
         run = self._apply_feedback_adjustments(run_id, feedback_obj, equity_return_pct > 0)
         summary["risk_adjustments"] = list(snapshot_adjustments(run.risk_adjustments or {}))
         (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))
+        self.flattened_days.discard(day_key)
         return summary
 
     def _judge_feedback(self, summary: Dict[str, Any]) -> Dict[str, Any]:
@@ -889,6 +1086,7 @@ class LLMStrategistBacktester:
         score += max(min(return_pct, 5.0), -5.0) * 4.0
         trade_count = summary.get("trade_count", 0)
         notes = []
+        machine_constraints = JudgeConstraints().model_dump()
         if trade_count == 0:
             notes.append("No trades executed; confirm trigger sensitivity.")
             score -= 5
@@ -926,9 +1124,18 @@ class LLMStrategistBacktester:
                 constraints["sizing_adjustments"][symbol] = "Cut risk by 25% until two winning days post drawdown."
             elif return_pct > 0.5:
                 constraints["sizing_adjustments"][symbol] = "Allow full allocation for grade A triggers only."
+        limit_stats = summary.get("limit_stats") or {}
+        attempted = summary.get("attempted_triggers", 0)
+        executed = summary.get("executed_trades", 0)
+        trigger_budget = None
+        if (attempted - executed) >= 10 or limit_stats.get("blocked_by_daily_cap", 0) >= 5:
+            trigger_budget = 6
+            constraints["must_fix"].append("Limit strategist to <=6 high-conviction triggers per symbol until cadence improves.")
+        machine_constraints["max_triggers_per_symbol_per_day"] = trigger_budget
         return {
             "score": max(0.0, min(100.0, round(score, 1))),
             "notes": " ".join(notes),
+            "constraints": machine_constraints,
             "strategist_constraints": constraints,
         }
 

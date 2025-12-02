@@ -142,3 +142,16 @@ def test_emergency_exit_bypasses_daily_cap(tmp_path, monkeypatch):
     exit_event = [{"trigger_id": "btc_exit", "timestamp": "2024-01-01T01:00:00+00:00"}]
     second = execution_tools.run_live_step_tool(run.run_id, plan.model_dump(), compiled.model_dump(), exit_event)
     assert second["executed"] == 1
+
+
+def test_symbol_trigger_budget_enforced(tmp_path, monkeypatch):
+    registry, _ = _setup(monkeypatch, tmp_path)
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    registry.update_strategy_run(run)
+    plan = _strategy_plan(run.run_id, plan_limit=5)
+    plan.max_triggers_per_symbol_per_day = 1
+    plan.trigger_budgets = {"BTC-USD": 1}
+    compiled = compile_plan(plan)
+    result = execution_tools.simulate_day_tool(run.run_id, plan.model_dump(), compiled.model_dump(), _events(3))
+    assert result["executed"] == 1
+    assert result["skipped"][BlockReason.PLAN_LIMIT.value] == 2

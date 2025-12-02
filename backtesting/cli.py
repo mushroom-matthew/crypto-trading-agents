@@ -137,6 +137,7 @@ def main() -> None:
     parser.add_argument("--max-symbol-exposure-pct", type=float, default=None, help="Override max exposure per symbol (% of equity)")
     parser.add_argument("--max-portfolio-exposure-pct", type=float, default=None, help="Override gross portfolio exposure (% of equity)")
     parser.add_argument("--max-daily-loss-pct", type=float, default=None, help="Override daily loss cap (% drawdown from daily anchor)")
+    parser.add_argument("--max-daily-risk-budget-pct", type=float, default=None, help="Optional cap on cumulative per-trade risk allocated each day")
     parser.add_argument("--risk-config", help="Optional JSON/YAML file containing risk limits (keys: max_position_risk_pct, etc.)")
     parser.add_argument("--timeframes", nargs="+", default=["1h", "4h", "1d"], help="Timeframe list for strategist indicators")
     parser.add_argument("--log-level", default="INFO", help="Backtest log level (DEBUG, INFO, etc.)")
@@ -144,6 +145,7 @@ def main() -> None:
     parser.add_argument("--log-json", action="store_true", help="Emit JSON-formatted logs")
     parser.add_argument("--debug-limits", choices=["off", "basic", "verbose"], default="off", help="Enable limit-enforcement diagnostics")
     parser.add_argument("--debug-output-dir", default=".debug/backtests", help="Directory for verbose limit debug files")
+    parser.add_argument("--flatten-daily", action="store_true", help="Flatten all open positions at the end of each trading day")
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -193,6 +195,7 @@ def main() -> None:
             "max_symbol_exposure_pct": args.max_symbol_exposure_pct,
             "max_portfolio_exposure_pct": args.max_portfolio_exposure_pct,
             "max_daily_loss_pct": args.max_daily_loss_pct,
+            "max_daily_risk_budget_pct": args.max_daily_risk_budget_pct,
         }
         risk_limits: RiskLimitSettings = resolve_risk_limits(
             Path(args.risk_config) if args.risk_config else None,
@@ -213,6 +216,7 @@ def main() -> None:
             risk_params=risk_params,
             prompt_template_path=prompt_path,
             timeframes=args.timeframes,
+            flatten_positions_daily=args.flatten_daily,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")
@@ -240,6 +244,7 @@ def main() -> None:
             fee_rate=args.fee_rate,
             strategy_config=strategy_cfg,
             weights=weights,
+            flatten_positions_daily=args.flatten_daily,
         )
         print("=== Portfolio Summary ===")
         for key, value in result.summary.items():
@@ -257,6 +262,7 @@ def main() -> None:
             initial_cash=args.initial_cash,
             fee_rate=args.fee_rate,
             strategy_config=strategy_cfg,
+            flatten_positions_daily=args.flatten_daily,
         )
         print("=== Summary ===")
         for key, value in result.summary.items():

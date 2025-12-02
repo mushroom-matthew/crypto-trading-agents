@@ -139,6 +139,8 @@ class StrategyPlan(SerializableModel):
     sizing_rules: List[PositionSizingRule] = Field(default_factory=list)
     max_trades_per_day: int | None = Field(default=None, ge=0)
     min_trades_per_day: int | None = Field(default=None, ge=0)
+    max_triggers_per_symbol_per_day: int | None = Field(default=None, ge=0)
+    trigger_budgets: Dict[str, int] = Field(default_factory=dict)
     allowed_symbols: List[str] = Field(default_factory=list)
     allowed_directions: List[TriggerDirection] = Field(default_factory=list)
     allowed_trigger_categories: List[TriggerCategory] = Field(default_factory=list)

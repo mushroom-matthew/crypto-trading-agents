@@ -3,11 +3,12 @@ from __future__ import annotations
 import pytest
 
 from schemas.judge_feedback import DisplayConstraints, JudgeFeedback
-from schemas.strategy_run import RiskLimitSettings, StrategyRun, StrategyRunConfig
+from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings, StrategyRun, StrategyRunConfig
 from services.risk_adjustment_service import (
     apply_judge_risk_feedback,
     effective_risk_limits,
     multiplier_from_instruction,
+    build_risk_profile,
 )
 
 
@@ -48,3 +49,16 @@ def test_apply_feedback_tracks_and_restores_adjustments():
 def test_multiplier_parser_handles_cap():
     assert multiplier_from_instruction("Cap risk at 10% until calm returns.") == pytest.approx(0.10)
     assert multiplier_from_instruction("Allow full allocation for grade A setups.") == pytest.approx(1.0)
+
+
+def test_build_risk_profile_maps_adjustments():
+    run = _run()
+    run.risk_adjustments = {
+        "BTC-USD": RiskAdjustmentState(multiplier=0.5, instruction="Cut"),
+        "ETH-USD": RiskAdjustmentState(multiplier=0.8, instruction="Trim"),
+    }
+    profile = build_risk_profile(run)
+    assert profile.global_multiplier == pytest.approx(0.5)
+    assert profile.multiplier_for("BTC-USD") == pytest.approx(0.5)
+    assert profile.multiplier_for("ETH-USD") == pytest.approx(0.8)
+    assert profile.multiplier_for("LTC-USD") == pytest.approx(0.5)

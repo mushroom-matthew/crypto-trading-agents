@@ -18,6 +18,11 @@ class RiskLimitSettings(SerializableModel):
     max_symbol_exposure_pct: float = Field(25.0, ge=0.0, description="Max % of equity exposed to a single symbol.")
     max_portfolio_exposure_pct: float = Field(80.0, ge=0.0, description="Max % of equity that can be deployed across all symbols.")
     max_daily_loss_pct: float = Field(3.0, ge=0.0, description="Daily loss cap that triggers a stop for the session.")
+    max_daily_risk_budget_pct: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Optional cap on cumulative per-trade risk allocated over a day.",
+    )
 
     def scaled(self, multiplier: float) -> "RiskLimitSettings":
         """Return a new RiskLimitSettings scaled by multiplier."""
@@ -29,17 +34,21 @@ class RiskLimitSettings(SerializableModel):
             max_symbol_exposure_pct=self.max_symbol_exposure_pct * multiplier,
             max_portfolio_exposure_pct=self.max_portfolio_exposure_pct * multiplier,
             max_daily_loss_pct=self.max_daily_loss_pct * multiplier,
+            max_daily_risk_budget_pct=(self.max_daily_risk_budget_pct * multiplier) if self.max_daily_risk_budget_pct else None,
         )
 
     def to_risk_params(self) -> Dict[str, float]:
         """Return the limits as a dict that can be injected into LLMInput.risk_params."""
 
-        return {
+        params = {
             "max_position_risk_pct": self.max_position_risk_pct,
             "max_symbol_exposure_pct": self.max_symbol_exposure_pct,
             "max_portfolio_exposure_pct": self.max_portfolio_exposure_pct,
             "max_daily_loss_pct": self.max_daily_loss_pct,
         }
+        if self.max_daily_risk_budget_pct is not None:
+            params["max_daily_risk_budget_pct"] = self.max_daily_risk_budget_pct
+        return params
 
     def as_constraint(self) -> RiskConstraint:
         """Convert settings into a RiskConstraint instance."""

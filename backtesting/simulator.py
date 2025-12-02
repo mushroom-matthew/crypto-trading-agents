@@ -70,6 +70,36 @@ def _apply_intents(
     return fills
 
 
+def _flatten_positions(
+    portfolio: PortfolioState,
+    last_prices: Dict[str, float],
+    timestamp: pd.Timestamp | None,
+    fee_rate: float,
+    trades: List[Dict[str, Any]],
+) -> None:
+    if timestamp is None:
+        return
+    updated = False
+    for symbol, qty in list(portfolio.positions.items()):
+        if abs(qty) <= 1e-9:
+            continue
+        price = last_prices.get(symbol)
+        if price is None:
+            continue
+        side = "SELL" if qty > 0 else "BUY"
+        notional = abs(qty) * price
+        fee = notional * fee_rate
+        if side == "SELL":
+            portfolio.cash += notional - fee
+        else:
+            portfolio.cash -= notional + fee
+        trades.append({"symbol": symbol, "side": side, "qty": abs(qty), "price": price, "fee": fee, "time": timestamp})
+        portfolio.positions.pop(symbol, None)
+        updated = True
+    if updated:
+        portfolio.equity = portfolio.cash
+
+
 def _compute_features(df: pd.DataFrame, lookback: int = 50, atr_window: int = 14) -> pd.DataFrame:
     rolling_high = df["close"].rolling(window=lookback).max()
     rolling_low = df["close"].rolling(window=lookback).min()
@@ -144,6 +174,7 @@ def run_backtest(
     initial_cash: float,
     fee_rate: float,
     strategy_config: StrategyWrapperConfig,
+    flatten_positions_daily: bool = False,
 ) -> BacktestResult:
     raw_data = load_ohlcv(pair, start, end, timeframe='1h')
     features = _compute_features(raw_data)
@@ -153,8 +184,14 @@ def run_backtest(
     equity_points: List[float] = []
     equity_index: List[pd.Timestamp] = []
     trades: List[Dict[str, Any]] = []
+    last_day: datetime.date | None = None
+    last_timestamp: pd.Timestamp | None = None
+    last_prices: Dict[str, float] = {}
 
     for ts, row in features.iterrows():
+        day = ts.date()
+        if flatten_positions_daily and last_day and day != last_day:
+            _flatten_positions(portfolio, last_prices, last_timestamp, fee_rate, trades)
         price = float(row["close"])
         feature_vector = {
             "symbol": pair,
@@ -177,6 +214,12 @@ def run_backtest(
         portfolio.max_equity = max(portfolio.max_equity, equity)
         equity_index.append(ts)
         equity_points.append(equity)
+        last_day = day
+        last_timestamp = ts
+        last_prices[pair] = price
+
+    if flatten_positions_daily:
+        _flatten_positions(portfolio, last_prices, last_timestamp, fee_rate, trades)
 
     equity_series = pd.Series(equity_points, index=equity_index)
     trades_df = pd.DataFrame(trades)
@@ -192,6 +235,7 @@ def run_portfolio_backtest(
     fee_rate: float,
     strategy_config: StrategyWrapperConfig,
     weights: Optional[Sequence[float]] = None,
+    flatten_positions_daily: bool = False,
 ) -> PortfolioBacktestResult:
     if not pairs:
         raise ValueError("pairs must not be empty")
@@ -213,6 +257,7 @@ def run_portfolio_backtest(
             initial_cash=cash_allocation,
             fee_rate=fee_rate,
             strategy_config=strategy_config,
+            flatten_positions_daily=flatten_positions_daily,
         )
         per_pair[pair] = result
 

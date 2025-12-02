@@ -151,8 +151,6 @@ def test_plan_service_applies_strategist_constraints(tmp_path):
     )
     assert plan.min_trades_per_day == 1
     assert plan.max_trades_per_day == 3
-    sizing_rule = plan.sizing_rules[0]
-    assert sizing_rule.target_risk_pct == pytest.approx(0.75)
 
 
 def test_plan_service_respects_judge_structured_constraints(tmp_path):
@@ -172,7 +170,6 @@ def test_plan_service_respects_judge_structured_constraints(tmp_path):
     )
     assert plan.min_trades_per_day == 2
     assert plan.max_trades_per_day == 6
-    assert plan.sizing_rules[0].target_risk_pct == pytest.approx(0.5)
 
 
 def test_plan_service_overrides_risk_constraints_and_injects_llm_input(tmp_path):
@@ -212,3 +209,16 @@ def test_plan_service_scales_limits_with_active_adjustments(tmp_path):
     assert stub.last_llm_input is not None
     assert stub.last_llm_input.risk_params["max_position_risk_pct"] == pytest.approx(1.0)
     assert result.risk_constraints.max_position_risk_pct == pytest.approx(1.0)
+
+
+def test_plan_service_enforces_judge_trigger_budget(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    run.latest_judge_feedback = JudgeFeedback(
+        constraints=JudgeConstraints(max_trades_per_day=6, max_triggers_per_symbol_per_day=4)
+    )
+    registry.update_strategy_run(run)
+    plan = StrategistPlanService(plan_provider=StubPlanProvider(_base_plan()), registry=registry).generate_plan_for_run(
+        run.run_id, _llm_input()
+    )
+    assert plan.max_triggers_per_symbol_per_day == 4

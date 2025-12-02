@@ -24,6 +24,7 @@ class JudgeConstraints(SerializableModel):
 
     max_trades_per_day: Optional[int] = Field(default=None, ge=0)
     min_trades_per_day: Optional[int] = Field(default=None, ge=0)
+    max_triggers_per_symbol_per_day: Optional[int] = Field(default=None, ge=0)
     symbol_risk_multipliers: Dict[str, float] = Field(default_factory=dict)
     disabled_trigger_ids: List[str] = Field(default_factory=list)
     disabled_categories: List[str] = Field(default_factory=list)

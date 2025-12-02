@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import LLMCostTracker
@@ -112,6 +113,7 @@ def test_simple_plan_executes_one_trade(tmp_path, monkeypatch):
     assert limit_stats["blocked_by_daily_cap"] == 0
     assert report["attempted_triggers"] >= report["executed_trades"]
     assert not report.get("missed_min_trades")
+    assert "overnight_exposure" in report
 
 
 def test_logs_risk_block_details(tmp_path, monkeypatch):
@@ -145,3 +147,38 @@ def test_logs_risk_block_details(tmp_path, monkeypatch):
     assert limit_stats["blocked_by_risk_limits"] > 0
     assert limit_stats["risk_block_breakdown"]["max_position_risk_pct"] > 0
     assert any(detail["reason"] == "max_position_risk_pct" for detail in limit_stats["blocked_details"])
+
+
+def test_daily_risk_budget_blocks_orders(tmp_path, monkeypatch):
+    plan = _simple_plan()
+    market_data = _build_candles()
+    run_registry = StrategyRunRegistry(tmp_path / "runs")
+    monkeypatch.setattr(execution_tools, "registry", run_registry)
+    monkeypatch.setattr(execution_tools, "engine", ExecutionEngine())
+    backtester = LLMStrategistBacktester(
+        pairs=["BTC-USD"],
+        start=None,
+        end=None,
+        initial_cash=1000.0,
+        fee_rate=0.0,
+        llm_client=LLMClient(),
+        cache_dir=tmp_path / "cache",
+        llm_calls_per_day=1,
+        risk_params={
+            "max_position_risk_pct": 5.0,
+            "max_symbol_exposure_pct": 50.0,
+            "max_portfolio_exposure_pct": 80.0,
+            "max_daily_loss_pct": 3.0,
+            "max_daily_risk_budget_pct": 0.01,
+        },
+        plan_provider=StubPlanProvider(plan),
+        market_data=market_data,
+        run_registry=run_registry,
+    )
+    result = backtester.run(run_id="budget-test")
+    report = next(entry for entry in result.daily_reports if entry["date"] == "2024-01-01")
+    assert report["executed_trades"] == 0
+    limit_stats = report["limit_stats"]
+    assert limit_stats["blocked_by_risk_budget"] > 0
+    assert limit_stats["risk_budget_used_pct"] == pytest.approx(0.0)
+    assert report["risk_budget"]["budget_pct"] == pytest.approx(0.01)

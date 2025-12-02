@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Dict, Iterable, Optional
 
+from agents.strategies.risk_engine import RiskProfile
 from schemas.judge_feedback import JudgeFeedback
 from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings, StrategyRun
 
@@ -121,3 +122,17 @@ def snapshot_adjustments(adjustments: Dict[str, RiskAdjustmentState]) -> Iterabl
             "wins_progress": state.wins_progress,
             "instruction": state.instruction,
         }
+
+
+def build_risk_profile(run: StrategyRun) -> RiskProfile:
+    """Translate the current run adjustments into a structured risk profile."""
+
+    adjustments = run.risk_adjustments or {}
+    if not adjustments:
+        return RiskProfile()
+    global_multiplier = _global_multiplier(adjustments)
+    symbol_multipliers: Dict[str, float] = {}
+    base = global_multiplier if global_multiplier > 0 else 1.0
+    for symbol, state in adjustments.items():
+        symbol_multipliers[symbol] = state.multiplier / base if base > 0 else state.multiplier
+    return RiskProfile(global_multiplier=global_multiplier, symbol_multipliers=symbol_multipliers)

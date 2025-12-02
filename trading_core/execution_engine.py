@@ -20,6 +20,7 @@ class BlockReason(str, Enum):
     DAILY_CAP = "daily_cap"
     SYMBOL_VETO = "symbol_veto"
     RISK = "risk"
+    RISK_BUDGET = "risk_budget"
     DIRECTION = "direction"
     CATEGORY = "category"
     PLAN_LIMIT = "plan_limit"
@@ -88,6 +89,8 @@ class ExecutionEngine:
         allowed_symbols: set[str]
         allowed_directions: set[str]
         allowed_categories: set[str]
+        max_symbol_triggers_per_day: Optional[int]
+        symbol_trigger_caps: Dict[str, int]
 
     def _build_limits(
         self,
@@ -107,12 +110,33 @@ class ExecutionEngine:
         allowed_symbols = set(strategy_plan.allowed_symbols or run.config.symbols)
         allowed_directions = set(strategy_plan.allowed_directions or ["long", "short"])
         allowed_categories = set(strategy_plan.allowed_trigger_categories or ["other"])
+        plan_symbol_cap = strategy_plan.max_triggers_per_symbol_per_day
+        judge_symbol_cap = constraints.max_triggers_per_symbol_per_day if constraints else None
+        if plan_symbol_cap is None:
+            symbol_cap = judge_symbol_cap
+        elif judge_symbol_cap is None:
+            symbol_cap = plan_symbol_cap
+        else:
+            symbol_cap = min(plan_symbol_cap, judge_symbol_cap)
+        symbol_trigger_caps: Dict[str, int] = {}
+        for symbol, cap in (strategy_plan.trigger_budgets or {}).items():
+            try:
+                cap_val = int(cap)
+            except (TypeError, ValueError):
+                continue
+            if cap_val <= 0:
+                continue
+            if symbol_cap is not None:
+                cap_val = min(cap_val, symbol_cap)
+            symbol_trigger_caps[symbol] = cap_val
         return ExecutionEngine.PlanLimits(
             max_trades_per_day=max_trades,
             min_trades_per_day=min_trades,
             allowed_symbols=allowed_symbols,
             allowed_directions=allowed_directions,
             allowed_categories=allowed_categories,
+            max_symbol_triggers_per_day=symbol_cap,
+            symbol_trigger_caps=symbol_trigger_caps,
         )
 
     def _validate_plan_limits(self, strategy_plan: StrategyPlan) -> None:
@@ -204,6 +228,18 @@ class ExecutionEngine:
                 reason=BlockReason.CATEGORY.value,
                 detail=f"Category {category} excluded by plan",
             )
+        if not is_emergency_exit:
+            symbol_cap = limits.symbol_trigger_caps.get(trigger.symbol, limits.max_symbol_triggers_per_day)
+            if symbol_cap and state.symbol_trades.get(trigger.symbol, 0) >= symbol_cap:
+                state.log_skip(BlockReason.PLAN_LIMIT.value)
+                return TradeEvent(
+                    timestamp=bar_timestamp,
+                    trigger_id=trigger.trigger_id,
+                    symbol=trigger.symbol,
+                    action="skipped",
+                    reason=BlockReason.PLAN_LIMIT.value,
+                    detail=f"Symbol trigger budget exceeded ({symbol_cap})",
+                )
 
         state.trades_today += 1
         state.record_trade(trigger.symbol)

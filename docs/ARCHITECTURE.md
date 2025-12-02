@@ -211,6 +211,7 @@ By reusing the same components across production agents, tests, and backtests, t
   - `risk_block_breakdown` showing how often each risk parameter (e.g., `max_symbol_exposure_pct`) prevented sizing.
   - `blocked_details`, a per-trade log with timestamps, symbols, sides, and human-readable detail strings (“Reached max trades per day (5)”, “Risk constraint max_symbol_exposure_pct prevented sizing”).
   - `risk_limit_hints`, which count trades that would have neared the configured limits even when they executed.
+  - `overnight_exposure` plus a `flatten_positions_daily` flag so operators can see exactly what inventory carried across sessions (and whether the optional auto-flatten mode was active).
 - **Judge feedback loop**: Daily reports surface the judge’s structured feedback plus the current `risk_adjustments` snapshot so the LLM strategist and human operators can see when risk was throttled, why, and what criteria will restore the original settings.
 - **Configurable backtests**: `backtesting/cli.py` can ingest risk overrides via `--risk-config path/to.json` plus CLI flags (`--max-position-risk-pct`, etc.), making it easy to replicate risk officer tweaks in historical simulations. A sample config lives at `configs/risk_limits.example.json`; run it with:
   ```

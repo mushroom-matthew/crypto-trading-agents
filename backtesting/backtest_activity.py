@@ -17,12 +17,13 @@ from backtesting.llm_strategist_runner import LLMStrategistBacktester
 logger = logging.getLogger(__name__)
 
 
-def _default_risk_params() -> Dict[str, float]:
+def _default_risk_params() -> Dict[str, float | None]:
     return {
         "max_position_risk_pct": 2.0,
         "max_symbol_exposure_pct": 25.0,
         "max_portfolio_exposure_pct": 80.0,
         "max_daily_loss_pct": 3.0,
+        "max_daily_risk_budget_pct": None,
     }
 
 
@@ -35,7 +36,8 @@ class BacktestRequest(BaseModel):
     llm_model: str = "gpt-4o-mini"
     llm_calls_per_day: int = 1
     llm_cache_dir: str = ".cache/strategy_plans"
-    risk_params: Dict[str, float] = Field(default_factory=_default_risk_params)
+    risk_params: Dict[str, float | None] = Field(default_factory=_default_risk_params)
+    flatten_daily: bool = False
 
 
 class BacktestResponse(BaseModel):
@@ -80,6 +82,7 @@ def run_backtest_activity(request_data: Dict[str, Any]) -> Dict[str, Any]:
         llm_calls_per_day=request.llm_calls_per_day,
         risk_params=request.risk_params,
         market_data=market_data,
+        flatten_positions_daily=request.flatten_daily,
     )
     result = backtester.run(run_id=f"activity-{request.symbol}-{int(time.time())}")
     response = BacktestResponse(
