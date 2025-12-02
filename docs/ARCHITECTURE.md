@@ -150,7 +150,7 @@ flowchart TD
         BTActivity["run_backtest_activity\nbacktesting/backtest_activity.py"]
     end
     subgraph Simulator Stack
-        Dataset["load_ohlcv\nbacktesting/dataset.py"]
+        Dataset["MarketDataAdapter\nbacktesting/dataset.py -> data_loader/"]
         Strategist["LLMStrategistBacktester\nbacktesting/llm_strategist_runner.py"]
         Simulator["ExecutionAgentStrategy & Simulator\nbacktesting/simulator.py"]
         Portfolio["PortfolioTracker"]
@@ -174,7 +174,7 @@ Backtests reuse the same durable primitives highlighted earlier while adding sim
 
 ### Data Stepping Strategy
 
-1. **Dataset hydration**: `backtesting/dataset.load_ohlcv` streams OHLCV bars from Coinbase via `ccxt`, normalizes timestamps, and caches CSVs under `data/backtesting`. When tests/backtests request overlapping windows, cached slices are reused for deterministic runs.
+1. **Dataset hydration**: `backtesting/dataset.load_ohlcv` now delegates to the shared `data_loader` package (`CCXTAPILoader`, `DataCache`, normalization helpers) so both live services and backtests ingest OHLCV via the same API. Coinbase/ccxt pulls are normalized, validated, and cached under `data/backtesting`, keeping deterministic slices available across runs.
 2. **Feature computation**: `backtesting/simulator._compute_features` and similar helpers create rolling highs/lows, ATR, and volume multiples, mirroring the live feature engineering (`tools/feature_engineering.py`). This ensures Execution Agent strategies observe the same feature schema in both production and tests.
 3. **Intent evaluation loop**: `ExecutionAgentStrategy.decide` (from `backtesting/strategies.py`) consumes each feature vector chronologically. `_apply_intents` enforces cash/position constraints and simulates fee debits with configurable rates so tests can assert ledger-equivalent balances.
 4. **Portfolio tracking**: `PortfolioTracker` mirrors `ExecutionLedgerWorkflow` concepts by tracking cash, mark-to-market equity, fills, and realized PnL. Its snapshots feed `tools/performance_analysis.PerformanceAnalyzer` for Sharpe, drawdown, and win-rate statistics.

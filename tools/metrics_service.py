@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-import ccxt
 import pandas as pd
 
+from data_loader import CCXTAPILoader, DataCache
+from data_loader.utils import timeframe_to_seconds
 from metrics import compute_metrics, list_metrics
 from metrics.base import REQUIRED_COLUMNS
 
 
 CACHE_DIR = Path("data/market_cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+RAW_CACHE_DIR = CACHE_DIR / "raw_feed"
+RAW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+_BACKEND = CCXTAPILoader(exchange_id="coinbase", cache=DataCache(root=RAW_CACHE_DIR))
 
 
 @dataclass(slots=True)
@@ -45,18 +51,19 @@ def save_cache_dataframe(df: pd.DataFrame, path: Path) -> None:
 
 
 def fetch_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-    exchange = ccxt.coinbaseexchange({"enableRateLimit": True})
-    try:
-        raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    finally:
-        close = getattr(exchange, "close", None)
-        if callable(close):
-            close()
-
+    seconds = timeframe_to_seconds(timeframe)
+    end = datetime.now(tz=timezone.utc)
+    start = end - timedelta(seconds=seconds * (limit + 5))
+    frame = _BACKEND.fetch_history(symbol, start, end, timeframe).tail(limit).copy()
+    frame = frame.reset_index()
+    if "time" in frame.columns:
+        frame = frame.rename(columns={"time": "timestamp"})
+    else:
+        frame = frame.rename(columns={"index": "timestamp"})
     columns = ["timestamp", "open", "high", "low", "close", "volume"]
-    df = pd.DataFrame(raw, columns=columns)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    return df.astype({"open": "float64", "high": "float64", "low": "float64", "close": "float64", "volume": "float64"})
+    frame = frame[columns]
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+    return frame.astype({"open": "float64", "high": "float64", "low": "float64", "close": "float64", "volume": "float64"})
 
 
 def resolve_dataframe(request: MetricsRequest, fetch_if_missing: bool = True) -> pd.DataFrame:

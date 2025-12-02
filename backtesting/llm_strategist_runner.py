@@ -502,9 +502,16 @@ class LLMStrategistBacktester:
                 )
             return executed_records
 
+        def _gated_trigger_id(reason: str) -> str:
+            for suffix in ("_exit", "_flat"):
+                if reason.endswith(suffix):
+                    return reason[: -len(suffix)]
+            return reason
+
         for order in orders:
             timestamp = order.timestamp.isoformat()
-            events_payload = [{"trigger_id": order.reason, "timestamp": timestamp}]
+            trigger_id = _gated_trigger_id(order.reason)
+            events_payload = [{"trigger_id": trigger_id, "timestamp": timestamp}]
             result = execution_tools.run_live_step_tool(
                 run_id,
                 plan_payload,

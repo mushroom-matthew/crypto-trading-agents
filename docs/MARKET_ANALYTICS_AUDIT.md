@@ -7,8 +7,8 @@ This note inventories every surface that measures the market, summarizes availab
 | Component | Path | Role |
 | --- | --- | --- |
 | MCP Metrics Tools | `mcp_server/app.py` (`list_technical_metrics`, `compute_technical_metrics`) | FastMCP endpoints wrapping the metrics package for ad-hoc analytics requests. |
-| Metrics Library | `metrics/` + `tools/metrics_service.py` | Calculates indicator families (ADX, ATR, BollingerBands, EMA, MACD, OBV, ROC, RSI, SMA, VWAP, WMA) on cached OHLCV data. Default cadence: 1h candles, 500-bar window; callers can override timeframe/limit. |
-| Market Data Workflows | `tools/market_data.py`, `tools/feature_engineering.py` | Stream 1s–level Coinbase ticks, preload 60 minutes of 1m candles, and maintain rolling feature vectors available via Temporal queries. |
+| Metrics Library | `metrics/` + `tools/metrics_service.py` | Calculates indicator families (ADX, ATR, BollingerBands, EMA, MACD, OBV, ROC, RSI, SMA, VWAP, WMA) on OHLCV frames served by the shared `data_loader` cache. Default cadence: 1h candles, 500-bar window; callers can override timeframe/limit. |
+| Market Data Workflows | `tools/market_data.py`, `tools/feature_engineering.py` | Stream 1s–level Coinbase ticks, preload 60 minutes of 1m candles via `data_loader`, and maintain rolling feature vectors available via Temporal queries. |
 | Execution Ledger Analytics | `agents/workflows/execution_ledger_workflow.py` (`get_performance_metrics`, `get_risk_metrics`, `get_risk_metrics_with_live_prices`) | Computes rolling trade stats and exposure ratios directly from ledger signals. Default window: 30 days. |
 | Performance Analyzer | `tools/performance_analysis.py` | Creates composite reports (Sharpe, drawdown, win metrics, VAR, qualitative scores) used by judge workflows, backtests, and dashboards. |
 | Judge Agent | `agents/workflows/judge_agent_workflow.py`, `agents/judge_agent_client.py` | Consumes performance/risk metrics, tracks evaluation windows (typically 7–30 days), evolves prompts, and requests new analyses via MCP tools. |

@@ -113,3 +113,59 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
     assert "risk_limit_hints" in summary["limit_enforcement"]
     assert "blocked_details" in summary["limit_enforcement"]
     assert "risk_adjustments" in summary
+
+
+def test_exit_orders_map_to_plan_triggers(monkeypatch, tmp_path):
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    plan = StrategyPlan(
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[
+            TriggerCondition(
+                id="buy_breakout",
+                symbol="BTC-USD",
+                direction="long",
+                timeframe="1h",
+                entry_rule="timeframe=='1h'",
+                exit_rule="True",
+                category="trend_continuation",
+            )
+        ],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=5.0,
+            max_symbol_exposure_pct=50.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[
+            PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=5.0)
+        ],
+        max_trades_per_day=5,
+        allowed_symbols=["BTC-USD"],
+        allowed_directions=["long", "flat"],
+        allowed_trigger_categories=["trend_continuation"],
+    )
+    market_data = {"BTC-USD": {"1h": _build_candles()}}
+    run_registry = StrategyRunRegistry(tmp_path / "runs_exit")
+    monkeypatch.setattr(execution_tools, "registry", run_registry)
+    monkeypatch.setattr(execution_tools, "engine", ExecutionEngine())
+    backtester = LLMStrategistBacktester(
+        pairs=["BTC-USD"],
+        start=None,
+        end=None,
+        initial_cash=1000.0,
+        fee_rate=0.0,
+        llm_client=LLMClient(),
+        cache_dir=Path(".cache/strategy_plans"),
+        llm_calls_per_day=1,
+        risk_params=_risk_params(),
+        plan_provider=StubPlanProvider(plan),
+        market_data=market_data,
+        run_registry=run_registry,
+    )
+    result = backtester.run(run_id="test-run-exit")
+    assert result.fills.shape[0] >= 1
+    exit_fills = [reason for reason in result.fills["reason"].tolist() if reason.endswith("_exit")]
+    assert exit_fills, "Expected at least one exit fill routed through the execution engine"
