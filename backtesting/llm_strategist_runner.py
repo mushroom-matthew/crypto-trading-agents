@@ -20,6 +20,7 @@ from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
 from backtesting.dataset import load_ohlcv
+from backtesting.reports import write_run_summary
 from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
 from schemas.llm_strategist import AssetState, LLMInput, PortfolioState, StrategyPlan
 from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings
@@ -840,11 +841,14 @@ class LLMStrategistBacktester:
         equity_return_pct = (final_equity / self.initial_cash - 1) * 100 if self.initial_cash else 0.0
         gross_trade_pnl = sum(float(entry.get("pnl", 0.0)) for entry in self.portfolio.trade_log)
         gross_trade_return_pct = (gross_trade_pnl / self.initial_cash * 100.0) if self.initial_cash else 0.0
+        run_summary_path = cache_base / "run_summary.json"
+        run_summary = write_run_summary(daily_reports, run_summary_path)
         summary = {
             "final_equity": final_equity,
             "equity_return_pct": equity_return_pct,
             "gross_trade_return_pct": gross_trade_return_pct,
             "return_pct": equity_return_pct,
+            "run_summary": run_summary,
         }
         return StrategistBacktestResult(
             equity_curve=equity_curve,
