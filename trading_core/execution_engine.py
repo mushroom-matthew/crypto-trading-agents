@@ -162,6 +162,7 @@ class ExecutionEngine:
         state = self._get_state(run.run_id, bar_timestamp)
         limits = self._build_limits(run, strategy_plan, constraints)
         is_emergency_exit = trigger.category == "emergency_exit"
+        is_exit_direction = trigger.direction in {"exit", "flat", "flat_exit"}
 
         if not is_emergency_exit and limits.max_trades_per_day and state.trades_today >= limits.max_trades_per_day:
             state.log_skip(BlockReason.DAILY_CAP.value)
@@ -207,7 +208,12 @@ class ExecutionEngine:
                 detail=f"Symbol {trigger.symbol} not allowed by plan",
             )
 
-        if not is_emergency_exit and limits.allowed_directions and trigger.direction not in limits.allowed_directions:
+        if (
+            not is_emergency_exit
+            and not is_exit_direction
+            and limits.allowed_directions
+            and trigger.direction not in limits.allowed_directions
+        ):
             state.log_skip(BlockReason.DIRECTION.value)
             return TradeEvent(
                 timestamp=bar_timestamp,

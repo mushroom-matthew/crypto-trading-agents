@@ -100,10 +100,32 @@ class StrategyPlanProvider:
             plan.max_trades_per_day = default_max
         if not plan.allowed_symbols:
             plan.allowed_symbols = universe
+        normalized_triggers = []
+        exit_present = False
+        valid_directions = {"long", "short", "exit"}
+        for trigger in plan.triggers:
+            direction = (trigger.direction or "").lower()
+            if direction in {"flat", "flat_exit"}:
+                direction = "exit"
+            if direction not in valid_directions:
+                raise ValueError(f"Unsupported trigger direction '{trigger.direction}' for trigger {trigger.id}")
+            if direction == "exit":
+                exit_present = True
+            normalized_triggers.append(trigger.model_copy(update={"direction": direction}))
+        plan.triggers = normalized_triggers
         if not plan.allowed_directions:
             plan.allowed_directions = ["long", "short"]
         else:
-            plan.allowed_directions = sorted({direction for direction in plan.allowed_directions if direction})
+            allowed = {direction.lower() for direction in plan.allowed_directions if direction and direction.lower() in valid_directions}
+            if not allowed:
+                raise ValueError("StrategyPlan allowed_directions empty after normalization")
+            plan.allowed_directions = sorted(allowed)
+        if exit_present and "exit" not in plan.allowed_directions:
+            plan.allowed_directions.append("exit")
+        plan.allowed_directions = sorted(set(plan.allowed_directions))
+        for trigger in plan.triggers:
+            if trigger.direction not in plan.allowed_directions:
+                raise ValueError(f"Trigger {trigger.id} direction {trigger.direction} not permitted by allowed_directions")
         if not plan.allowed_trigger_categories:
             plan.allowed_trigger_categories = [
                 "trend_continuation",

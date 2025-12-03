@@ -12,13 +12,13 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 ## Daily Reporting Clarity
 - [x] Add currency fields: `realized_pnl_abs`, `fees_abs`, `flattening_pnl_abs`, and `daily_cash_flows` (default 0.0).
 - [x] Add `carryover_pnl` when `flatten_positions_daily = false` (captures unrealized / mark-to-market residual).
-- [ ] Ensure JSON exports include new fields; verify on a sample day. *(Pending re-run)*
+- [x] Ensure JSON exports include new fields; verify on a sample day. *(Validated on `short-telemetry-smoke` daily reports.)*
 
 ## Direction Semantics & Exit Handling
-- [ ] Normalize exit triggers to a consistent `direction` (e.g., `exit`/`flat_exit`) instead of plain `flat`.
-- [ ] In limit enforcement, always allow exits that reduce absolute exposure regardless of `allowed_directions`.
-- [ ] At plan compile-time, reject or normalize any trigger direction not in `allowed_directions`; avoid execution-time blocks.
-- [ ] Tests: (1) emergency exit with an open position is not blocked and flattens; (2) invalid direction is rejected at compile-time.
+- [x] Normalize exit triggers to a consistent `direction` (supporting `exit`/`flat_exit`, normalizing `flat` ➜ `exit`) instead of plain `flat`.
+- [x] In limit enforcement, always allow exits that reduce absolute exposure regardless of `allowed_directions` (direction check bypassed for exits).
+- [x] At plan compile-time, reject or normalize any trigger direction not in `allowed_directions`; avoid execution-time blocks.
+- [x] Tests: (1) emergency exit with an open position is not blocked and flattens; (2) invalid direction is rejected at compile-time (`tests/test_direction_semantics.py`).
 
 ## Risk Usage Visibility
 - [ ] Add a run-level backtest summary (e.g., `backtesting/reports.py`): mean/median `risk_budget_used_pct`, % of days with <10% usage, mean trade_count, blocked_by_daily_cap/direction/plan_limit, heuristic correlation of `risk_budget_used_pct` vs `equity_return_pct`.
@@ -49,7 +49,7 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 - [ ] Wire judge feedback into sizing/risk knobs to reduce chronic underuse; surface under-10%-usage days in summaries.
 
 ## Suggested Implementation Order
-- [ ] PnL accounting + tests (foundation for trustworthy metrics).
-- [ ] Direction/exit semantics + catalog hygiene (reduce pointless blocks).
+- [x] PnL accounting + tests (foundation for trustworthy metrics).
+- [x] Direction/exit semantics + catalog hygiene (reduce pointless blocks).
 - [ ] Summary reporting + risk usage visibility (diagnose regime).
 - [ ] Re-run backtests, then tune budget/flatten policies based on new visibility.

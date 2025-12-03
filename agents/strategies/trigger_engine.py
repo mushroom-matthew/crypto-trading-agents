@@ -145,7 +145,7 @@ class TriggerEngine:
     ) -> Order | None:
         desired = trigger.direction
         current = self._position_direction(trigger.symbol, portfolio)
-        if desired == "flat":
+        if desired in {"flat", "exit", "flat_exit"}:
             if current == "flat":
                 return None
             return self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_flat", block_entries)

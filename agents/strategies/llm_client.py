@@ -109,14 +109,13 @@ class LLMClient:
     def _sanitize_plan_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
         triggers = data.get("triggers", [])
         cleaned: List[Dict[str, Any]] = []
-        allowed = {"long", "short", "flat"}
+        allowed = {"long", "short", "flat", "exit", "flat_exit"}
         for trig in triggers:
             direction = trig.get("direction")
             if direction not in allowed:
-                if isinstance(direction, str) and direction.lower() == "exit":
-                    trig["direction"] = "flat"
-                else:
-                    continue
+                continue
+            if isinstance(direction, str) and direction.lower() == "flat_exit":
+                trig["direction"] = "exit"
             cleaned.append(trig)
         data["triggers"] = cleaned
         return data

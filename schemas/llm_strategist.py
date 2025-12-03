@@ -82,7 +82,7 @@ class LLMInput(SerializableModel):
     global_context: Dict[str, Any] = Field(default_factory=dict)
 
 
-TriggerDirection = Literal["long", "short", "flat"]
+TriggerDirection = Literal["long", "short", "flat", "exit", "flat_exit"]
 TriggerCategory = Literal[
     "trend_continuation",
     "reversal",
