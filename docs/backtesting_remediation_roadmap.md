@@ -22,10 +22,10 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 
 ## Risk Usage Visibility
 - [x] Add a run-level backtest summary (`backtesting/reports.py`): mean/median `risk_budget_used_pct`, % of days with <10% usage, mean trade_count, blocked_by_daily_cap/direction/plan_limit, heuristic correlation of `risk_budget_used_pct` vs `equity_return_pct`.
-- [ ] Emit summary JSON alongside daily reports; verify on the current backtest. *(Enabled in runner; need a fresh run to check `run_summary.json`.)*
+- [x] Emit summary JSON alongside daily reports; verified `run_summary.json` generated for `short-telemetry-smoke-3` (risk usage still 0% → highlights underuse).
 
 ## Trade Budget Regimes (daily_cap vs plan_limit)
-- [x] Instrument per-run stats showing which brake was active each day (daily_cap vs plan_limit) and execution rate (in run summary).
+- [x] Instrument per-run stats showing which brake was active each day (daily_cap vs plan_limit) and execution rate (in run summary, plus `active_brake`/`execution_rate` per daily report going forward).
 - [ ] Decide and implement a unified daily budget policy (risk-budget-driven with soft/hard caps) to replace dual modes; document configuration knobs.
 - [ ] Add validation/backtest to confirm no overlapping brakes and expected execution rate.
 

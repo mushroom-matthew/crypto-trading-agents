@@ -1171,6 +1171,19 @@ class LLMStrategistBacktester:
         blocked_other = skipped_counts.get(BlockReason.OTHER.value, 0)
         blocked_risk_budget = skipped_counts.get("risk_budget", 0)
         blocked_risk = sum(risk_breakdown.values())
+        attempted = summary.get("attempted_triggers", 0)
+        executed = summary.get("executed_trades", 0)
+        execution_rate = (executed / attempted) if attempted else 0.0
+        daily_cap_on = blocked_daily_cap > 0
+        plan_cap_on = blocked_plan > 0
+        if daily_cap_on and plan_cap_on:
+            active_brake = "both"
+        elif daily_cap_on:
+            active_brake = "daily_cap"
+        elif plan_cap_on:
+            active_brake = "plan_limit"
+        else:
+            active_brake = "none"
         limit_stats = {
             "blocked_by_daily_cap": blocked_daily_cap,
             "blocked_by_symbol_veto": blocked_symbol_veto,
@@ -1182,6 +1195,8 @@ class LLMStrategistBacktester:
             "blocked_by_other": blocked_other,
             "blocked_by_risk_limits": blocked_risk,
             "blocked_by_risk_budget": blocked_risk_budget,
+            "execution_rate": execution_rate,
+            "active_brake": active_brake,
             "risk_budget_used_pct": 0.0,
             "risk_budget_usage_by_symbol": {},
             "risk_budget_blocks_by_symbol": {},
@@ -1193,6 +1208,8 @@ class LLMStrategistBacktester:
         }
         summary["limit_stats"] = limit_stats
         summary["limit_enforcement"] = limit_stats
+        summary["active_brake"] = active_brake
+        summary["execution_rate"] = execution_rate
         closes = {symbol: ctx.get("close") for symbol, ctx in indicator_context.items()}
         overnight_exposure = {}
         for symbol, qty in summary["positions_end"].items():
