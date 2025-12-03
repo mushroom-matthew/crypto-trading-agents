@@ -115,6 +115,8 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
     assert "blocked_details" in summary["limit_stats"]
     assert "risk_adjustments" in summary
     assert "overnight_exposure" in summary
+    assert "pnl_breakdown" in summary
+    assert "trigger_stats" in summary
 
 
 def test_exit_orders_map_to_plan_triggers(monkeypatch, tmp_path):

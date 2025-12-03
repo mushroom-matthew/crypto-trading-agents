@@ -36,11 +36,14 @@ _ALLOWED_NODES = (
     ast.LtE,
     ast.Eq,
     ast.NotEq,
+    ast.Is,
+    ast.IsNot,
 )
 
 
+_BETWEEN_TOKEN = r"(?:-?\d+(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_]*)"
 _BETWEEN_PATTERN = re.compile(
-    r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s+between\s+(?P<low>-?\d+\.?\d*)\s+and\s+(?P<high>-?\d+\.?\d*)",
+    rf"(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s+between\s+(?P<low>{_BETWEEN_TOKEN})\s+and\s+(?P<high>{_BETWEEN_TOKEN})",
     re.IGNORECASE,
 )
 

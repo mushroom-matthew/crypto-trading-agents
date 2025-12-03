@@ -51,6 +51,18 @@ def _emit_limit_debug(
             f"{stats.get('blocked_by_risk_limits', 0):>13}"
             f"{stats.get('blocked_by_plan_limits', 0):>13}"
         )
+    print("\n--- Trigger Stats ---")
+    for report in daily_reports:
+        stats = report.get("trigger_stats") or {}
+        if not stats:
+            continue
+        print(f"{report.get('date','')}:")
+        for trigger_id, payload in sorted(stats.items()):
+            blocked_reasons = payload.get("blocked_by_reason") or {}
+            print(
+                f"  {trigger_id:<30} exec={payload.get('executed', 0):>3} blocked={payload.get('blocked', 0):>3} "
+                f"cap={blocked_reasons.get('daily_cap', 0):>3} risk={blocked_reasons.get('risk_budget', 0):>3}"
+            )
 
     if mode != "verbose":
         return
@@ -112,6 +124,28 @@ def _emit_limit_debug(
                     }
                 )
     print(f"Verbose limit log written to {csv_path}")
+    trigger_path = target_dir / "trigger_stats.csv"
+    trigger_fields = ["date", "trigger_id", "executed", "blocked", "blocked_by_daily_cap", "blocked_by_risk_budget", "blocked_by_risk"]
+    with trigger_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=trigger_fields)
+        writer.writeheader()
+        for report in daily_reports:
+            date = report.get("date")
+            stats = report.get("trigger_stats") or {}
+            for trigger_id, payload in stats.items():
+                blocked_reasons = payload.get("blocked_by_reason") or {}
+                writer.writerow(
+                    {
+                        "date": date,
+                        "trigger_id": trigger_id,
+                        "executed": payload.get("executed", 0),
+                        "blocked": payload.get("blocked", 0),
+                        "blocked_by_daily_cap": blocked_reasons.get("daily_cap", 0),
+                        "blocked_by_risk_budget": blocked_reasons.get("risk_budget", 0),
+                        "blocked_by_risk": blocked_reasons.get("risk", 0),
+                    }
+                )
+    print(f"Verbose trigger stats written to {trigger_path}")
 
 
 def main() -> None:
@@ -146,6 +180,7 @@ def main() -> None:
     parser.add_argument("--debug-limits", choices=["off", "basic", "verbose"], default="off", help="Enable limit-enforcement diagnostics")
     parser.add_argument("--debug-output-dir", default=".debug/backtests", help="Directory for verbose limit debug files")
     parser.add_argument("--flatten-daily", action="store_true", help="Flatten all open positions at the end of each trading day")
+    parser.add_argument("--flatten-threshold", type=float, default=0.0, help="Only flatten positions with notional above this USD value")
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -217,6 +252,7 @@ def main() -> None:
             prompt_template_path=prompt_path,
             timeframes=args.timeframes,
             flatten_positions_daily=args.flatten_daily,
+            flatten_notional_threshold=args.flatten_threshold,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")

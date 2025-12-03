@@ -21,3 +21,4 @@ AGENTS.md
 .cache/
 strategy_export*json
 tmp*/
+.debug/

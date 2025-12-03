@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence, Literal
 
 import pandas as pd
 
@@ -72,10 +72,17 @@ class PortfolioTracker:
     def __post_init__(self) -> None:
         self.cash = self.initial_cash
 
-    def _record_pnl(self, symbol: str, pnl: float, timestamp: datetime) -> None:
-        self.trade_log.append({"timestamp": timestamp, "symbol": symbol, "pnl": pnl})
+    def _record_pnl(self, symbol: str, pnl: float, timestamp: datetime, reason: str | None = None) -> None:
+        self.trade_log.append({"timestamp": timestamp, "symbol": symbol, "pnl": pnl, "reason": reason})
 
-    def _update_position(self, symbol: str, delta_qty: float, price: float, timestamp: datetime) -> None:
+    def _update_position(
+        self,
+        symbol: str,
+        delta_qty: float,
+        price: float,
+        timestamp: datetime,
+        reason: str | None = None,
+    ) -> None:
         position = self.positions.get(symbol, 0.0)
         avg_price = self.avg_entry_price.get(symbol, price)
         new_position = position + delta_qty
@@ -91,7 +98,7 @@ class PortfolioTracker:
         closing_qty = min(abs(position), abs(delta_qty))
         if closing_qty > 0:
             pnl = closing_qty * ((price - avg_price) if position > 0 else (avg_price - price))
-            self._record_pnl(symbol, pnl, timestamp)
+            self._record_pnl(symbol, pnl, timestamp, reason)
         remaining = position + delta_qty
         if abs(remaining) <= 1e-9:
             self.positions.pop(symbol, None)
@@ -117,7 +124,7 @@ class PortfolioTracker:
             proceeds = notional - fee
             self.cash += proceeds
             delta = -qty
-        self._update_position(order.symbol, delta, order.price, order.timestamp)
+        self._update_position(order.symbol, delta, order.price, order.timestamp, order.reason)
         self.fills.append(
             {
                 "timestamp": order.timestamp,
@@ -177,6 +184,7 @@ class LLMStrategistBacktester:
         market_data: Dict[str, Dict[str, pd.DataFrame]] | None = None,
         run_registry: StrategyRunRegistry | None = None,
         flatten_positions_daily: bool = False,
+        flatten_notional_threshold: float = 0.0,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -222,7 +230,7 @@ class LLMStrategistBacktester:
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
         self.prompt_template = prompt_template_path.read_text() if prompt_template_path and prompt_template_path.exists() else None
         self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self.trigger_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.trigger_activity_by_day: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         self.skipped_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.current_day_key: str | None = None
         self.latest_daily_summary: Dict[str, Any] | None = None
@@ -236,6 +244,7 @@ class LLMStrategistBacktester:
         self.latest_trigger_trim: Dict[str, int] = {}
         self.flatten_positions_daily = flatten_positions_daily
         self.flattened_days: set[str] = set()
+        self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -472,6 +481,10 @@ class LLMStrategistBacktester:
                 logger.error("Blocked trade missing reason detail: %s", entry)
                 raise RuntimeError(f"Blocked trade missing reason detail: {entry}")
             limit_entry["blocked_details"].append(entry)
+            stats = self.trigger_activity_by_day[day_key][data.get("trigger_id", "unknown")]
+            stats["blocked"] += 1
+            stats.setdefault("blocked_by_reason", defaultdict(int))
+            stats["blocked_by_reason"][normalized] += 1
             msg = data.get("detail")
             if msg:
                 logger.info("Blocked trade (%s): %s", entry["reason"], msg)
@@ -507,6 +520,7 @@ class LLMStrategistBacktester:
                 _record_hints(order)
                 allowance = self._risk_budget_allowance(day_key, order)
                 if allowance is None:
+                    self._record_risk_budget_block(day_key, order.symbol)
                     _record_block_entry(
                         {
                             "timestamp": order.timestamp.isoformat(),
@@ -522,7 +536,7 @@ class LLMStrategistBacktester:
                         "risk_budget",
                     )
                     continue
-                self._commit_risk_budget(day_key, allowance)
+                self._commit_risk_budget(day_key, allowance, order.symbol)
                 limit_entry["trades_executed"] += 1
                 _record_execution_detail(order, "trigger_engine")
                 self.portfolio.execute(order)
@@ -536,7 +550,7 @@ class LLMStrategistBacktester:
                         "reason": order.reason,
                     }
                 )
-                self.trigger_activity_by_day[day_key][order.reason] += 1
+                self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
                 logger.debug(
                     "Executed order (no plan gating) trigger=%s symbol=%s side=%s qty=%.6f price=%.2f",
                     order.reason,
@@ -570,6 +584,7 @@ class LLMStrategistBacktester:
                 _record_hints(order)
                 allowance = self._risk_budget_allowance(day_key, order)
                 if allowance is None:
+                    self._record_risk_budget_block(day_key, order.symbol)
                     _record_block_entry(
                         {
                             "timestamp": order.timestamp.isoformat(),
@@ -585,7 +600,7 @@ class LLMStrategistBacktester:
                         "risk_budget",
                     )
                     continue
-                self._commit_risk_budget(day_key, allowance)
+                self._commit_risk_budget(day_key, allowance, order.symbol)
                 limit_entry["trades_executed"] += 1
                 _record_execution_detail(order, "execution_engine")
                 self.portfolio.execute(order)
@@ -599,7 +614,7 @@ class LLMStrategistBacktester:
                         "reason": order.reason,
                     }
                 )
-                self.trigger_activity_by_day[day_key][order.reason] += 1
+                self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
                 logger.debug(
                     "Executed order trigger=%s symbol=%s side=%s qty=%.6f price=%.2f",
                     order.reason,
@@ -656,6 +671,7 @@ class LLMStrategistBacktester:
         self.skipped_activity_by_day.clear()
         self.limit_enforcement_by_day.clear()
         self.plan_limits_by_day.clear()
+        self.flattened_days.clear()
         self.daily_risk_budget_state.clear()
         self.current_day_key = None
         self.latest_daily_summary = None
@@ -738,6 +754,11 @@ class LLMStrategistBacktester:
                     "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
                     "trigger_budgets": dict(current_plan.trigger_budgets or {}),
                     "trigger_budget_trimmed": dict(self.latest_trigger_trim),
+                    "trigger_catalog": {
+                        trigger.id: {"symbol": trigger.symbol, "category": trigger.category, "direction": trigger.direction}
+                        for trigger in current_plan.triggers
+                        if trigger.id
+                    },
                 }
                 logger.info(
                     "Generated plan plan_id=%s slot_start=%s slot_end=%s triggers=%s",
@@ -874,6 +895,9 @@ class LLMStrategistBacktester:
             price = price_map.get(symbol)
             if price is None:
                 continue
+            notional = abs(qty) * price
+            if self.flatten_notional_threshold and notional < self.flatten_notional_threshold:
+                continue
             side: Literal["buy", "sell"] = "sell" if qty > 0 else "buy"
             order = Order(
                 symbol=symbol,
@@ -927,6 +951,8 @@ class LLMStrategistBacktester:
             "start_equity": equity,
             "budget_abs": budget_abs,
             "used_abs": 0.0,
+            "symbol_usage": defaultdict(float),
+            "blocks": defaultdict(int),
         }
 
     def _risk_budget_allowance(self, day_key: str, order: Order) -> float | None:
@@ -951,13 +977,21 @@ class LLMStrategistBacktester:
             return None
         return contribution
 
-    def _commit_risk_budget(self, day_key: str, contribution: float) -> None:
+    def _commit_risk_budget(self, day_key: str, contribution: float, symbol: str | None) -> None:
         if contribution <= 0:
             return
         entry = self.daily_risk_budget_state.get(day_key)
         if not entry:
             return
         entry["used_abs"] = entry.get("used_abs", 0.0) + contribution
+        if symbol:
+            entry["symbol_usage"][symbol] += contribution
+
+    def _record_risk_budget_block(self, day_key: str, symbol: str | None) -> None:
+        entry = self.daily_risk_budget_state.get(day_key)
+        if not entry or not symbol:
+            return
+        entry["blocks"][symbol] += 1
 
     def _risk_budget_summary(self, day_key: str) -> Dict[str, float] | None:
         entry = self.daily_risk_budget_state.pop(day_key, None)
@@ -966,28 +1000,88 @@ class LLMStrategistBacktester:
         budget = entry.get("budget_abs", 0.0)
         used = entry.get("used_abs", 0.0)
         used_pct = (used / budget * 100.0) if budget > 0 else 0.0
+        symbol_usage = entry.get("symbol_usage", {})
+        symbol_usage_pct = {symbol: (value / budget * 100.0) if budget > 0 else 0.0 for symbol, value in symbol_usage.items()}
+        blocks_by_symbol = dict(entry.get("blocks", {}))
         return {
             "budget_pct": entry.get("budget_pct", 0.0),
             "budget_abs": budget,
             "used_abs": used,
             "used_pct": used_pct,
             "start_equity": entry.get("start_equity", self.initial_cash),
+            "symbol_usage_pct": symbol_usage_pct,
+            "blocks_by_symbol": blocks_by_symbol,
         }
+
+    @staticmethod
+    def _timestamp_day(value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "to_pydatetime"):
+            value = value.to_pydatetime()
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+            except ValueError:
+                return None
+        return None
 
     def _daily_trade_pnl(self, day_key: str) -> float:
         """Aggregate realized trade PnL for a calendar day."""
 
         pnl = 0.0
         for entry in self.portfolio.trade_log:
-            timestamp = entry.get("timestamp")
-            if timestamp is None:
-                continue
-            if hasattr(timestamp, "to_pydatetime"):
-                timestamp = timestamp.to_pydatetime()
-            trade_day = timestamp.date().isoformat()
-            if trade_day == day_key:
+            if self._timestamp_day(entry.get("timestamp")) == day_key:
                 pnl += float(entry.get("pnl", 0.0))
         return pnl
+
+    def _daily_costs(
+        self,
+        day_key: str,
+        start_equity: float,
+    ) -> tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+        gross = 0.0
+        flatten_pnl = 0.0
+        symbol_pnl: Dict[str, float] = defaultdict(float)
+        for entry in self.portfolio.trade_log:
+            if self._timestamp_day(entry.get("timestamp")) != day_key:
+                continue
+            pnl = float(entry.get("pnl", 0.0))
+            symbol = entry.get("symbol")
+            gross += pnl
+            if symbol:
+                symbol_pnl[symbol] += pnl
+            reason = entry.get("reason") or ""
+            if reason == "eod_flatten":
+                flatten_pnl += pnl
+        fees = 0.0
+        symbol_fees: Dict[str, float] = defaultdict(float)
+        for fill in self.portfolio.fills:
+            if self._timestamp_day(fill.get("timestamp")) != day_key:
+                continue
+            fee_val = float(fill.get("fee", 0.0))
+            symbol = fill.get("symbol")
+            fees += fee_val
+            if symbol:
+                symbol_fees[symbol] += fee_val
+        denom = start_equity or 1.0
+        breakdown = {
+            "gross_trade_pct": (gross / denom) * 100.0,
+            "fees_pct": (-fees / denom) * 100.0,
+            "flattening_pct": (flatten_pnl / denom) * 100.0,
+        }
+        symbol_breakdown: Dict[str, Dict[str, float]] = {}
+        symbols = set(symbol_pnl.keys()) | set(symbol_fees.keys())
+        for symbol in symbols:
+            gross_symbol = symbol_pnl.get(symbol, 0.0)
+            net_symbol = gross_symbol - symbol_fees.get(symbol, 0.0)
+            symbol_breakdown[symbol] = {
+                "gross_pct": (gross_symbol / denom) * 100.0,
+                "net_pct": (net_symbol / denom) * 100.0,
+            }
+        return breakdown, symbol_breakdown
 
     def _finalize_day(self, day_key: str, daily_dir: Path, run_id: str) -> Dict[str, Any] | None:
         reports = self.slot_reports_by_day.pop(day_key, [])
@@ -999,10 +1093,16 @@ class LLMStrategistBacktester:
         equity_return_pct = ((end_equity / start_equity - 1) * 100.0) if start_equity else 0.0
         gross_trade_pnl = self._daily_trade_pnl(day_key)
         gross_trade_return_pct = (gross_trade_pnl / start_equity * 100.0) if start_equity else 0.0
+        pnl_breakdown, symbol_pnl = self._daily_costs(day_key, start_equity if start_equity else 1.0)
+        pnl_breakdown["net_equity_pct"] = equity_return_pct
         trade_count = sum(len(report.get("orders", [])) for report in reports)
         indicator_context = reports[-1].get("indicator_context", {})
-        triggers = self.trigger_activity_by_day.pop(day_key, {})
-        top_triggers = sorted(triggers.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        trigger_activity = self.trigger_activity_by_day.pop(day_key, {})
+        top_triggers = sorted(
+            ((trigger_id, data.get("executed", 0)) for trigger_id, data in trigger_activity.items()),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )[:3]
         limit_entry = self.limit_enforcement_by_day.pop(day_key, _new_limit_entry())
         skipped_counts = dict(limit_entry["skipped"])
         skipped_limits = self.skipped_activity_by_day.pop(day_key, skipped_counts)
@@ -1024,6 +1124,8 @@ class LLMStrategistBacktester:
             "attempted_triggers": limit_entry["trades_attempted"],
             "executed_trades": limit_entry["trades_executed"],
             "flatten_positions_daily": self.flatten_positions_daily,
+            "pnl_breakdown": pnl_breakdown,
+            "symbol_pnl": symbol_pnl,
         }
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
@@ -1046,7 +1148,9 @@ class LLMStrategistBacktester:
             "blocked_by_other": blocked_other,
             "blocked_by_risk_limits": blocked_risk,
             "blocked_by_risk_budget": blocked_risk_budget,
-             "risk_budget_used_pct": 0.0,
+            "risk_budget_used_pct": 0.0,
+            "risk_budget_usage_by_symbol": {},
+            "risk_budget_blocks_by_symbol": {},
             "blocked_totals": skipped_counts,
             "risk_block_breakdown": risk_breakdown,
             "risk_limit_hints": risk_limit_hints,
@@ -1062,10 +1166,25 @@ class LLMStrategistBacktester:
             notional = qty * close if close is not None else None
             overnight_exposure[symbol] = {"quantity": qty, "notional": notional}
         summary["overnight_exposure"] = overnight_exposure
+        trigger_stats_payload = {}
+        for trigger_id, stats in trigger_activity.items():
+            raw_reasons = stats.get("blocked_by_reason", {})
+            if hasattr(raw_reasons, "items"):
+                reason_map = dict(raw_reasons)
+            else:
+                reason_map = raw_reasons
+            trigger_stats_payload[trigger_id] = {
+                "executed": stats.get("executed", 0),
+                "blocked": stats.get("blocked", 0),
+                "blocked_by_reason": reason_map,
+            }
+        summary["trigger_stats"] = trigger_stats_payload
         risk_budget_info = self._risk_budget_summary(day_key)
         if risk_budget_info:
             summary["risk_budget"] = risk_budget_info
             limit_stats["risk_budget_used_pct"] = risk_budget_info["used_pct"]
+            limit_stats["risk_budget_usage_by_symbol"] = risk_budget_info.get("symbol_usage_pct", {})
+            limit_stats["risk_budget_blocks_by_symbol"] = risk_budget_info.get("blocks_by_symbol", {})
         if plan_limits:
             summary["plan_limits"] = plan_limits
             min_trades = plan_limits.get("min_trades_per_day") or 0
@@ -1131,6 +1250,41 @@ class LLMStrategistBacktester:
         if (attempted - executed) >= 10 or limit_stats.get("blocked_by_daily_cap", 0) >= 5:
             trigger_budget = 6
             constraints["must_fix"].append("Limit strategist to <=6 high-conviction triggers per symbol until cadence improves.")
+        pnl_breakdown = summary.get("pnl_breakdown") or {}
+        if pnl_breakdown:
+            gross_pct = pnl_breakdown.get("gross_trade_pct", 0.0)
+            fees_pct = pnl_breakdown.get("fees_pct", 0.0)
+            flatten_pct = pnl_breakdown.get("flattening_pct", 0.0)
+            if gross_pct > 0 and gross_pct + fees_pct + flatten_pct < 0:
+                notes.append("Signals profitable pre-costs but fees/flattening erase gains.")
+                constraints["must_fix"].append("Reduce churn; disable scalp triggers that only generate fee drag.")
+        trigger_stats = summary.get("trigger_stats") or {}
+        noisy_triggers = [
+            trigger_id
+            for trigger_id, stats in trigger_stats.items()
+            if stats.get("executed", 0) == 0 and stats.get("blocked", 0) >= 5
+        ]
+        if noisy_triggers:
+            constraints["vetoes"].append(f"Disable noisy triggers: {', '.join(noisy_triggers)}")
+            disabled = set(machine_constraints.get("disabled_trigger_ids") or [])
+            disabled.update(noisy_triggers)
+            machine_constraints["disabled_trigger_ids"] = list(disabled)
+        risk_budget = summary.get("risk_budget")
+        if risk_budget:
+            used_pct = risk_budget.get("used_pct", 0.0)
+            if used_pct < 20:
+                notes.append("Risk budget underutilized; lean into high-conviction setups.")
+                constraints["boost"].append("Increase size on grade A triggers until at least 30% of daily risk is deployed.")
+            elif used_pct > 90:
+                notes.append("Risk budget nearly exhausted; tighten selectivity.")
+                constraints["must_fix"].append("Stop firing marginal triggers once 90% of daily risk is consumed.")
+                if trigger_budget is None:
+                    trigger_budget = 6
+                else:
+                    trigger_budget = min(trigger_budget, 6)
+            for symbol, pct in (risk_budget.get("symbol_usage_pct") or {}).items():
+                if pct >= 70:
+                    constraints["sizing_adjustments"][symbol] = "Cut risk by 25% until per-symbol risk share normalizes."
         machine_constraints["max_triggers_per_symbol_per_day"] = trigger_budget
         return {
             "score": max(0.0, min(100.0, round(score, 1))),

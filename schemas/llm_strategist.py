@@ -113,6 +113,7 @@ class RiskConstraint(SerializableModel):
     max_symbol_exposure_pct: float = Field(..., ge=0.0)
     max_portfolio_exposure_pct: float = Field(..., ge=0.0)
     max_daily_loss_pct: float = Field(..., ge=0.0)
+    max_daily_risk_budget_pct: float | None = Field(default=None, ge=0.0)
 
 
 class PositionSizingRule(SerializableModel):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import deque, defaultdict
 from statistics import mean
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -12,6 +12,7 @@ def _empty_memory() -> Dict[str, Any]:
         "recent_evaluations": [],
         "risk_events": {"bad_exits": 0, "late_entries": 0, "overtrading": 0},
         "trigger_performance": {},
+        "category_performance": {},
         "trade_behavior": {
             "avg_trades_per_day": 0.0,
             "avg_return_pct": 0.0,
@@ -60,6 +61,7 @@ def build_strategy_memory(history: Sequence[Dict[str, Any]], limit: int = 8) -> 
     recent_evals: List[Dict[str, Any]] = []
     issue_counts = {"bad_exits": 0, "late_entries": 0, "overtrading": 0}
     trigger_perf: Dict[str, Dict[str, float]] = {}
+    category_perf: Dict[str, Dict[str, float]] = {}
     returns: List[float] = []
     trade_counts: List[int] = []
     end_equities: List[float] = []
@@ -88,21 +90,100 @@ def build_strategy_memory(history: Sequence[Dict[str, Any]], limit: int = 8) -> 
         trade_counts.append(int(entry.get("trade_count", 0)))
         if isinstance(entry.get("end_equity"), (int, float)):
             end_equities.append(float(entry["end_equity"]))
+        catalog = (entry.get("plan_limits") or {}).get("trigger_catalog") or {}
+        trigger_stats = entry.get("trigger_stats") or {}
+        symbol_pnl = entry.get("symbol_pnl") or {}
+        symbol_exec_totals: Dict[str, float] = defaultdict(float)
+        for trig_id, stats in trigger_stats.items():
+            symbol = catalog.get(trig_id, {}).get("symbol")
+            if symbol:
+                symbol_exec_totals[symbol] += float(stats.get("executed", 0))
+        for trig_id, stats in trigger_stats.items():
+            meta = catalog.get(trig_id) or {}
+            symbol = meta.get("symbol")
+            category = meta.get("category") or "other"
+            executed = float(stats.get("executed", 0))
+            blocked = float(stats.get("blocked", 0))
+            perf = trigger_perf.setdefault(
+                trig_id,
+                {
+                    "symbol": symbol,
+                    "category": category,
+                    "fires": 0.0,
+                    "blocked": 0.0,
+                    "wins": 0.0,
+                    "gross_pct": 0.0,
+                    "net_pct": 0.0,
+                },
+            )
+            perf["fires"] += executed
+            perf["blocked"] += blocked
+            gross_share = 0.0
+            net_share = 0.0
+            if symbol and executed > 0 and symbol_exec_totals.get(symbol):
+                symbol_stats = symbol_pnl.get(symbol, {})
+                share = executed / symbol_exec_totals[symbol]
+                gross_share = symbol_stats.get("gross_pct", 0.0) * share
+                net_share = symbol_stats.get("net_pct", 0.0) * share
+                perf["gross_pct"] += gross_share
+                perf["net_pct"] += net_share
+                if net_share > 0:
+                    perf["wins"] += executed
+            cat_stats = category_perf.setdefault(
+                category,
+                {"executed": 0.0, "gross_pct": 0.0, "net_pct": 0.0, "wins": 0.0},
+            )
+            cat_stats["executed"] += executed
+            cat_stats["gross_pct"] += gross_share
+            cat_stats["net_pct"] += net_share
+            if net_share > 0:
+                cat_stats["wins"] += executed
         for trig_id, count in _iter_triggers(entry):
-            stats = trigger_perf.setdefault(trig_id, {"fires": 0.0, "weighted_return": 0.0})
-            stats["fires"] += float(count)
+            stats = trigger_perf.setdefault(
+                trig_id,
+                {
+                    "symbol": catalog.get(trig_id, {}).get("symbol"),
+                    "category": catalog.get(trig_id, {}).get("category") or "other",
+                    "fires": 0.0,
+                    "blocked": 0.0,
+                    "wins": 0.0,
+                    "gross_pct": 0.0,
+                    "net_pct": 0.0,
+                    "weighted_return": 0.0,
+                },
+            )
+            stats.setdefault("weighted_return", 0.0)
             stats["weighted_return"] += float(count) * day_return
+            stats["fires"] += float(count)
         constraints = judge.get("strategist_constraints")
         if constraints:
             last_constraints = constraints
 
-    trigger_summary = {
-        trig: {
-            "fires": stats["fires"],
-            "avg_return_pct": stats["weighted_return"] / stats["fires"] if stats["fires"] else 0.0,
+    trigger_summary = {}
+    for trig, stats in trigger_perf.items():
+        fires = stats.get("fires", 0.0)
+        weighted_return = stats.get("weighted_return", 0.0)
+        wins = stats.get("wins", 0.0)
+        trigger_summary[trig] = {
+            "symbol": stats.get("symbol"),
+            "category": stats.get("category"),
+            "fires": fires,
+            "blocked": stats.get("blocked", 0.0),
+            "avg_return_pct": (weighted_return / fires) if fires else 0.0,
+            "win_rate": (wins / fires) if fires else 0.0,
+            "gross_pct": stats.get("gross_pct", 0.0),
+            "net_pct": stats.get("net_pct", 0.0),
         }
-        for trig, stats in trigger_perf.items()
-    }
+
+    category_summary = {}
+    for category, stats in category_perf.items():
+        executed = stats.get("executed", 0.0)
+        category_summary[category] = {
+            "executed": executed,
+            "gross_pct": stats.get("gross_pct", 0.0),
+            "net_pct": stats.get("net_pct", 0.0),
+            "win_rate": (stats.get("wins", 0.0) / executed) if executed else 0.0,
+        }
 
     avg_trades = mean(trade_counts) if trade_counts else 0.0
     avg_return = mean(returns) if returns else 0.0
@@ -118,6 +199,7 @@ def build_strategy_memory(history: Sequence[Dict[str, Any]], limit: int = 8) -> 
         "recent_evaluations": recent_evals,
         "risk_events": issue_counts,
         "trigger_performance": trigger_summary,
+        "category_performance": category_summary,
         "trade_behavior": {
             "avg_trades_per_day": avg_trades,
             "avg_return_pct": avg_return,

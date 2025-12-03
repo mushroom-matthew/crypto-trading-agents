@@ -38,6 +38,7 @@ class BacktestRequest(BaseModel):
     llm_cache_dir: str = ".cache/strategy_plans"
     risk_params: Dict[str, float | None] = Field(default_factory=_default_risk_params)
     flatten_daily: bool = False
+    flatten_threshold: float = 0.0
 
 
 class BacktestResponse(BaseModel):
@@ -83,6 +84,7 @@ def run_backtest_activity(request_data: Dict[str, Any]) -> Dict[str, Any]:
         risk_params=request.risk_params,
         market_data=market_data,
         flatten_positions_daily=request.flatten_daily,
+        flatten_notional_threshold=request.flatten_threshold,
     )
     result = backtester.run(run_id=f"activity-{request.symbol}-{int(time.time())}")
     response = BacktestResponse(

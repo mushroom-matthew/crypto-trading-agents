@@ -70,3 +70,22 @@ def test_compile_tool_updates_run(tmp_path, monkeypatch):
     assert stored.plan_active is True
     assert stored.compiled_plan_id == "plan_test"
 
+
+def test_compile_plan_allows_identity_checks(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs_identity")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    plan = _strategy_plan(run.run_id, "sma_short is not None and close > sma_short")
+    compiled = compile_plan(plan)
+    assert compiled.triggers[0].entry.normalized == "sma_short is not None and close > sma_short"
+
+
+def test_between_allows_identifiers(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs_between")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    rule = "close between donchian_lower_short and donchian_upper_short"
+    plan = _strategy_plan(run.run_id, rule)
+    compiled = compile_plan(plan)
+    assert (
+        compiled.triggers[0].entry.normalized
+        == "((close) >= (donchian_lower_short) and (close) <= (donchian_upper_short))"
+    )
