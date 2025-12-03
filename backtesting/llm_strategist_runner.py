@@ -1041,21 +1041,27 @@ class LLMStrategistBacktester:
         self,
         day_key: str,
         start_equity: float,
-    ) -> tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
-        gross = 0.0
+        end_equity: float,
+    ) -> tuple[Dict[str, float], Dict[str, Dict[str, float]], Dict[str, float]]:
+        """Compute PnL components for a given day using start/end equity anchors."""
+
+        realized_total = 0.0
         flatten_pnl = 0.0
         symbol_pnl: Dict[str, float] = defaultdict(float)
+        symbol_flatten: Dict[str, float] = defaultdict(float)
         for entry in self.portfolio.trade_log:
             if self._timestamp_day(entry.get("timestamp")) != day_key:
                 continue
             pnl = float(entry.get("pnl", 0.0))
             symbol = entry.get("symbol")
-            gross += pnl
+            realized_total += pnl
             if symbol:
                 symbol_pnl[symbol] += pnl
             reason = entry.get("reason") or ""
             if reason == "eod_flatten":
                 flatten_pnl += pnl
+                if symbol:
+                    symbol_flatten[symbol] += pnl
         fees = 0.0
         symbol_fees: Dict[str, float] = defaultdict(float)
         for fill in self.portfolio.fills:
@@ -1066,22 +1072,42 @@ class LLMStrategistBacktester:
             fees += fee_val
             if symbol:
                 symbol_fees[symbol] += fee_val
+
+        non_flatten_pnl = realized_total - flatten_pnl
         denom = start_equity or 1.0
+        component_net = (non_flatten_pnl + flatten_pnl - fees) / denom * 100.0
+        equity_return_pct = ((end_equity / start_equity - 1) * 100.0) if start_equity else 0.0
+        carryover_pnl = (end_equity - start_equity) - (non_flatten_pnl + flatten_pnl - fees)
+        carryover_pct = (carryover_pnl / denom) * 100.0
         breakdown = {
-            "gross_trade_pct": (gross / denom) * 100.0,
-            "fees_pct": (-fees / denom) * 100.0,
+            "gross_trade_pct": (non_flatten_pnl / denom) * 100.0,
             "flattening_pct": (flatten_pnl / denom) * 100.0,
+            "fees_pct": (-fees / denom) * 100.0,
+            "carryover_pct": carryover_pct,
+            "component_net_pct": component_net + carryover_pct,
+            "net_equity_pct": equity_return_pct,
+            "net_equity_pct_delta": equity_return_pct - (component_net + carryover_pct),
         }
         symbol_breakdown: Dict[str, Dict[str, float]] = {}
-        symbols = set(symbol_pnl.keys()) | set(symbol_fees.keys())
+        symbols = set(symbol_pnl.keys()) | set(symbol_fees.keys()) | set(symbol_flatten.keys())
         for symbol in symbols:
-            gross_symbol = symbol_pnl.get(symbol, 0.0)
-            net_symbol = gross_symbol - symbol_fees.get(symbol, 0.0)
+            gross_symbol = symbol_pnl.get(symbol, 0.0) - symbol_flatten.get(symbol, 0.0)
+            flatten_symbol = symbol_flatten.get(symbol, 0.0)
+            fee_symbol = symbol_fees.get(symbol, 0.0)
             symbol_breakdown[symbol] = {
                 "gross_pct": (gross_symbol / denom) * 100.0,
-                "net_pct": (net_symbol / denom) * 100.0,
+                "flattening_pct": (flatten_symbol / denom) * 100.0,
+                "fees_pct": (-fee_symbol / denom) * 100.0,
+                "net_pct": ((gross_symbol + flatten_symbol - fee_symbol) / denom) * 100.0,
             }
-        return breakdown, symbol_breakdown
+        component_totals = {
+            "realized_pnl_abs": non_flatten_pnl,
+            "flattening_pnl_abs": flatten_pnl,
+            "fees_abs": fees,
+            "carryover_pnl_abs": carryover_pnl,
+            "equity_return_abs": end_equity - start_equity,
+        }
+        return breakdown, symbol_breakdown, component_totals
 
     def _finalize_day(self, day_key: str, daily_dir: Path, run_id: str) -> Dict[str, Any] | None:
         reports = self.slot_reports_by_day.pop(day_key, [])
@@ -1093,8 +1119,7 @@ class LLMStrategistBacktester:
         equity_return_pct = ((end_equity / start_equity - 1) * 100.0) if start_equity else 0.0
         gross_trade_pnl = self._daily_trade_pnl(day_key)
         gross_trade_return_pct = (gross_trade_pnl / start_equity * 100.0) if start_equity else 0.0
-        pnl_breakdown, symbol_pnl = self._daily_costs(day_key, start_equity if start_equity else 1.0)
-        pnl_breakdown["net_equity_pct"] = equity_return_pct
+        pnl_breakdown, symbol_pnl, pnl_totals = self._daily_costs(day_key, start_equity if start_equity else 1.0, end_equity)
         trade_count = sum(len(report.get("orders", [])) for report in reports)
         indicator_context = reports[-1].get("indicator_context", {})
         trigger_activity = self.trigger_activity_by_day.pop(day_key, {})
@@ -1116,6 +1141,11 @@ class LLMStrategistBacktester:
             "return_pct": equity_return_pct,
             "equity_return_pct": equity_return_pct,
             "gross_trade_return_pct": gross_trade_return_pct,
+            "realized_pnl_abs": pnl_totals["realized_pnl_abs"],
+            "flattening_pnl_abs": pnl_totals["flattening_pnl_abs"],
+            "fees_abs": pnl_totals["fees_abs"],
+            "carryover_pnl": pnl_totals["carryover_pnl_abs"],
+            "daily_cash_flows": 0.0,
             "trade_count": trade_count,
             "positions_end": reports[-1]["positions"],
             "indicator_context": indicator_context,
