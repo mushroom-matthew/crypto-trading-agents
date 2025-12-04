@@ -118,6 +118,47 @@ def test_run_live_step_accumulates_day_state(tmp_path, monkeypatch):
     assert third["skipped"][BlockReason.DAILY_CAP.value] == 1
 
 
+def test_session_trade_multipliers_scale_limits(tmp_path, monkeypatch):
+    registry, engine = _setup(monkeypatch, tmp_path)
+    run = registry.create_strategy_run(
+        StrategyRunConfig(
+            symbols=["BTC-USD"],
+            timeframes=["1h"],
+            history_window_days=7,
+            metadata={
+                "session_trade_multipliers": [
+                    {"start_hour": 0, "end_hour": 4, "multiplier": 2.0},
+                    {"start_hour": 4, "end_hour": 24, "multiplier": 0.5},
+                ]
+            },
+        )
+    )
+    registry.update_strategy_run(run)
+    plan = _strategy_plan(run.run_id, plan_limit=2)
+    compiled = compile_plan(plan)
+
+    first = execution_tools.run_live_step_tool(
+        run.run_id, plan.model_dump(), compiled.model_dump(), [{"trigger_id": "btc_long", "timestamp": "2024-01-01T00:00:00+00:00"}]
+    )
+    assert first["executed"] == 1
+
+    second = execution_tools.run_live_step_tool(
+        run.run_id, plan.model_dump(), compiled.model_dump(), [{"trigger_id": "btc_long", "timestamp": "2024-01-01T01:00:00+00:00"}]
+    )
+    assert second["executed"] == 1
+
+    third = execution_tools.run_live_step_tool(
+        run.run_id, plan.model_dump(), compiled.model_dump(), [{"trigger_id": "btc_long", "timestamp": "2024-01-01T02:00:00+00:00"}]
+    )
+    assert third["executed"] == 1
+
+    fourth = execution_tools.run_live_step_tool(
+        run.run_id, plan.model_dump(), compiled.model_dump(), [{"trigger_id": "btc_long", "timestamp": "2024-01-01T05:00:00+00:00"}]
+    )
+    assert fourth["executed"] == 0
+    assert fourth["skipped"][BlockReason.DAILY_CAP.value] == 1
+
+
 def test_emergency_exit_bypasses_daily_cap(tmp_path, monkeypatch):
     registry, engine = _setup(monkeypatch, tmp_path)
     run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from schemas.compiled_plan import CompiledPlan, CompiledTrigger
 from schemas.judge_feedback import JudgeConstraints
@@ -81,6 +81,34 @@ class ExecutionEngine:
 
     def _plan_key(self, run_id: str, plan_id: str, bar_time: datetime) -> tuple[str, str, str]:
         return (run_id, plan_id, bar_time.date().isoformat())
+
+    @staticmethod
+    def _session_multiplier(run: StrategyRun, bar_time: datetime) -> float:
+        """Return a multiplier for trade caps based on configured session windows."""
+
+        metadata = getattr(run.config, "metadata", {}) or {}
+        schedule = metadata.get("session_trade_multipliers")
+        if not schedule:
+            return 1.0
+        hour = bar_time.hour
+        entries: list[Any] = schedule if isinstance(schedule, list) else [schedule]
+        for entry in entries:
+            start = entry.get("start_hour") if isinstance(entry, dict) else None
+            end = entry.get("end_hour") if isinstance(entry, dict) else None
+            mult = entry.get("multiplier") if isinstance(entry, dict) else None
+            if start is None or end is None or mult is None:
+                continue
+            try:
+                start_hour = max(0, min(23, int(start)))
+                end_hour = max(1, min(24, int(end)))
+                multiplier = float(mult)
+            except (TypeError, ValueError):
+                continue
+            if start_hour >= end_hour:
+                continue
+            if start_hour <= hour < end_hour:
+                return max(0.0, multiplier)
+        return 1.0
 
     @dataclass(frozen=True)
     class PlanLimits:
@@ -161,18 +189,24 @@ class ExecutionEngine:
         self._validate_plan_limits(strategy_plan)
         state = self._get_state(run.run_id, bar_timestamp)
         limits = self._build_limits(run, strategy_plan, constraints)
+        session_multiplier = self._session_multiplier(run, bar_timestamp)
         is_emergency_exit = trigger.category == "emergency_exit"
         is_exit_direction = trigger.direction in {"exit", "flat", "flat_exit"}
 
-        if not is_emergency_exit and limits.max_trades_per_day and state.trades_today >= limits.max_trades_per_day:
+        max_trades_cap = limits.max_trades_per_day
+        if session_multiplier != 1.0 and max_trades_cap:
+            max_trades_cap = max(1, int(max_trades_cap * session_multiplier))
+
+        if not is_emergency_exit and max_trades_cap and state.trades_today >= max_trades_cap:
             state.log_skip(BlockReason.DAILY_CAP.value)
+            suffix = f" (session x{session_multiplier:.2f})" if session_multiplier != 1.0 else ""
             return TradeEvent(
                 timestamp=bar_timestamp,
                 trigger_id=trigger.trigger_id,
                 symbol=trigger.symbol,
                 action="skipped",
                 reason=BlockReason.DAILY_CAP.value,
-                detail=f"Reached max trades per day ({limits.max_trades_per_day})",
+                detail=f"Reached max trades per day ({max_trades_cap}){suffix}",
             )
 
         if constraints and not is_emergency_exit:
@@ -236,15 +270,18 @@ class ExecutionEngine:
             )
         if not is_emergency_exit:
             symbol_cap = limits.symbol_trigger_caps.get(trigger.symbol, limits.max_symbol_triggers_per_day)
+            if session_multiplier != 1.0 and symbol_cap:
+                symbol_cap = max(1, int(symbol_cap * session_multiplier))
             if symbol_cap and state.symbol_trades.get(trigger.symbol, 0) >= symbol_cap:
                 state.log_skip(BlockReason.PLAN_LIMIT.value)
+                suffix = f" (session x{session_multiplier:.2f})" if session_multiplier != 1.0 else ""
                 return TradeEvent(
                     timestamp=bar_timestamp,
                     trigger_id=trigger.trigger_id,
                     symbol=trigger.symbol,
                     action="skipped",
                     reason=BlockReason.PLAN_LIMIT.value,
-                    detail=f"Symbol trigger budget exceeded ({symbol_cap})",
+                    detail=f"Symbol trigger budget exceeded ({symbol_cap}){suffix}",
                 )
 
         state.trades_today += 1

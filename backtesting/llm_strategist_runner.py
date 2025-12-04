@@ -187,6 +187,7 @@ class LLMStrategistBacktester:
         flatten_positions_daily: bool = False,
         flatten_notional_threshold: float = 0.0,
         flatten_session_boundary_hour: int | None = None,
+        session_trade_multipliers: Sequence[Mapping[str, float | int]] | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -248,7 +249,7 @@ class LLMStrategistBacktester:
         self.flattened_days: set[str] = set()
         self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
         self.flatten_session_boundary_hour = flatten_session_boundary_hour
-        self.flatten_session_boundary_hour = flatten_session_boundary_hour
+        self.session_trade_multipliers = list(session_trade_multipliers) if session_trade_multipliers else None
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -387,14 +388,22 @@ class LLMStrategistBacktester:
         except KeyError:
             history_days = max(1, (self.end - self.start).days if self.start and self.end else 30)
             cadence_hours = max(1, int(self.plan_interval.total_seconds() // 3600) or 1)
+            metadata: Dict[str, Any] = {}
+            if self.session_trade_multipliers:
+                metadata["session_trade_multipliers"] = self.session_trade_multipliers
             config = StrategyRunConfig(
                 symbols=self.pairs,
                 timeframes=self.timeframes,
                 history_window_days=history_days,
                 plan_cadence_hours=cadence_hours,
                 risk_limits=self.base_risk_limits,
+                metadata=metadata,
             )
             run = self.run_registry.create_strategy_run(config=config, run_id=run_id)
+        else:
+            if self.session_trade_multipliers and not run.config.metadata.get("session_trade_multipliers"):
+                run.config.metadata["session_trade_multipliers"] = self.session_trade_multipliers
+                run = self.run_registry.update_strategy_run(run)
         self._refresh_risk_state_from_run(run)
 
     def _build_bar(self, pair: str, timeframe: str, timestamp: datetime) -> Bar:
@@ -774,6 +783,7 @@ class LLMStrategistBacktester:
                     "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
                     "trigger_budgets": dict(current_plan.trigger_budgets or {}),
                     "trigger_budget_trimmed": dict(self.latest_trigger_trim),
+                    "session_trade_multipliers": self.session_trade_multipliers,
                     "trigger_catalog": {
                         trigger.id: {"symbol": trigger.symbol, "category": trigger.category, "direction": trigger.direction}
                         for trigger in current_plan.triggers
@@ -1013,11 +1023,11 @@ class LLMStrategistBacktester:
             target_risk_pct = self.sizing_targets.get(order.symbol)
         if target_risk_pct is None:
             target_risk_pct = self.active_risk_limits.max_position_risk_pct or 0.0
-        # Adaptive boost: if prior day risk usage <10%, allow higher per-trade risk up to 2x.
+        # Adaptive boost: if prior day risk usage <10%, allow higher per-trade risk up to 3x.
         prev_usage = 100.0
         if self.latest_daily_summary and "risk_budget" in self.latest_daily_summary:
             prev_usage = self.latest_daily_summary["risk_budget"].get("used_pct", 100.0)
-        adaptive_multiplier = 2.0 if prev_usage < 10.0 else 1.0
+        adaptive_multiplier = 3.0 if prev_usage < 10.0 else 1.0
         risk_fraction = max(target_risk_pct * adaptive_multiplier, 0.0) / 100.0
         if risk_fraction <= 0:
             return 0.0

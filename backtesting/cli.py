@@ -23,6 +23,28 @@ from .simulator import run_backtest, run_portfolio_backtest
 from .strategies import StrategyWrapperConfig, StrategyParameters
 
 
+def _parse_session_multipliers(raw: str | None) -> list[dict[str, float]] | None:
+    """Parse a comma-separated list of session windows into multiplier mappings."""
+
+    if not raw:
+        return None
+    schedule: list[dict[str, float]] = []
+    for chunk in raw.split(","):
+        piece = chunk.strip()
+        if not piece or ":" not in piece or "-" not in piece:
+            continue
+        window, mult_str = piece.split(":", 1)
+        start_str, end_str = window.split("-", 1)
+        try:
+            start = int(start_str)
+            end = int(end_str)
+            multiplier = float(mult_str)
+        except ValueError:
+            continue
+        schedule.append({"start_hour": start, "end_hour": end, "multiplier": multiplier})
+    return schedule or None
+
+
 def _emit_limit_debug(
     daily_reports: List[Dict[str, Any]],
     mode: str,
@@ -182,6 +204,10 @@ def main() -> None:
     parser.add_argument("--flatten-daily", action="store_true", help="Flatten all open positions at the end of each trading day")
     parser.add_argument("--flatten-threshold", type=float, default=0.0, help="Only flatten positions with notional above this USD value")
     parser.add_argument("--flatten-session-hour", type=int, default=None, help="Optional UTC hour to flatten positions (e.g., 0 for midnight session close)")
+    parser.add_argument(
+        "--session-trade-multipliers",
+        help="Optional session cap schedule, e.g., '0-4:1.5,4-24:0.75' to raise caps early UTC and throttle later hours",
+    )
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -240,6 +266,7 @@ def main() -> None:
         risk_params = risk_limits.to_risk_params()
         pairs = args.pairs or [args.pair]
         prompt_path = Path(args.llm_prompt) if args.llm_prompt else None
+        session_multipliers = _parse_session_multipliers(args.session_trade_multipliers)
         backtester = LLMStrategistBacktester(
             pairs=pairs,
             start=start,
@@ -255,6 +282,7 @@ def main() -> None:
             flatten_positions_daily=args.flatten_daily,
             flatten_notional_threshold=args.flatten_threshold,
             flatten_session_boundary_hour=args.flatten_session_hour,
+            session_trade_multipliers=session_multipliers,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")
