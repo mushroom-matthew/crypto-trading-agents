@@ -96,6 +96,7 @@ class StrategistPlanService:
             run.latest_judge_feedback,
         )
         plan.trigger_budgets = self._sanitize_trigger_budgets(plan.trigger_budgets)
+        plan = self._enforce_derived_trade_cap(plan)
         run.current_plan_id = plan.plan_id
         self.registry.update_strategy_run(run)
         cache_path = self.plan_provider._cache_path(run_id, plan_date, llm_input)
@@ -156,6 +157,31 @@ class StrategistPlanService:
             if val > 0:
                 cleaned[symbol] = val
         return cleaned
+
+    def _enforce_derived_trade_cap(self, plan: StrategyPlan) -> StrategyPlan:
+        """Ensure plans with a daily risk budget enforce the derived trade cap."""
+
+        if plan.risk_constraints.max_daily_risk_budget_pct is None:
+            return plan
+        derived_cap = getattr(plan, "_derived_trade_cap", None)
+        if not derived_cap:
+            budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
+            per_trade_risk = None
+            if plan.sizing_rules:
+                risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
+                if risks:
+                    per_trade_risk = min(risks)
+            if per_trade_risk is None or per_trade_risk <= 0:
+                per_trade_risk = plan.risk_constraints.max_position_risk_pct
+            if per_trade_risk and per_trade_risk > 0 and budget_pct and budget_pct > 0:
+                derived_cap = max(8, math.ceil(budget_pct / per_trade_risk))
+        if not derived_cap:
+            return plan
+        plan = plan.model_copy(update={"max_trades_per_day": int(derived_cap)})
+        if plan.max_triggers_per_symbol_per_day is None or plan.max_triggers_per_symbol_per_day < derived_cap:
+            plan.max_triggers_per_symbol_per_day = int(derived_cap)
+        object.__setattr__(plan, "_derived_trade_cap", int(derived_cap))
+        return plan
 
     def _apply_strategist_constraints(self, plan: StrategyPlan, constraints: DisplayConstraints) -> StrategyPlan:
         plan = plan.model_copy(deep=True)

@@ -43,6 +43,7 @@ class TradeEvent:
 class DailyExecutionState:
     trades_today: int = 0
     symbol_trades: Dict[str, int] = field(default_factory=dict)
+    timeframe_trades: Dict[str, int] = field(default_factory=dict)
     skipped_reasons: Dict[str, int] = field(default_factory=dict)
 
     def log_skip(self, reason: str) -> None:
@@ -50,6 +51,7 @@ class DailyExecutionState:
 
     def record_trade(self, symbol: str) -> None:
         self.symbol_trades[symbol] = self.symbol_trades.get(symbol, 0) + 1
+        # Timeframe count incremented at evaluate_trigger where timeframe is known.
 
 
 class ExecutionEngine:
@@ -119,6 +121,7 @@ class ExecutionEngine:
         allowed_categories: set[str]
         max_symbol_triggers_per_day: Optional[int]
         symbol_trigger_caps: Dict[str, int]
+        timeframe_trigger_caps: Dict[str, int]
 
     def _build_limits(
         self,
@@ -157,6 +160,16 @@ class ExecutionEngine:
             if symbol_cap is not None:
                 cap_val = min(cap_val, symbol_cap)
             symbol_trigger_caps[symbol] = cap_val
+        timeframe_trigger_caps: Dict[str, int] = {}
+        metadata_caps = (run.config.metadata or {}).get("timeframe_trigger_caps", {})
+        if isinstance(metadata_caps, dict):
+            for tf, cap in metadata_caps.items():
+                try:
+                    val = int(cap)
+                except (TypeError, ValueError):
+                    continue
+                if val > 0:
+                    timeframe_trigger_caps[str(tf)] = val
         return ExecutionEngine.PlanLimits(
             max_trades_per_day=max_trades,
             min_trades_per_day=min_trades,
@@ -165,6 +178,7 @@ class ExecutionEngine:
             allowed_categories=allowed_categories,
             max_symbol_triggers_per_day=symbol_cap,
             symbol_trigger_caps=symbol_trigger_caps,
+            timeframe_trigger_caps=timeframe_trigger_caps,
         )
 
     def _validate_plan_limits(self, strategy_plan: StrategyPlan) -> None:
@@ -192,6 +206,12 @@ class ExecutionEngine:
         session_multiplier = self._session_multiplier(run, bar_timestamp)
         is_emergency_exit = trigger.category == "emergency_exit"
         is_exit_direction = trigger.direction in {"exit", "flat", "flat_exit"}
+        # CompiledTrigger omits timeframe; derive from strategy_plan if available.
+        timeframe = None
+        for original in strategy_plan.triggers:
+            if original.id == trigger.trigger_id:
+                timeframe = getattr(original, "timeframe", None)
+                break
 
         max_trades_cap = limits.max_trades_per_day
         if session_multiplier != 1.0 and max_trades_cap:
@@ -283,9 +303,22 @@ class ExecutionEngine:
                     reason=BlockReason.PLAN_LIMIT.value,
                     detail=f"Symbol trigger budget exceeded ({symbol_cap}){suffix}",
                 )
+            timeframe_cap = limits.timeframe_trigger_caps.get(timeframe) if timeframe else None
+            if timeframe_cap and state.timeframe_trades.get(timeframe, 0) >= timeframe_cap:
+                state.log_skip(BlockReason.PLAN_LIMIT.value)
+                return TradeEvent(
+                    timestamp=bar_timestamp,
+                    trigger_id=trigger.trigger_id,
+                    symbol=trigger.symbol,
+                    action="skipped",
+                    reason=BlockReason.PLAN_LIMIT.value,
+                    detail=f"Timeframe trigger budget exceeded ({timeframe_cap})",
+                )
 
         state.trades_today += 1
         state.record_trade(trigger.symbol)
+        if timeframe:
+            state.timeframe_trades[timeframe] = state.timeframe_trades.get(timeframe, 0) + 1
         key = self._plan_key(run.run_id, compiled_plan.plan_id, bar_timestamp)
         self.plan_trade_counts[key] = self.plan_trade_counts.get(key, 0) + 1
         return TradeEvent(

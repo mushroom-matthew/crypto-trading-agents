@@ -188,6 +188,7 @@ class LLMStrategistBacktester:
         flatten_notional_threshold: float = 0.0,
         flatten_session_boundary_hour: int | None = None,
         session_trade_multipliers: Sequence[Mapping[str, float | int]] | None = None,
+        timeframe_trigger_caps: Mapping[str, int] | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -250,6 +251,7 @@ class LLMStrategistBacktester:
         self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
         self.flatten_session_boundary_hour = flatten_session_boundary_hour
         self.session_trade_multipliers = list(session_trade_multipliers) if session_trade_multipliers else None
+        self.timeframe_trigger_caps = {str(tf): int(cap) for tf, cap in (timeframe_trigger_caps or {}).items() if cap is not None}
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -391,6 +393,8 @@ class LLMStrategistBacktester:
             metadata: Dict[str, Any] = {}
             if self.session_trade_multipliers:
                 metadata["session_trade_multipliers"] = self.session_trade_multipliers
+            if self.timeframe_trigger_caps:
+                metadata["timeframe_trigger_caps"] = self.timeframe_trigger_caps
             config = StrategyRunConfig(
                 symbols=self.pairs,
                 timeframes=self.timeframes,
@@ -403,7 +407,9 @@ class LLMStrategistBacktester:
         else:
             if self.session_trade_multipliers and not run.config.metadata.get("session_trade_multipliers"):
                 run.config.metadata["session_trade_multipliers"] = self.session_trade_multipliers
-                run = self.run_registry.update_strategy_run(run)
+            if self.timeframe_trigger_caps and not run.config.metadata.get("timeframe_trigger_caps"):
+                run.config.metadata["timeframe_trigger_caps"] = self.timeframe_trigger_caps
+            run = self.run_registry.update_strategy_run(run)
         self._refresh_risk_state_from_run(run)
 
     def _build_bar(self, pair: str, timeframe: str, timestamp: datetime) -> Bar:
@@ -784,6 +790,7 @@ class LLMStrategistBacktester:
                     "trigger_budgets": dict(current_plan.trigger_budgets or {}),
                     "trigger_budget_trimmed": dict(self.latest_trigger_trim),
                     "session_trade_multipliers": self.session_trade_multipliers,
+                    "timeframe_trigger_caps": self.timeframe_trigger_caps,
                     "trigger_catalog": {
                         trigger.id: {"symbol": trigger.symbol, "category": trigger.category, "direction": trigger.direction}
                         for trigger in current_plan.triggers

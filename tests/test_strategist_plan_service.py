@@ -172,6 +172,33 @@ def test_plan_service_respects_judge_structured_constraints(tmp_path):
     assert plan.max_trades_per_day == 6
 
 
+def test_plan_service_prefers_derived_cap_with_risk_budget(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    risk_limits = RiskLimitSettings(
+        max_position_risk_pct=2.0,
+        max_symbol_exposure_pct=25.0,
+        max_portfolio_exposure_pct=80.0,
+        max_daily_loss_pct=3.0,
+        max_daily_risk_budget_pct=10.0,
+    )
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7, risk_limits=risk_limits)
+    )
+    run.latest_judge_feedback = JudgeFeedback(
+        constraints=JudgeConstraints(max_trades_per_day=None, risk_mode="normal"),
+        strategist_constraints=DisplayConstraints(must_fix=["At least one qualified trigger per day"]),
+    )
+    registry.update_strategy_run(run)
+    plan = _base_plan()
+    plan.max_trades_per_day = 3
+    service = StrategistPlanService(plan_provider=StubPlanProvider(plan), registry=registry)
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.risk_constraints.max_daily_risk_budget_pct == pytest.approx(10.0)
+    assert getattr(result, "_derived_trade_cap") >= 8
+    assert result.max_trades_per_day == getattr(result, "_derived_trade_cap")
+    assert result.max_triggers_per_symbol_per_day == getattr(result, "_derived_trade_cap")
+
+
 def test_plan_service_overrides_risk_constraints_and_injects_llm_input(tmp_path):
     registry = StrategyRunRegistry(tmp_path / "runs")
     risk_limits = RiskLimitSettings(

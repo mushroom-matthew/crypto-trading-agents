@@ -45,6 +45,26 @@ def _parse_session_multipliers(raw: str | None) -> list[dict[str, float]] | None
     return schedule or None
 
 
+def _parse_timeframe_caps(raw: str | None) -> dict[str, int] | None:
+    """Parse a comma-separated list of timeframe caps (e.g., '1h:8,4h:2')."""
+
+    if not raw:
+        return None
+    caps: dict[str, int] = {}
+    for chunk in raw.split(","):
+        piece = chunk.strip()
+        if not piece or ":" not in piece:
+            continue
+        tf, cap_str = piece.split(":", 1)
+        try:
+            cap_val = int(cap_str)
+        except ValueError:
+            continue
+        if cap_val > 0:
+            caps[tf.strip()] = cap_val
+    return caps or None
+
+
 def _emit_limit_debug(
     daily_reports: List[Dict[str, Any]],
     mode: str,
@@ -208,6 +228,10 @@ def main() -> None:
         "--session-trade-multipliers",
         help="Optional session cap schedule, e.g., '0-4:1.5,4-24:0.75' to raise caps early UTC and throttle later hours",
     )
+    parser.add_argument(
+        "--timeframe-trigger-caps",
+        help="Optional per-timeframe trigger caps, e.g., '1h:8,4h:2' to favor 1h setups",
+    )
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -267,6 +291,7 @@ def main() -> None:
         pairs = args.pairs or [args.pair]
         prompt_path = Path(args.llm_prompt) if args.llm_prompt else None
         session_multipliers = _parse_session_multipliers(args.session_trade_multipliers)
+        timeframe_caps = _parse_timeframe_caps(args.timeframe_trigger_caps)
         backtester = LLMStrategistBacktester(
             pairs=pairs,
             start=start,
@@ -283,6 +308,7 @@ def main() -> None:
             flatten_notional_threshold=args.flatten_threshold,
             flatten_session_boundary_hour=args.flatten_session_hour,
             session_trade_multipliers=session_multipliers,
+            timeframe_trigger_caps=timeframe_caps,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")

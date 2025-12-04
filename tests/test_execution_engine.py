@@ -196,3 +196,21 @@ def test_symbol_trigger_budget_enforced(tmp_path, monkeypatch):
     result = execution_tools.simulate_day_tool(run.run_id, plan.model_dump(), compiled.model_dump(), _events(3))
     assert result["executed"] == 1
     assert result["skipped"][BlockReason.PLAN_LIMIT.value] == 2
+
+
+def test_timeframe_trigger_cap_enforced(tmp_path, monkeypatch):
+    registry, _ = _setup(monkeypatch, tmp_path)
+    run = registry.create_strategy_run(
+        StrategyRunConfig(
+            symbols=["BTC-USD"],
+            timeframes=["1h"],
+            history_window_days=7,
+            metadata={"timeframe_trigger_caps": {"1h": 1}},
+        )
+    )
+    registry.update_strategy_run(run)
+    plan = _strategy_plan(run.run_id, plan_limit=5)
+    compiled = compile_plan(plan)
+    result = execution_tools.simulate_day_tool(run.run_id, plan.model_dump(), compiled.model_dump(), _events(3))
+    assert result["executed"] == 1
+    assert result["skipped"][BlockReason.PLAN_LIMIT.value] == 2
