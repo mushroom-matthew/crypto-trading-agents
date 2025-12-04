@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 from collections import defaultdict
@@ -13,6 +14,9 @@ from pathlib import Path
 from schemas.llm_strategist import LLMInput, StrategyPlan
 
 from .llm_client import LLMClient
+
+
+logger = logging.getLogger(__name__)
 
 
 def _estimate_tokens(text: str) -> int:
@@ -98,12 +102,34 @@ class StrategyPlanProvider:
         default_max = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "10"))
         if plan.max_trades_per_day is None:
             plan.max_trades_per_day = default_max
+        derived_cap = None
+        if plan.risk_constraints.max_daily_risk_budget_pct is not None:
+            budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
+            # Allow higher per-trade risk up to twice the configured cap, bounded by the daily budget.
+            if plan.risk_constraints.max_position_risk_pct < budget_pct:
+                boosted = min(budget_pct, plan.risk_constraints.max_position_risk_pct * 6)
+                plan.risk_constraints.max_position_risk_pct = boosted
+            # Use the smallest non-zero sizing target as per-trade risk proxy; fall back to max_position_risk_pct.
+            target_risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
+            per_trade_risk = min(target_risks) if target_risks else plan.risk_constraints.max_position_risk_pct
+            if per_trade_risk and per_trade_risk > 0:
+                derived_cap = max(8, math.ceil(budget_pct / per_trade_risk))
+                plan.max_trades_per_day = derived_cap
+                plan.max_triggers_per_symbol_per_day = derived_cap
+        # Ensure sizing rules reflect the boosted per-trade risk cap so trades consume more budget.
+        for rule in plan.sizing_rules:
+            if not rule.target_risk_pct or rule.target_risk_pct < plan.risk_constraints.max_position_risk_pct:
+                rule.target_risk_pct = plan.risk_constraints.max_position_risk_pct
         if not plan.allowed_symbols:
             plan.allowed_symbols = universe
         normalized_triggers = []
         exit_present = False
         valid_directions = {"long", "short", "exit"}
+        dead_suffixes = ("_exit_exit", "_exit_flat")
         for trigger in plan.triggers:
+            if any(trigger.id.endswith(suffix) for suffix in dead_suffixes):
+                logger.info("Pruning trigger %s due to dead suffix", trigger.id)
+                continue
             direction = (trigger.direction or "").lower()
             if direction in {"flat", "flat_exit"}:
                 direction = "exit"
@@ -113,6 +139,18 @@ class StrategyPlanProvider:
                 exit_present = True
             normalized_triggers.append(trigger.model_copy(update={"direction": direction}))
         plan.triggers = normalized_triggers
+        # Prune triggers that would be blocked by allowed_directions immediately.
+        plan.triggers = [tr for tr in plan.triggers if tr.direction in valid_directions]
+        # Bias toward the dominant 1h regime: thin non-1h duplicates.
+        triggers_by_key: dict[tuple[str, str], list[TriggerCondition]] = defaultdict(list)
+        for trig in plan.triggers:
+            triggers_by_key[(trig.symbol, trig.timeframe)].append(trig)
+        trimmed_triggers: list[TriggerCondition] = []
+        for (symbol, timeframe), trig_list in triggers_by_key.items():
+            if timeframe != "1h" and len(trig_list) > 1:
+                trig_list = trig_list[:1]
+            trimmed_triggers.extend(trig_list)
+        plan.triggers = trimmed_triggers
         if not plan.allowed_directions:
             plan.allowed_directions = ["long", "short"]
         else:
@@ -126,6 +164,9 @@ class StrategyPlanProvider:
         for trigger in plan.triggers:
             if trigger.direction not in plan.allowed_directions:
                 raise ValueError(f"Trigger {trigger.id} direction {trigger.direction} not permitted by allowed_directions")
+        if derived_cap is not None:
+            # Attach derived cap for downstream logging/inspection (not persisted in model_dump).
+            object.__setattr__(plan, "_derived_trade_cap", derived_cap)
         if not plan.allowed_trigger_categories:
             plan.allowed_trigger_categories = [
                 "trend_continuation",

@@ -42,6 +42,10 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
     blocked_direction: list[int] = []
     execution_rates: list[float] = []
     brake_counts = {"daily_cap": 0, "plan_limit": 0, "both": 0, "neither": 0}
+    timeframe_counts: dict[str, int] = {}
+    timeframe_executions: dict[str, int] = {}
+    hour_counts: dict[int, int] = {}
+    hour_executions: dict[int, int] = {}
 
     for report in daily_reports:
         limit_stats = report.get("limit_stats") or {}
@@ -59,6 +63,24 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
         executed = report.get("executed_trades") or limit_stats.get("executed_trades") or 0
         if attempted:
             execution_rates.append(executed / attempted)
+        for entry in (limit_stats.get("blocked_details") or []) + (limit_stats.get("executed_details") or []):
+            tf = entry.get("timeframe")
+            if tf:
+                timeframe_counts[tf] = timeframe_counts.get(tf, 0) + 1
+            outcome = entry.get("outcome") or ""
+            reason = entry.get("reason")
+            executed_outcome = outcome == "executed" or not reason
+            if executed_outcome and tf:
+                timeframe_executions[tf] = timeframe_executions.get(tf, 0) + 1
+            ts = entry.get("timestamp")
+            if ts and isinstance(ts, str) and len(ts) >= 13:
+                try:
+                    hour = int(ts[11:13])
+                    hour_counts[hour] = hour_counts.get(hour, 0) + 1
+                    if executed_outcome:
+                        hour_executions[hour] = hour_executions.get(hour, 0) + 1
+                except ValueError:
+                    continue
         daily_cap = blocked_daily_cap[-1] > 0
         plan_cap = blocked_plan[-1] > 0
         if daily_cap and plan_cap:
@@ -73,6 +95,12 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
     risk_under_10 = sum(1 for val in risk_usage if val < 10.0)
     corr = _pearson(risk_usage, returns) if len(risk_usage) >= 2 else 0.0
     days = len(daily_reports)
+    timeframe_exec_rate = {
+        tf: (timeframe_executions.get(tf, 0) / timeframe_counts[tf]) if timeframe_counts.get(tf) else 0.0 for tf in timeframe_counts
+    }
+    hour_exec_rate = {
+        hr: (hour_executions.get(hr, 0) / hour_counts[hr]) if hour_counts.get(hr) else 0.0 for hr in hour_counts
+    }
     summary = {
         "days": days,
         "risk_budget_used_pct_mean": _safe_mean(risk_usage),
@@ -85,6 +113,8 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
         "execution_rate_mean": _safe_mean(execution_rates),
         "risk_usage_vs_return_corr": corr,
         "brake_distribution": brake_counts,
+        "timeframe_execution_rate": timeframe_exec_rate,
+        "hour_execution_rate": hour_exec_rate,
     }
     return summary
 

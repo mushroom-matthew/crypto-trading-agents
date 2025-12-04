@@ -181,6 +181,7 @@ def main() -> None:
     parser.add_argument("--debug-output-dir", default=".debug/backtests", help="Directory for verbose limit debug files")
     parser.add_argument("--flatten-daily", action="store_true", help="Flatten all open positions at the end of each trading day")
     parser.add_argument("--flatten-threshold", type=float, default=0.0, help="Only flatten positions with notional above this USD value")
+    parser.add_argument("--flatten-session-hour", type=int, default=None, help="Optional UTC hour to flatten positions (e.g., 0 for midnight session close)")
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -253,6 +254,7 @@ def main() -> None:
             timeframes=args.timeframes,
             flatten_positions_daily=args.flatten_daily,
             flatten_notional_threshold=args.flatten_threshold,
+            flatten_session_boundary_hour=args.flatten_session_hour,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")

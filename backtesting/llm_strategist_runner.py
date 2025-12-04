@@ -186,6 +186,7 @@ class LLMStrategistBacktester:
         run_registry: StrategyRunRegistry | None = None,
         flatten_positions_daily: bool = False,
         flatten_notional_threshold: float = 0.0,
+        flatten_session_boundary_hour: int | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -246,6 +247,8 @@ class LLMStrategistBacktester:
         self.flatten_positions_daily = flatten_positions_daily
         self.flattened_days: set[str] = set()
         self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
+        self.flatten_session_boundary_hour = flatten_session_boundary_hour
+        self.flatten_session_boundary_hour = flatten_session_boundary_hour
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -479,8 +482,8 @@ class LLMStrategistBacktester:
                 "source": source,
             }
             if normalized == BlockReason.OTHER.value and not entry["detail"]:
-                logger.error("Blocked trade missing reason detail: %s", entry)
-                raise RuntimeError(f"Blocked trade missing reason detail: {entry}")
+                entry["detail"] = "Unspecified block; execution engine returned no detail"
+                logger.warning("Blocked trade missing detail; normalizing to OTHER: %s", entry)
             limit_entry["blocked_details"].append(entry)
             stats = self.trigger_activity_by_day[day_key][data.get("trigger_id", "unknown")]
             stats["blocked"] += 1
@@ -662,6 +665,8 @@ class LLMStrategistBacktester:
         plan_log: List[Dict[str, Any]] = []
         latest_prices: Dict[str, float] = {symbol: 0.0 for symbol in self.pairs}
         daily_reports: List[Dict[str, Any]] = []
+        sizing_targets: Dict[str, float] = {}
+        session_flattened: set[str] = set()
 
         active_assets: Dict[str, AssetState] = {}
         cache_base = Path(self.plan_provider.cache_dir) / run_id
@@ -719,11 +724,23 @@ class LLMStrategistBacktester:
                 )
                 current_plan = current_plan.model_copy(
                     update={
+                        "risk_constraints": current_plan.risk_constraints.model_copy(
+                            update={"max_daily_risk_budget_pct": self.active_risk_limits.max_daily_risk_budget_pct}
+                        )
+                    }
+                )
+                current_plan = current_plan.model_copy(
+                    update={
                         "generated_at": slot_start,
                         "valid_until": slot_end,
                     }
                 )
                 current_plan = self._apply_trigger_budget(current_plan)
+                sizing_targets = {
+                    rule.symbol: (rule.target_risk_pct or self.active_risk_limits.max_position_risk_pct)
+                    for rule in current_plan.sizing_rules
+                }
+                derived_cap = getattr(current_plan, "_derived_trade_cap", None)
                 compiled_plan = compile_plan(current_plan)
                 current_plan_payload = current_plan.model_dump()
                 current_compiled_payload = compiled_plan.model_dump()
@@ -742,6 +759,7 @@ class LLMStrategistBacktester:
                         "regime": current_plan.regime,
                         "num_triggers": len(current_plan.triggers),
                         "max_trades_per_day": current_plan.max_trades_per_day,
+                        "derived_max_trades_per_day": derived_cap or current_plan.max_trades_per_day,
                         "min_trades_per_day": current_plan.min_trades_per_day,
                         "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
                         "trigger_budgets": current_plan.trigger_budgets,
@@ -750,6 +768,7 @@ class LLMStrategistBacktester:
                 self.plan_limits_by_day[day_key] = {
                     "plan_id": current_plan.plan_id,
                     "max_trades_per_day": current_plan.max_trades_per_day,
+                    "derived_max_trades_per_day": getattr(current_plan, "_derived_trade_cap", None),
                     "min_trades_per_day": current_plan.min_trades_per_day,
                     "allowed_symbols": current_plan.allowed_symbols,
                     "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
@@ -804,6 +823,13 @@ class LLMStrategistBacktester:
                     slot_orders.extend(executed_records)
                     if timeframe == self.timeframes[0]:
                         latest_prices[pair] = bar.close
+            if (
+                self.flatten_session_boundary_hour is not None
+                and ts.hour == self.flatten_session_boundary_hour
+                and day_key not in session_flattened
+            ):
+                self._flatten_end_of_day(day_key, ts, latest_prices)
+                session_flattened.add(day_key)
             self.portfolio.mark_to_market(ts, latest_prices)
             portfolio_state = self.portfolio.portfolio_state(ts)
             slot_report = {
@@ -889,6 +915,16 @@ class LLMStrategistBacktester:
             logger.info("Trimmed %s triggers via budget controls: %s", trimmed, meaningful)
         return trimmed_plan
 
+    def _apply_risk_limits_to_plan(self, plan: StrategyPlan) -> StrategyPlan:
+        """Inject active risk limits (including daily risk budget) and derive trade caps."""
+
+        updated_constraints = plan.risk_constraints.model_copy(
+            update={"max_daily_risk_budget_pct": self.active_risk_limits.max_daily_risk_budget_pct}
+        )
+        plan = plan.model_copy(update={"risk_constraints": updated_constraints})
+        plan = self.plan_provider._enrich_plan(plan, llm_input=self._llm_input(plan.generated_at, self._asset_states(plan.generated_at)))  # type: ignore[arg-type]
+        return plan
+
     def _flatten_end_of_day(self, day_key: str, timestamp: datetime, price_map: Mapping[str, float]) -> None:
         if not self.flatten_positions_daily or day_key in self.flattened_days:
             return
@@ -972,7 +1008,17 @@ class LLMStrategistBacktester:
         notional = max(order.quantity * order.price, 0.0)
         if notional <= 0:
             return 0.0
-        risk_fraction = max(self.active_risk_limits.max_position_risk_pct or 0.0, 0.0) / 100.0
+        target_risk_pct = None
+        if hasattr(self, "sizing_targets"):
+            target_risk_pct = self.sizing_targets.get(order.symbol)
+        if target_risk_pct is None:
+            target_risk_pct = self.active_risk_limits.max_position_risk_pct or 0.0
+        # Adaptive boost: if prior day risk usage <10%, allow higher per-trade risk up to 2x.
+        prev_usage = 100.0
+        if self.latest_daily_summary and "risk_budget" in self.latest_daily_summary:
+            prev_usage = self.latest_daily_summary["risk_budget"].get("used_pct", 100.0)
+        adaptive_multiplier = 2.0 if prev_usage < 10.0 else 1.0
+        risk_fraction = max(target_risk_pct * adaptive_multiplier, 0.0) / 100.0
         if risk_fraction <= 0:
             return 0.0
         contribution = notional * risk_fraction
@@ -1158,6 +1204,7 @@ class LLMStrategistBacktester:
             "attempted_triggers": limit_entry["trades_attempted"],
             "executed_trades": limit_entry["trades_executed"],
             "flatten_positions_daily": self.flatten_positions_daily,
+            "flatten_session_hour": self.flatten_session_boundary_hour,
             "pnl_breakdown": pnl_breakdown,
             "symbol_pnl": symbol_pnl,
         }

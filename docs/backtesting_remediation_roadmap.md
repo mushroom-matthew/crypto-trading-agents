@@ -26,13 +26,13 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 
 ## Trade Budget Regimes (daily_cap vs plan_limit)
 - [x] Instrument per-run stats showing which brake was active each day (daily_cap vs plan_limit) and execution rate (in run summary, plus `active_brake`/`execution_rate` per daily report going forward).
-- [ ] Decide and implement a unified daily budget policy (risk-budget-driven with soft/hard caps) to replace dual modes; document configuration knobs.
-- [ ] Add validation/backtest to confirm no overlapping brakes and expected execution rate.
+- [x] Introduce risk-budget-derived daily cap: if `max_daily_risk_budget_pct` is set, derive `max_trades_per_day` from per-trade risk (min sizing rule target or `max_position_risk_pct`) and log `derived_max_trades_per_day` in plan limits.
+- [ ] Add validation/backtest to confirm no overlapping brakes and expected execution rate under the unified cap; tune derived cap thresholds as needed. *(Risk usage still <10%; daily_cap active on some days; day-1 plans sometimes lack `derived_max_trades_per_day` in limits.)*
 
 ## Trigger Catalog Hygiene
-- [ ] Prune or refactor dead variants (`*_exit_exit`, `*_exit_flat`) that never execute; remove from the catalog or merge semantics.
-- [ ] Ensure entry/exit triggers share consistent direction semantics and align with `allowed_directions`.
-- [ ] Add a catalog validation step to catch unused/always-blocked triggers before backtests run.
+- [x] Prune or refactor dead variants (`*_exit_exit`, `*_exit_flat`) that never execute; remove from the catalog or merge semantics.
+- [x] Ensure entry/exit triggers share consistent direction semantics and align with `allowed_directions` (normalized).
+- [x] Add a catalog validation step to catch unused/always-blocked triggers before backtests run. *(Pruning implemented; needs further validation for always-blocked triggers.)*
 
 ## Flattening Policy & Fee Drag
 - [ ] Make flatten PnL explicit in reports; ensure fees for open + flatten are reflected in `fees_pct`.
@@ -40,7 +40,8 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 - [ ] Add a test/backtest slice demonstrating fee impact of flattening policy choices.
 
 ## Timeframe & Time-of-Day Alignment
-- [ ] Revisit `max_trades_per_day` and risk budgets for 1h-dominant, early-UTC activity; consider per-session or per-1h-bar budgeting.
+- [x] Add timeframe/hour-of-day execution rate telemetry in `run_summary` (timeframe_execution_rate, hour_execution_rate).
+- [ ] Revisit `max_trades_per_day` and risk budgets for 1h-dominant, early-UTC activity; consider per-session or per-1h-bar budgeting. *(Initial bias: cap derived per symbol per day and thin non-1h duplicates.)*
 - [ ] Evaluate whether 4h triggers should be deprioritized or given separate limits; update plan generation accordingly.
 - [ ] Add reporting slices by timeframe and hour-of-day for executed trades.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+import math
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -49,6 +50,19 @@ class StrategistPlanService:
         plan = self.plan_provider.get_plan(run_id, plan_date, llm_input, prompt_template=prompt_template)
         plan = plan.model_copy(deep=True)
         plan.risk_constraints = self._merge_plan_risk_constraints(plan.risk_constraints, risk_limits)
+        if plan.risk_constraints.max_daily_risk_budget_pct is None and risk_limits.max_daily_risk_budget_pct is not None:
+            plan.risk_constraints.max_daily_risk_budget_pct = risk_limits.max_daily_risk_budget_pct
+        # Prefer derived caps when a daily budget exists; otherwise derive a fallback.
+        derived_cap = getattr(plan, "_derived_trade_cap", None)
+        if derived_cap:
+            plan.max_trades_per_day = derived_cap
+        elif plan.risk_constraints.max_daily_risk_budget_pct is not None and plan.risk_constraints.max_position_risk_pct > 0:
+            fallback_cap = max(
+                8,
+                math.ceil(plan.risk_constraints.max_daily_risk_budget_pct / plan.risk_constraints.max_position_risk_pct),
+            )
+            plan.max_trades_per_day = fallback_cap
+            object.__setattr__(plan, "_derived_trade_cap", fallback_cap)
         plan.run_id = run.run_id
         combined_symbols = sorted({*(run.config.symbols or []), *(asset.symbol for asset in llm_input.assets)})
         if not plan.allowed_symbols:
