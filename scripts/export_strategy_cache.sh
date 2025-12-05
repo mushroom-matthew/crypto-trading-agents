@@ -26,6 +26,19 @@ runs: list[dict] = []
 for run_dir in runs_to_process:
     run_id = run_dir.name if run_dir != cache_dir else cache_dir.name
     run_data: dict = {"run_id": run_id, "plans": [], "daily_reports": []}
+    run_summary_path = run_dir / "run_summary.json"
+    if run_summary_path.exists():
+        try:
+            summary_content = json.loads(run_summary_path.read_text())
+            run_data["run_summary"] = {
+                "path": str(run_summary_path.relative_to(cache_dir if cache_dir != run_dir else run_dir)),
+                "content": summary_content,
+            }
+        except json.JSONDecodeError:
+            run_data["run_summary"] = {
+                "path": str(run_summary_path.relative_to(cache_dir if cache_dir != run_dir else run_dir)),
+                "error": "invalid_json",
+            }
     daily_dir = run_dir / "daily_reports"
     if daily_dir.exists():
         for daily_file in sorted(daily_dir.glob("*.json")):

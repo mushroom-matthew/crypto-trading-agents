@@ -23,6 +23,7 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 ## Risk Usage Visibility
 - [x] Add a run-level backtest summary (`backtesting/reports.py`): mean/median `risk_budget_used_pct`, % of days with <10% usage, mean trade_count, blocked_by_daily_cap/direction/plan_limit, heuristic correlation of `risk_budget_used_pct` vs `equity_return_pct`.
 - [x] Emit summary JSON alongside daily reports; verified `run_summary.json` generated for `short-telemetry-smoke-3` (risk usage still 0% → highlights underuse).
+- [ ] Replace the “<10% usage” equity-based stat with budget utilization: compute per-day `risk_budget_utilization_pct = used_abs / (start_equity * max_daily_risk_budget_pct)` and report mean/median plus % days <25%, 25–75%, >75%. Feed utilization into judge context (low utilization with positive returns → gently raise sizing/caps; high utilization with losses → tighten).
 
 ## Trade Budget Regimes (daily_cap vs plan_limit)
 - [x] Instrument per-run stats showing which brake was active each day (daily_cap vs plan_limit) and execution rate (in run summary, plus `active_brake`/`execution_rate` per daily report going forward).
@@ -35,22 +36,34 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 - [x] Add a catalog validation step to catch unused/always-blocked triggers before backtests run. *(Pruning implemented; needs further validation for always-blocked triggers.)*
 
 ## Flattening Policy & Fee Drag
-- [ ] Make flatten PnL explicit in reports; ensure fees for open + flatten are reflected in `fees_pct`.
-- [ ] Parameterize flatten policy: daily vs “flatten before 00:00 UTC” (session-based) to match 1h intraday behavior.
-- [ ] Add a test/backtest slice demonstrating fee impact of flattening policy choices.
+- [ ] Parameterize flatten policy: `none`, `daily_close`, and `session_close_utc` (e.g., 23:00/00:00); surface choice in plan/run metadata.
+- [ ] Attribute PnL cleanly: `gross_trade_pct` (strategy exits), `flattening_pct` (forced close), and `fees_pct` including flatten orders.
+- [ ] Add A/B backtests (never vs daily vs session flatten) and report `flattening_pct_mean`, `fees_pct_mean`, and % days with flatten trades; document fee drag guidance.
 
 ## Timeframe & Time-of-Day Alignment
 - [x] Add timeframe/hour-of-day execution rate telemetry in `run_summary` (timeframe_execution_rate, hour_execution_rate).
-- [ ] Revisit `max_trades_per_day` and risk budgets for 1h-dominant, early-UTC activity; consider per-session or per-1h-bar budgeting. *(Initial bias: cap derived per symbol per day and thin non-1h duplicates.)*
-- [ ] Evaluate whether 4h triggers should be deprioritized or given separate limits; update plan generation accordingly.
-- [ ] Add reporting slices by timeframe and hour-of-day for executed trades.
+- [ ] Add per-session risk/trade budgets (e.g., per 8h UTC blocks) derived from per-trade risk and session budget; wire caps into execution.
+- [ ] Gate or down-weight time-of-day: optional allowed UTC hour window for backtests; use telemetry to bias active hours (early UTC).
+- [ ] Evaluate 4h triggers: either prune or cap separately (tiny budget) when 1h dominates; make this configurable.
+- [ ] Add reporting slices by session for executed trades and utilization.
 
 ## Risk-On Expression
 - [ ] Adjust risk sizing so high-conviction setups can consume a larger fraction of the 3.75% budget when appropriate.
-- [ ] Wire judge feedback into sizing/risk knobs to reduce chronic underuse; surface under-10%-usage days in summaries.
+- [ ] Wire judge feedback into sizing/risk knobs to reduce chronic underuse; drive adjustments from budget utilization bands instead of raw equity pct.
+- [ ] Add conviction-aware sizing: allow triggers to express conviction (low/medium/high) and map to per-trade risk multipliers (clipped by daily budget). Log risk/PnL by conviction.
 
 ## Suggested Implementation Order
 - [x] PnL accounting + tests (foundation for trustworthy metrics).
 - [x] Direction/exit semantics + catalog hygiene (reduce pointless blocks).
-- [ ] Summary reporting + risk usage visibility (diagnose regime).
-- [ ] Re-run backtests, then tune budget/flatten policies based on new visibility.
+- [ ] Budget utilization metrics + judge wiring (make risk usage meaningful).
+- [ ] Flatten policy A/B + fee drag measurement.
+- [ ] Session/timeframe budgeting aligned to telemetry; validate derived caps.
+- [ ] Conviction-aware risk-on expression.
+- [ ] Re-run longer backtests to validate PnL/fee/risk behavior post-tuning.
+
+## Phase 2 Focus (post-telemetry learnings)
+- **Risk expression tuning:** Raise per-trade risk and/or adaptive multipliers on low-utilization winning days; allow session multipliers to lift caps when utilization <25% without negative returns.
+- **Cap alignment:** Ensure daily caps scale with budget intent (avoid tiny caps with unused budget); bias caps toward active hours (0–4 UTC) and 1h timeframe; allow configurable 4h throttling/pruning.
+- **Flatten A/B:** Run `none` vs `daily_close` vs `session_close_utc` to measure `flattening_pct_mean`, `fees_pct_mean`, and risk utilization impact; pick a default based on fee drag.
+- **Budget sweeps:** Use A/B helper to sweep `max_daily_risk_budget_pct` and `max_position_risk_pct` to verify utilization moves and identify remaining bottlenecks (plan limits vs budget).
+- **Judge feedback refinement:** Drive judge sizing/cap hints from budget utilization bands (under 25% with gains → boost; over 75% with losses → tighten) and from timeframe/hour effectiveness.

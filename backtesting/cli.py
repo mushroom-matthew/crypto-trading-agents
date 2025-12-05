@@ -232,6 +232,11 @@ def main() -> None:
         "--timeframe-trigger-caps",
         help="Optional per-timeframe trigger caps, e.g., '1h:8,4h:2' to favor 1h setups",
     )
+    parser.add_argument(
+        "--flatten-policy",
+        choices=["none", "daily_close", "session_close_utc"],
+        help="Flattening behavior: none, force daily close, or flatten once per day at --flatten-session-hour",
+    )
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -292,6 +297,14 @@ def main() -> None:
         prompt_path = Path(args.llm_prompt) if args.llm_prompt else None
         session_multipliers = _parse_session_multipliers(args.session_trade_multipliers)
         timeframe_caps = _parse_timeframe_caps(args.timeframe_trigger_caps)
+        flatten_policy = args.flatten_policy
+        if not flatten_policy:
+            if args.flatten_session_hour is not None:
+                flatten_policy = "session_close_utc"
+            elif args.flatten_daily:
+                flatten_policy = "daily_close"
+            else:
+                flatten_policy = "none"
         backtester = LLMStrategistBacktester(
             pairs=pairs,
             start=start,
@@ -309,6 +322,7 @@ def main() -> None:
             flatten_session_boundary_hour=args.flatten_session_hour,
             session_trade_multipliers=session_multipliers,
             timeframe_trigger_caps=timeframe_caps,
+            flatten_policy=flatten_policy,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Literal
 
@@ -66,6 +67,7 @@ class PortfolioTracker:
     cash: float = field(init=False)
     positions: Dict[str, float] = field(default_factory=dict)
     avg_entry_price: Dict[str, float] = field(default_factory=dict)
+    position_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     equity_records: List[Dict[str, Any]] = field(default_factory=list)
     trade_log: List[Dict[str, Any]] = field(default_factory=list)
     fills: List[Dict[str, Any]] = field(default_factory=list)
@@ -73,8 +75,33 @@ class PortfolioTracker:
     def __post_init__(self) -> None:
         self.cash = self.initial_cash
 
-    def _record_pnl(self, symbol: str, pnl: float, timestamp: datetime, reason: str | None = None) -> None:
-        self.trade_log.append({"timestamp": timestamp, "symbol": symbol, "pnl": pnl, "reason": reason})
+    def _record_pnl(
+        self,
+        symbol: str,
+        pnl: float,
+        timestamp: datetime,
+        reason: str | None = None,
+        entry_reason: str | None = None,
+        entry_timeframe: str | None = None,
+        entry_timestamp: datetime | None = None,
+        entry_price: float | None = None,
+        exit_price: float | None = None,
+        entry_side: str | None = None,
+    ) -> None:
+        self.trade_log.append(
+            {
+                "timestamp": timestamp,
+                "symbol": symbol,
+                "pnl": pnl,
+                "reason": reason,
+                "entry_reason": entry_reason,
+                "entry_timeframe": entry_timeframe,
+                "entry_timestamp": entry_timestamp,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "entry_side": entry_side,
+            }
+        )
 
     def _update_position(
         self,
@@ -83,31 +110,60 @@ class PortfolioTracker:
         price: float,
         timestamp: datetime,
         reason: str | None = None,
+        timeframe: str | None = None,
     ) -> None:
         position = self.positions.get(symbol, 0.0)
         avg_price = self.avg_entry_price.get(symbol, price)
+        meta = self.position_meta.get(symbol, {})
         new_position = position + delta_qty
         if position == 0 or (position > 0 and new_position > 0) or (position < 0 and new_position < 0):
             if new_position == 0:
                 self.positions.pop(symbol, None)
                 self.avg_entry_price.pop(symbol, None)
+                self.position_meta.pop(symbol, None)
             else:
                 total_notional = abs(position) * avg_price + abs(delta_qty) * price
                 self.positions[symbol] = new_position
                 self.avg_entry_price[symbol] = total_notional / abs(new_position)
+                self.position_meta[symbol] = {
+                    "reason": reason,
+                    "timeframe": timeframe,
+                    "opened_at": timestamp,
+                    "entry_price": price,
+                    "entry_side": "long" if new_position > 0 else "short",
+                }
             return
         closing_qty = min(abs(position), abs(delta_qty))
         if closing_qty > 0:
             pnl = closing_qty * ((price - avg_price) if position > 0 else (avg_price - price))
-            self._record_pnl(symbol, pnl, timestamp, reason)
+            self._record_pnl(
+                symbol,
+                pnl,
+                timestamp,
+                reason,
+                entry_reason=meta.get("reason"),
+                entry_timeframe=meta.get("timeframe"),
+                entry_timestamp=meta.get("opened_at"),
+                entry_price=meta.get("entry_price"),
+                exit_price=price,
+                entry_side=meta.get("entry_side"),
+            )
         remaining = position + delta_qty
         if abs(remaining) <= 1e-9:
             self.positions.pop(symbol, None)
             self.avg_entry_price.pop(symbol, None)
+            self.position_meta.pop(symbol, None)
         else:
             self.positions[symbol] = remaining
             # direction flipped; reset basis to execution price
             self.avg_entry_price[symbol] = price
+            self.position_meta[symbol] = {
+                "reason": reason,
+                "timeframe": timeframe,
+                "opened_at": timestamp,
+                "entry_price": price,
+                "entry_side": "long" if remaining > 0 else "short",
+            }
 
     def execute(self, order: Order) -> None:
         qty = max(order.quantity, 0.0)
@@ -125,7 +181,7 @@ class PortfolioTracker:
             proceeds = notional - fee
             self.cash += proceeds
             delta = -qty
-        self._update_position(order.symbol, delta, order.price, order.timestamp, order.reason)
+        self._update_position(order.symbol, delta, order.price, order.timestamp, order.reason, order.timeframe)
         self.fills.append(
             {
                 "timestamp": order.timestamp,
@@ -189,6 +245,7 @@ class LLMStrategistBacktester:
         flatten_session_boundary_hour: int | None = None,
         session_trade_multipliers: Sequence[Mapping[str, float | int]] | None = None,
         timeframe_trigger_caps: Mapping[str, int] | None = None,
+        flatten_policy: str | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -252,6 +309,31 @@ class LLMStrategistBacktester:
         self.flatten_session_boundary_hour = flatten_session_boundary_hour
         self.session_trade_multipliers = list(session_trade_multipliers) if session_trade_multipliers else None
         self.timeframe_trigger_caps = {str(tf): int(cap) for tf, cap in (timeframe_trigger_caps or {}).items() if cap is not None}
+        self.flatten_policy = flatten_policy or (
+            "session_close_utc"
+            if flatten_session_boundary_hour is not None
+            else ("daily_close" if flatten_positions_daily else "none")
+        )
+        if self.flatten_policy == "daily_close":
+            self.flatten_positions_daily = True
+            self.flatten_session_boundary_hour = None
+        elif self.flatten_policy == "session_close_utc":
+            self.flatten_positions_daily = False
+            if self.flatten_session_boundary_hour is None:
+                self.flatten_session_boundary_hour = flatten_session_boundary_hour if flatten_session_boundary_hour is not None else 0
+        else:
+            self.flatten_positions_daily = False
+            self.flatten_session_boundary_hour = None
+        self.risk_usage_by_day: Dict[str, Dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
+        self.risk_usage_events_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self.latency_by_day: Dict[str, Dict[tuple[str, str], List[float]]] = defaultdict(lambda: defaultdict(list))
+        self.timeframe_exec_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.session_trade_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.trigger_load_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self.trigger_load_threshold = int(os.environ.get("TRIGGER_LOAD_THRESHOLD", "12"))
+        self.archetype_load_by_day: Dict[str, Dict[tuple[str, str, int], int]] = defaultdict(lambda: defaultdict(int))
+        self.archetype_load_threshold = int(os.environ.get("ARCHETYPE_LOAD_THRESHOLD", "8"))
+        self.archetype_load_scale_start = float(os.environ.get("ARCHETYPE_LOAD_SCALE_START", "0.6"))
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -395,6 +477,8 @@ class LLMStrategistBacktester:
                 metadata["session_trade_multipliers"] = self.session_trade_multipliers
             if self.timeframe_trigger_caps:
                 metadata["timeframe_trigger_caps"] = self.timeframe_trigger_caps
+            if self.flatten_policy:
+                metadata["flatten_policy"] = self.flatten_policy
             config = StrategyRunConfig(
                 symbols=self.pairs,
                 timeframes=self.timeframes,
@@ -409,6 +493,8 @@ class LLMStrategistBacktester:
                 run.config.metadata["session_trade_multipliers"] = self.session_trade_multipliers
             if self.timeframe_trigger_caps and not run.config.metadata.get("timeframe_trigger_caps"):
                 run.config.metadata["timeframe_trigger_caps"] = self.timeframe_trigger_caps
+            if self.flatten_policy and not run.config.metadata.get("flatten_policy"):
+                run.config.metadata["flatten_policy"] = self.flatten_policy
             run = self.run_registry.update_strategy_run(run)
         self._refresh_risk_state_from_run(run)
 
@@ -457,6 +543,16 @@ class LLMStrategistBacktester:
             warnings.append("max_portfolio_exposure_pct")
         return warnings
 
+    def _archetype_for_trigger(self, day_key: str, trigger_id: str) -> str:
+        plan_limits = self.plan_limits_by_day.get(day_key) or {}
+        catalog = plan_limits.get("trigger_catalog") or {}
+        entry = catalog.get(trigger_id) or catalog.get(trigger_id.split("_exit")[0]) or {}
+        category = entry.get("category") or entry.get("direction")
+        if category:
+            return str(category)
+        # fallback: first token before underscore
+        return trigger_id.split("_")[0] if trigger_id else "unknown"
+
     def _process_orders_with_limits(
         self,
         run_id: str,
@@ -466,15 +562,19 @@ class LLMStrategistBacktester:
         plan_payload: Dict[str, Any] | None,
         compiled_payload: Dict[str, Any] | None,
         blocked_entries: List[dict] | None = None,
+        current_load: int = 0,
     ) -> List[Dict[str, Any]]:
         executed_records: List[Dict[str, Any]] = []
         limit_entry = self.limit_enforcement_by_day[day_key]
         reason_map = set(item.value for item in BlockReason)
+        custom_reasons = {"timeframe_cap", "session_cap", "trigger_load"}
 
         def _normalized_reason(raw: str | None) -> str:
             if not raw:
                 return BlockReason.OTHER.value
-            return raw if raw in reason_map else BlockReason.RISK.value
+            if raw in reason_map or raw in custom_reasons:
+                return raw
+            return BlockReason.RISK.value
 
         def _record_block_entry(data: Dict[str, Any], source: str) -> None:
             reason = data.get("reason")
@@ -508,7 +608,7 @@ class LLMStrategistBacktester:
             if msg:
                 logger.info("Blocked trade (%s): %s", entry["reason"], msg)
 
-        def _record_execution_detail(order: Order, source: str) -> None:
+        def _record_execution_detail(order: Order, source: str, risk_used: float | None = None, latency_seconds: float | None = None) -> None:
             limit_entry["executed_details"].append(
                 {
                     "timestamp": order.timestamp.isoformat(),
@@ -519,6 +619,8 @@ class LLMStrategistBacktester:
                     "timeframe": order.timeframe,
                     "trigger_id": order.reason,
                     "source": source,
+                    "risk_used": risk_used,
+                    "latency_seconds": latency_seconds,
                 }
             )
 
@@ -557,7 +659,31 @@ class LLMStrategistBacktester:
                     continue
                 self._commit_risk_budget(day_key, allowance, order.symbol)
                 limit_entry["trades_executed"] += 1
-                _record_execution_detail(order, "trigger_engine")
+                trigger_id = order.reason
+                risk_used = allowance or 0.0
+                self.risk_usage_by_day[day_key][(trigger_id, order.timeframe)] += risk_used
+                self.risk_usage_events_by_day[day_key].append(
+                    {
+                        "trigger_id": trigger_id,
+                        "timeframe": order.timeframe,
+                        "hour": order.timestamp.hour,
+                        "risk_used": risk_used,
+                    }
+                )
+                self.timeframe_exec_counts[day_key][str(order.timeframe)] += 1
+                session_window = None
+                if self.session_trade_multipliers:
+                    session_window = next(
+                        (
+                            f"{win.get('start_hour', -1)}-{win.get('end_hour', -1)}"
+                            for win in self.session_trade_multipliers
+                            if int(win.get("start_hour", -1)) <= order.timestamp.hour < int(win.get("end_hour", -1))
+                        ),
+                        None,
+                    )
+                if session_window:
+                    self.session_trade_counts[day_key][session_window] += 1
+                _record_execution_detail(order, "trigger_engine", risk_used=risk_used, latency_seconds=0.0)
                 self.portfolio.execute(order)
                 executed_records.append(
                     {
@@ -567,6 +693,8 @@ class LLMStrategistBacktester:
                         "price": order.price,
                         "timeframe": order.timeframe,
                         "reason": order.reason,
+                        "risk_used": allowance,
+                        "latency_seconds": 0.0,
                     }
                 )
                 self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
@@ -586,9 +714,63 @@ class LLMStrategistBacktester:
                     return reason[: -len(suffix)]
             return reason
 
+        plan_generated_at = None
+        if plan_payload:
+            generated_at = plan_payload.get("generated_at")
+            if isinstance(generated_at, str):
+                try:
+                    plan_generated_at = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+                except ValueError:
+                    plan_generated_at = None
+
+        def _session_window(ts: datetime) -> tuple[str, float] | None:
+            if not self.session_trade_multipliers:
+                return None
+            hour = ts.hour
+            for window in self.session_trade_multipliers:
+                start = int(window.get("start_hour", -1))
+                end = int(window.get("end_hour", -1))
+                if start <= hour < end:
+                    multiplier = float(window.get("multiplier", 1.0))
+                    return (f"{start}-{end}", multiplier)
+            return None
+
+        def _timeframe_cap_reached(timeframe: str) -> bool:
+            cap = self.timeframe_trigger_caps.get(str(timeframe))
+            if not cap:
+                return False
+            executed = self.timeframe_exec_counts[day_key].get(str(timeframe), 0)
+            return executed >= cap
+
+        def _load_cap_reached(load_val: int) -> bool:
+            return self.trigger_load_threshold > 0 and load_val > self.trigger_load_threshold
+
+        def _archetype_state(archetype: str, timeframe: str, ts: datetime) -> tuple[int, float]:
+            key = (archetype, str(timeframe), ts.hour)
+            current = self.archetype_load_by_day[day_key].get(key, 0)
+            return current, key
+
+        def _session_cap_reached(ts: datetime) -> bool:
+            window = _session_window(ts)
+            if not window:
+                return False
+            plan_limits = self.plan_limits_by_day.get(day_key) or {}
+            base_cap = plan_limits.get("derived_max_trades_per_day") or plan_limits.get("max_trades_per_day")
+            if not base_cap:
+                return False
+            window_key, multiplier = window
+            cap = int(base_cap * multiplier)
+            if cap <= 0:
+                return False
+            executed = self.session_trade_counts[day_key].get(window_key, 0)
+            return executed >= cap
+
         for order in orders:
             timestamp = order.timestamp.isoformat()
-            trigger_id = _gated_trigger_id(order.reason)
+            raw_trigger_id = order.reason
+            trigger_id = _gated_trigger_id(raw_trigger_id)
+            archetype = self._archetype_for_trigger(day_key, trigger_id)
+            arche_load, arche_key = _archetype_state(archetype, order.timeframe, order.timestamp)
             events_payload = [{"trigger_id": trigger_id, "timestamp": timestamp}]
             result = execution_tools.run_live_step_tool(
                 run_id,
@@ -599,6 +781,80 @@ class LLMStrategistBacktester:
             events = result.get("events", [])
             event = events[-1] if events else None
             limit_entry["trades_attempted"] += 1
+            self.trigger_load_by_day[day_key].append(
+                {
+                    "timeframe": order.timeframe,
+                    "hour": order.timestamp.hour,
+                    "load": current_load,
+                    "archetype": archetype,
+                    "archetype_load": arche_load,
+                    "trigger_id": trigger_id,
+                }
+            )
+            if _timeframe_cap_reached(order.timeframe):
+                _record_block_entry(
+                    {
+                        "timestamp": order.timestamp.isoformat(),
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "price": order.price,
+                        "quantity": order.quantity,
+                        "timeframe": order.timeframe,
+                        "trigger_id": order.reason,
+                        "reason": "timeframe_cap",
+                        "detail": "Timeframe cap reached",
+                    },
+                    "timeframe_cap",
+                )
+                continue
+            if self.archetype_load_threshold > 0 and arche_load >= self.archetype_load_threshold:
+                _record_block_entry(
+                    {
+                        "timestamp": order.timestamp.isoformat(),
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "price": order.price,
+                        "quantity": order.quantity,
+                        "timeframe": order.timeframe,
+                        "trigger_id": order.reason,
+                        "reason": "archetype_load",
+                        "detail": f"Archetype {archetype} load {arche_load} >= threshold {self.archetype_load_threshold}",
+                    },
+                    "archetype_load",
+                )
+                continue
+            if _load_cap_reached(current_load):
+                _record_block_entry(
+                    {
+                        "timestamp": order.timestamp.isoformat(),
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "price": order.price,
+                        "quantity": order.quantity,
+                        "timeframe": order.timeframe,
+                        "trigger_id": order.reason,
+                        "reason": "trigger_load",
+                        "detail": f"Trigger load {current_load} above threshold {self.trigger_load_threshold}",
+                    },
+                    "trigger_load",
+                )
+                continue
+            if _session_cap_reached(order.timestamp):
+                _record_block_entry(
+                    {
+                        "timestamp": order.timestamp.isoformat(),
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "price": order.price,
+                        "quantity": order.quantity,
+                        "timeframe": order.timeframe,
+                        "trigger_id": order.reason,
+                        "reason": "session_cap",
+                        "detail": "Session cap reached",
+                    },
+                    "session_cap",
+                )
+                continue
             if event and event.get("action") == "executed":
                 _record_hints(order)
                 allowance = self._risk_budget_allowance(day_key, order)
@@ -619,9 +875,35 @@ class LLMStrategistBacktester:
                         "risk_budget",
                     )
                     continue
-                self._commit_risk_budget(day_key, allowance, order.symbol)
+                load_scale = 1.0
+                if self.archetype_load_threshold > 0:
+                    scale_start = max(1, int(self.archetype_load_threshold * self.archetype_load_scale_start))
+                    if arche_load >= scale_start:
+                        load_scale = max(0.25, 1 - (arche_load - scale_start) / max(1, (self.archetype_load_threshold - scale_start + 1)))
+                adjusted_allowance = allowance * load_scale
+                self._commit_risk_budget(day_key, adjusted_allowance, order.symbol)
                 limit_entry["trades_executed"] += 1
-                _record_execution_detail(order, "execution_engine")
+                latency_seconds = None
+                if plan_generated_at:
+                    latency_seconds = (order.timestamp - plan_generated_at).total_seconds()
+                risk_used = adjusted_allowance or 0.0
+                self.risk_usage_by_day[day_key][(raw_trigger_id, order.timeframe)] += risk_used
+                self.risk_usage_events_by_day[day_key].append(
+                    {
+                        "trigger_id": raw_trigger_id,
+                        "timeframe": order.timeframe,
+                        "hour": order.timestamp.hour,
+                        "risk_used": risk_used,
+                    }
+                )
+                if latency_seconds is not None:
+                    self.latency_by_day[day_key][(raw_trigger_id, order.timeframe)].append(latency_seconds)
+                self.timeframe_exec_counts[day_key][str(order.timeframe)] += 1
+                session_window = _session_window(order.timestamp)
+                if session_window:
+                    self.session_trade_counts[day_key][session_window[0]] += 1
+                self.archetype_load_by_day[day_key][arche_key] = arche_load + 1
+                _record_execution_detail(order, "execution_engine", risk_used=risk_used, latency_seconds=latency_seconds)
                 self.portfolio.execute(order)
                 executed_records.append(
                     {
@@ -631,6 +913,10 @@ class LLMStrategistBacktester:
                         "price": order.price,
                         "timeframe": order.timeframe,
                         "reason": order.reason,
+                        "risk_used": risk_used,
+                        "latency_seconds": latency_seconds,
+                        "load_scale": load_scale,
+                        "archetype": archetype,
                     }
                 )
                 self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
@@ -694,6 +980,8 @@ class LLMStrategistBacktester:
         self.plan_limits_by_day.clear()
         self.flattened_days.clear()
         self.daily_risk_budget_state.clear()
+        self.trigger_load_by_day.clear()
+        self.archetype_load_by_day.clear()
         self.current_day_key = None
         self.latest_daily_summary = None
         self.last_slot_report = None
@@ -791,6 +1079,7 @@ class LLMStrategistBacktester:
                     "trigger_budget_trimmed": dict(self.latest_trigger_trim),
                     "session_trade_multipliers": self.session_trade_multipliers,
                     "timeframe_trigger_caps": self.timeframe_trigger_caps,
+                    "flatten_policy": self.flatten_policy,
                     "trigger_catalog": {
                         trigger.id: {"symbol": trigger.symbol, "category": trigger.category, "direction": trigger.direction}
                         for trigger in current_plan.triggers
@@ -828,6 +1117,7 @@ class LLMStrategistBacktester:
                         portfolio_state.cash,
                     )
                     orders, blocked_entries = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state)
+                    current_load = len(orders) + (len(blocked_entries) if blocked_entries else 0)
                     executed_records = self._process_orders_with_limits(
                         run_id,
                         day_key,
@@ -836,6 +1126,7 @@ class LLMStrategistBacktester:
                         current_plan_payload,
                         current_compiled_payload,
                         blocked_entries,
+                        current_load=current_load,
                     )
                     slot_orders.extend(executed_records)
                     if timeframe == self.timeframes[0]:
@@ -1067,15 +1358,21 @@ class LLMStrategistBacktester:
         budget = entry.get("budget_abs", 0.0)
         used = entry.get("used_abs", 0.0)
         used_pct = (used / budget * 100.0) if budget > 0 else 0.0
+        start_equity = entry.get("start_equity", self.initial_cash)
+        budget_pct = entry.get("budget_pct", 0.0)
+        util_pct = 0.0
+        if start_equity and budget_pct:
+            util_pct = (used / (start_equity * (budget_pct / 100.0))) * 100.0
         symbol_usage = entry.get("symbol_usage", {})
         symbol_usage_pct = {symbol: (value / budget * 100.0) if budget > 0 else 0.0 for symbol, value in symbol_usage.items()}
         blocks_by_symbol = dict(entry.get("blocks", {}))
         return {
-            "budget_pct": entry.get("budget_pct", 0.0),
+            "budget_pct": budget_pct,
             "budget_abs": budget,
             "used_abs": used,
             "used_pct": used_pct,
-            "start_equity": entry.get("start_equity", self.initial_cash),
+            "utilization_pct": util_pct,
+            "start_equity": start_equity,
             "symbol_usage_pct": symbol_usage_pct,
             "blocks_by_symbol": blocks_by_symbol,
         }
@@ -1180,6 +1477,12 @@ class LLMStrategistBacktester:
         reports = self.slot_reports_by_day.pop(day_key, [])
         if not reports:
             self.daily_risk_budget_state.pop(day_key, None)
+            self.risk_usage_by_day.pop(day_key, None)
+            self.risk_usage_events_by_day.pop(day_key, None)
+            self.latency_by_day.pop(day_key, None)
+            self.timeframe_exec_counts.pop(day_key, None)
+            self.session_trade_counts.pop(day_key, None)
+            self.trigger_load_by_day.pop(day_key, None)
             return None
         start_equity = reports[0]["equity"]
         end_equity = reports[-1]["equity"]
@@ -1201,6 +1504,13 @@ class LLMStrategistBacktester:
         risk_breakdown = dict(limit_entry["risk_block_breakdown"])
         risk_limit_hints = dict(limit_entry["risk_limit_hints"])
         plan_limits = self.plan_limits_by_day.pop(day_key, None)
+        risk_usage = self.risk_usage_by_day.pop(day_key, {})
+        risk_usage_events = self.risk_usage_events_by_day.pop(day_key, [])
+        latency_samples = self.latency_by_day.pop(day_key, {})
+        self.timeframe_exec_counts.pop(day_key, None)
+        self.session_trade_counts.pop(day_key, None)
+        self.archetype_load_by_day.pop(day_key, None)
+        trigger_load_events = self.trigger_load_by_day.pop(day_key, [])
         summary = {
             "date": day_key,
             "start_equity": start_equity,
@@ -1222,6 +1532,7 @@ class LLMStrategistBacktester:
             "executed_trades": limit_entry["trades_executed"],
             "flatten_positions_daily": self.flatten_positions_daily,
             "flatten_session_hour": self.flatten_session_boundary_hour,
+            "flatten_policy": self.flatten_policy,
             "pnl_breakdown": pnl_breakdown,
             "symbol_pnl": symbol_pnl,
         }
@@ -1235,6 +1546,8 @@ class LLMStrategistBacktester:
         blocked_other = skipped_counts.get(BlockReason.OTHER.value, 0)
         blocked_risk_budget = skipped_counts.get("risk_budget", 0)
         blocked_risk = sum(risk_breakdown.values())
+        blocked_trigger_load = skipped_counts.get("trigger_load", 0)
+        blocked_archetype_load = skipped_counts.get("archetype_load", 0)
         attempted = summary.get("attempted_triggers", 0)
         executed = summary.get("executed_trades", 0)
         execution_rate = (executed / attempted) if attempted else 0.0
@@ -1259,6 +1572,8 @@ class LLMStrategistBacktester:
             "blocked_by_other": blocked_other,
             "blocked_by_risk_limits": blocked_risk,
             "blocked_by_risk_budget": blocked_risk_budget,
+            "blocked_by_trigger_load": blocked_trigger_load,
+            "blocked_by_archetype_load": blocked_archetype_load,
             "execution_rate": execution_rate,
             "active_brake": active_brake,
             "risk_budget_used_pct": 0.0,
@@ -1294,6 +1609,13 @@ class LLMStrategistBacktester:
                 "blocked_by_reason": reason_map,
             }
         summary["trigger_stats"] = trigger_stats_payload
+        quality_stats = self._build_quality_stats(day_key, risk_usage, risk_usage_events, latency_samples, trigger_load_events)
+        if quality_stats["trigger_quality"]:
+            summary["trigger_quality"] = quality_stats["trigger_quality"]
+        if quality_stats["timeframe_quality"]:
+            summary["timeframe_quality"] = quality_stats["timeframe_quality"]
+        if quality_stats["hour_quality"]:
+            summary["hour_quality"] = quality_stats["hour_quality"]
         risk_budget_info = self._risk_budget_summary(day_key)
         if risk_budget_info:
             summary["risk_budget"] = risk_budget_info
@@ -1313,6 +1635,384 @@ class LLMStrategistBacktester:
         (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))
         self.flattened_days.discard(day_key)
         return summary
+
+    def _build_quality_stats(
+        self,
+        day_key: str,
+        risk_usage: Dict[tuple[str, str], float],
+        risk_usage_events: List[Dict[str, Any]],
+        latency_samples: Dict[tuple[str, str], List[float]],
+        trigger_load_events: List[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        entries = [
+            entry
+            for entry in self.portfolio.trade_log
+            if self._timestamp_day(entry.get("timestamp")) == day_key
+        ]
+        trigger_quality: Dict[str, Dict[str, Any]] = {}
+        timeframe_quality: Dict[str, Dict[str, Any]] = {}
+        hour_quality: Dict[str, Dict[str, Any]] = {}
+
+        latency_lookup: Dict[tuple[str, str], float] = {
+            key: (sum(vals) / len(vals)) for key, vals in latency_samples.items() if vals
+        }
+
+        def _excursions(entry: Dict[str, Any]) -> tuple[float | None, float | None, float | None]:
+            symbol = entry.get("symbol")
+            timeframe = entry.get("entry_timeframe") or entry.get("timeframe")
+            entry_price = entry.get("entry_price")
+            exit_price = entry.get("exit_price")
+            entry_ts = entry.get("entry_timestamp")
+            exit_ts = entry.get("timestamp")
+            side = entry.get("entry_side")
+            if not symbol or entry_price is None or exit_price is None or not entry_ts or not exit_ts or not timeframe:
+                return (None, None, None)
+            try:
+                entry_dt = entry_ts if isinstance(entry_ts, datetime) else datetime.fromisoformat(str(entry_ts).replace("Z", "+00:00"))
+                exit_dt = exit_ts if isinstance(exit_ts, datetime) else datetime.fromisoformat(str(exit_ts).replace("Z", "+00:00"))
+            except ValueError:
+                return (None, None, None)
+            tf_map = self.market_data.get(symbol) or {}
+            df = tf_map.get(str(timeframe))
+            if df is None or df.empty:
+                return (None, None, None)
+            subset = df[(df.index >= entry_dt) & (df.index <= exit_dt)]
+            if subset.empty:
+                return (None, None, None)
+            highs = subset["high"] if "high" in subset.columns else subset["close"]
+            lows = subset["low"] if "low" in subset.columns else subset["close"]
+            high_price = float(highs.max())
+            low_price = float(lows.min())
+            entry_price = float(entry_price)
+            exit_price = float(exit_price)
+            if side == "short":
+                mae_pct = ((entry_price - high_price) / entry_price) * 100.0
+                mfe_pct = ((entry_price - low_price) / entry_price) * 100.0
+                best_price = low_price
+                decay_pct = ((best_price - exit_price) / entry_price) * 100.0
+            else:
+                mae_pct = ((low_price - entry_price) / entry_price) * 100.0
+                mfe_pct = ((high_price - entry_price) / entry_price) * 100.0
+                best_price = high_price
+                decay_pct = ((exit_price - best_price) / entry_price) * 100.0
+            return (mae_pct, mfe_pct, decay_pct)
+
+        for entry in entries:
+            trigger_id = entry.get("entry_reason") or entry.get("reason") or "unknown"
+            timeframe = entry.get("entry_timeframe") or "unknown"
+            ts = entry.get("timestamp")
+            hour = None
+            if isinstance(ts, datetime):
+                hour = ts.hour
+            elif isinstance(ts, str) and len(ts) >= 13:
+                try:
+                    hour = int(ts[11:13])
+                except ValueError:
+                    hour = None
+            pnl = float(entry.get("pnl", 0.0))
+            key = f"{trigger_id}|{timeframe}"
+            mae_pct, mfe_pct, decay_pct = _excursions(entry)
+            payload = trigger_quality.setdefault(
+                key,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                },
+            )
+            payload["pnl"] += pnl
+            payload["trades"] += 1
+            payload["wins"] += 1 if pnl > 0 else 0
+            payload["losses"] += 1 if pnl < 0 else 0
+            if pnl > 0:
+                payload["win_abs_sum"] += abs(pnl)
+            elif pnl < 0:
+                payload["loss_abs_sum"] += abs(pnl)
+            latency = latency_lookup.get((trigger_id, timeframe))
+            if latency is not None:
+                payload.setdefault("latencies", []).append(latency)
+            if mae_pct is not None:
+                payload["mae_sum"] += mae_pct
+                payload["abs_mae_sum"] += abs(mae_pct)
+            if mfe_pct is not None:
+                payload["mfe_sum"] += mfe_pct
+                payload["abs_mfe_sum"] += abs(mfe_pct)
+            if decay_pct is not None:
+                payload["decay_sum"] += decay_pct
+
+            tf_payload = timeframe_quality.setdefault(
+                str(timeframe),
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                },
+            )
+            tf_payload["pnl"] += pnl
+            tf_payload["trades"] += 1
+            tf_payload["wins"] += 1 if pnl > 0 else 0
+            tf_payload["losses"] += 1 if pnl < 0 else 0
+            if pnl > 0:
+                tf_payload["win_abs_sum"] += abs(pnl)
+            elif pnl < 0:
+                tf_payload["loss_abs_sum"] += abs(pnl)
+            if latency is not None:
+                tf_payload.setdefault("latencies", []).append(latency)
+            if mae_pct is not None:
+                tf_payload["mae_sum"] += mae_pct
+                tf_payload["abs_mae_sum"] += abs(mae_pct)
+            if mfe_pct is not None:
+                tf_payload["mfe_sum"] += mfe_pct
+                tf_payload["abs_mfe_sum"] += abs(mfe_pct)
+            if decay_pct is not None:
+                tf_payload["decay_sum"] += decay_pct
+
+            if hour is not None:
+                hr_payload = hour_quality.setdefault(
+                    str(hour),
+                    {
+                        "pnl": 0.0,
+                        "trades": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "mae_sum": 0.0,
+                        "mfe_sum": 0.0,
+                        "decay_sum": 0.0,
+                        "abs_mae_sum": 0.0,
+                        "abs_mfe_sum": 0.0,
+                        "win_abs_sum": 0.0,
+                        "loss_abs_sum": 0.0,
+                        "load_sum": 0.0,
+                        "load_count": 0,
+                    },
+                )
+                hr_payload["pnl"] += pnl
+                hr_payload["trades"] += 1
+                hr_payload["wins"] += 1 if pnl > 0 else 0
+                hr_payload["losses"] += 1 if pnl < 0 else 0
+                if pnl > 0:
+                    hr_payload["win_abs_sum"] += abs(pnl)
+                elif pnl < 0:
+                    hr_payload["loss_abs_sum"] += abs(pnl)
+                if latency is not None:
+                    hr_payload.setdefault("latencies", []).append(latency)
+                if mae_pct is not None:
+                    hr_payload["mae_sum"] += mae_pct
+                    hr_payload["abs_mae_sum"] += abs(mae_pct)
+                if mfe_pct is not None:
+                    hr_payload["mfe_sum"] += mfe_pct
+                    hr_payload["abs_mfe_sum"] += abs(mfe_pct)
+                if decay_pct is not None:
+                    hr_payload["decay_sum"] += decay_pct
+
+        # attach risk usage totals
+        for (trigger_id, timeframe), risk_used in risk_usage.items():
+            key = f"{trigger_id}|{timeframe}"
+            payload = trigger_quality.setdefault(
+                key,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                },
+            )
+            payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + max(risk_used, 0.0)
+            payload.setdefault("latencies", [])
+
+        timeframe_risk_usage: Dict[str, float] = defaultdict(float)
+        hour_risk_usage: Dict[str, float] = defaultdict(float)
+        for evt in trigger_load_events or []:
+            tf = str(evt.get("timeframe") or "unknown")
+            hr = evt.get("hour")
+            load_val = float(evt.get("load", 0.0))
+            trig = evt.get("trigger_id") or "unknown"
+            arche = evt.get("archetype") or "unknown"
+            trig_key = f"{trig}|{tf}"
+            trig_payload = trigger_quality.setdefault(
+                trig_key,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                },
+            )
+            trig_payload["load_sum"] += load_val
+            trig_payload["load_count"] += 1
+            tf_payload = timeframe_quality.setdefault(
+                tf,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                },
+            )
+            tf_payload["load_sum"] += load_val
+            tf_payload["load_count"] += 1
+            if hr is not None:
+                hr_payload = hour_quality.setdefault(
+                    str(hr),
+                    {
+                        "pnl": 0.0,
+                        "trades": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "mae_sum": 0.0,
+                        "mfe_sum": 0.0,
+                        "decay_sum": 0.0,
+                        "abs_mae_sum": 0.0,
+                        "abs_mfe_sum": 0.0,
+                        "win_abs_sum": 0.0,
+                        "loss_abs_sum": 0.0,
+                        "load_sum": 0.0,
+                        "load_count": 0,
+                    },
+                )
+                hr_payload["load_sum"] += load_val
+                hr_payload["load_count"] += 1
+        for evt in risk_usage_events or []:
+            tf = str(evt.get("timeframe") or "unknown")
+            hour_val = evt.get("hour")
+            risk_used = float(evt.get("risk_used", 0.0))
+            timeframe_risk_usage[tf] += max(risk_used, 0.0)
+            if hour_val is not None:
+                hour_risk_usage[str(hour_val)] += max(risk_used, 0.0)
+
+        for tf, risk_used in timeframe_risk_usage.items():
+            payload = timeframe_quality.setdefault(
+                tf,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                },
+            )
+            payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + risk_used
+            payload.setdefault("latencies", [])
+
+        for hour, risk_used in hour_risk_usage.items():
+            payload = hour_quality.setdefault(
+                hour,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                },
+            )
+            payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + risk_used
+            payload.setdefault("latencies", [])
+
+        def _finalize(target: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+            finalized: Dict[str, Dict[str, Any]] = {}
+            for key, payload in target.items():
+                trades = payload.get("trades", 0)
+                pnl = payload.get("pnl", 0.0)
+                risk_used = payload.get("risk_used_abs", 0.0)
+                win_rate = (payload.get("wins", 0) / trades) if trades else 0.0
+                latency_vals = payload.get("latencies") or []
+                avg_latency = (sum(latency_vals) / len(latency_vals)) if latency_vals else None
+                risk_per_trade = (risk_used / trades) if trades and risk_used else 0.0
+                mean_r = (pnl / trades / risk_per_trade) if risk_per_trade else (pnl / trades if trades else 0.0)
+                abs_mae_mean = (payload.get("abs_mae_sum", 0.0) / trades) if trades else 0.0
+                abs_mfe_mean = (payload.get("abs_mfe_sum", 0.0) / trades) if trades else 0.0
+                efficiency_mae = (mean_r / abs_mae_mean) if abs_mae_mean else 0.0
+                efficiency_mfe = (mean_r / abs_mfe_mean) if abs_mfe_mean else 0.0
+                asymmetry = 0.0
+                win_abs = payload.get("win_abs_sum", 0.0)
+                loss_abs = payload.get("loss_abs_sum", 0.0)
+                if win_abs or loss_abs:
+                    asymmetry = (win_abs - loss_abs) / max(win_abs + loss_abs, 1e-9)
+                load_count = payload.get("load_count", 0)
+                avg_load = (payload.get("load_sum", 0.0) / load_count) if load_count else 0.0
+                finalized[key] = {
+                    "trades": trades,
+                    "pnl": pnl,
+                    "risk_used_abs": risk_used,
+                    "rpr": (pnl / risk_used) if risk_used else 0.0,
+                    "win_rate": win_rate,
+                    "mean_r": mean_r,
+                    "latency_seconds": avg_latency,
+                    "wins": payload.get("wins", 0),
+                    "losses": payload.get("losses", 0),
+                    "mae_pct": (payload.get("mae_sum", 0.0) / trades) if trades else 0.0,
+                    "mfe_pct": (payload.get("mfe_sum", 0.0) / trades) if trades else 0.0,
+                    "response_decay_pct": (payload.get("decay_sum", 0.0) / trades) if trades else 0.0,
+                    "relative_efficiency_mae": efficiency_mae,
+                    "relative_efficiency_mfe": efficiency_mfe,
+                    "asymmetry": asymmetry,
+                    "avg_load": avg_load,
+                    "load_count": load_count,
+                }
+            return finalized
+
+        return {
+            "trigger_quality": _finalize(trigger_quality),
+            "timeframe_quality": _finalize(timeframe_quality),
+            "hour_quality": _finalize(hour_quality),
+        }
 
     def _judge_feedback(self, summary: Dict[str, Any]) -> Dict[str, Any]:
         score = 50.0
@@ -1387,12 +2087,13 @@ class LLMStrategistBacktester:
         risk_budget = summary.get("risk_budget")
         if risk_budget:
             used_pct = risk_budget.get("used_pct", 0.0)
-            if used_pct < 20:
-                notes.append("Risk budget underutilized; lean into high-conviction setups.")
+            utilization_pct = risk_budget.get("utilization_pct", used_pct)
+            if utilization_pct < 25 and return_pct > 0:
+                notes.append("Risk budget underutilized despite gains; lean into high-conviction setups.")
                 constraints["boost"].append("Increase size on grade A triggers until at least 30% of daily risk is deployed.")
-            elif used_pct > 90:
-                notes.append("Risk budget nearly exhausted; tighten selectivity.")
-                constraints["must_fix"].append("Stop firing marginal triggers once 90% of daily risk is consumed.")
+            elif utilization_pct > 75 and return_pct < 0:
+                notes.append("Risk budget heavily used on a losing day; tighten selectivity.")
+                constraints["must_fix"].append("Stop firing marginal triggers once 75% of daily risk is consumed.")
                 if trigger_budget is None:
                     trigger_budget = 6
                 else:
