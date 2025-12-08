@@ -53,6 +53,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
     trigger_quality: dict[str, dict[str, float | int]] = {}
     timeframe_quality: dict[str, dict[str, float | int]] = {}
     hour_quality: dict[str, dict[str, float | int]] = {}
+    factor_exposures: dict[str, Any] = {}
 
     for report in daily_reports:
         limit_stats = report.get("limit_stats") or {}
@@ -226,6 +227,8 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
                         hour_executions[hour] = hour_executions.get(hour, 0) + 1
                 except ValueError:
                     continue
+        if report.get("factor_exposures"):
+            factor_exposures = report["factor_exposures"]
         daily_cap = blocked_daily_cap[-1] > 0
         plan_cap = blocked_plan[-1] > 0
         if daily_cap and plan_cap:
@@ -309,6 +312,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
         "trigger_quality": _finalize_quality(trigger_quality),
         "timeframe_quality": _finalize_quality(timeframe_quality),
         "hour_quality": _finalize_quality(hour_quality),
+        "factor_exposures": factor_exposures,
     }
     return summary
 

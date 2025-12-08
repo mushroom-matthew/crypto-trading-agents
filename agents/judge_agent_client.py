@@ -243,6 +243,15 @@ TRADING STATISTICS:
 - Sell orders: {sell_count}
 - Symbols traded: {', '.join(symbols)}
 
+MARKET-STRUCTURE TELEMETRY (DRAFT):
+- When payloads include market_structure (nearest_support/resistance, distances, trend, recent_tests), use it to judge if fills were taken into strength or weakness.
+- Reduce allowed risk or cap triggers when price is mid-range without a reclaim/test edge, or when support/resistance has been tapped repeatedly without resolution.
+- Reward plans that enter near defended support in uptrends or after reclaiming prior resistance; flag chasing into resistance or weak supports as veto candidates.
+
+FACTOR EXPOSURES (DRAFT):
+- When factor_exposures are present (beta_market, beta_eth_beta, idiosyncratic_vol), prefer neutral or diversified beta when risk is elevated.
+- If auto_hedge_mode == "market", nudge sizing toward beta ≈ 0; otherwise, veto piling into high-beta longs without offsets.
+
 Respond with **two sections only**:
 
 NOTES:

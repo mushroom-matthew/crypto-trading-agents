@@ -80,6 +80,7 @@ class LLMInput(SerializableModel):
     assets: List[AssetState]
     risk_params: Dict[str, Any]
     global_context: Dict[str, Any] = Field(default_factory=dict)
+    market_structure: Dict[str, Any] = Field(default_factory=dict)
 
 
 TriggerDirection = Literal["long", "short", "flat", "exit", "flat_exit"]

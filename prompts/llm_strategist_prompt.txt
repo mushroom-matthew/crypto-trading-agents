@@ -32,6 +32,19 @@ Allowed tools:
 - Only the precomputed indicator fields (sma/ema values, RSI, MACD, ATR, ROC, realized_vol_short/medium, Donchian, Bollinger).
 - Entry/exit rules may use boolean ops (and/or/not), comparisons, and the helper `field between x and y`.
 
+### DRAFT: Market-Structure Telemetry (support/resistance/tests)
+- Inputs may include `market_structure` with: `nearest_support`, `nearest_resistance`, `distance_to_support_pct`, `distance_to_resistance_pct`, `trend`, `support_levels`, `resistance_levels`, and `recent_tests` (level, side, result such as successful_test/reclaim/failed_test, attempts, window).
+- Access it via `global_context.market_structure[SYMBOL]` (latest primary timeframe snapshot).
+- Treat `trend` as structure (HH/HL vs. LH/LL). When missing, fall back to your usual trend_state logic.
+- Prefer entries close to support in an uptrend or near reclaimed resistance that flipped to support; avoid initiating longs into nearby resistance or shorts into nearby support.
+- Down-weight any trigger when price sits in mid-range (distance to both levels > ~2-3% and no fresh reclaim/test signal).
+- Increase confidence only after successful tests or reclaims; reduce aggression when a level has multiple failed tests or repeated taps without follow-through.
+
+### DRAFT: Factor Exposures & Hedging
+- Inputs may include `global_context.factor_exposures[SYMBOL]` with `beta_market`, `beta_eth_beta`, `idiosyncratic_vol`, `r2`.
+- If `global_context.auto_hedge_mode == "market"`, bias sizing so aggregate beta ≈ 0; otherwise, prefer triggers whose betas diversify existing positions.
+- When beta is high and idiosyncratic_vol is low, consider smaller directional bets or pairing with opposite-beta exposure; avoid stacking multiple high-beta longs without offsets.
+
 Global requirements:
 - Classify the market regime with one of: `bull`, `bear`, `range`, `high_vol`, `mixed`.
 - Honor the supplied risk constraints and sizing rails; default to `fixed_fraction` with the provided max risk percentages if nothing else is specified.

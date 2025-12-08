@@ -229,3 +229,63 @@ def test_flatten_daily_zeroes_overnight_exposure(monkeypatch, tmp_path):
     report = result.daily_reports[-1]
     assert report["flatten_positions_daily"] is True
     assert all(abs(entry["quantity"]) < 1e-9 for entry in report["overnight_exposure"].values())
+
+
+def test_factor_exposures_in_reports(monkeypatch, tmp_path):
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    plan = StrategyPlan(
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[
+            TriggerCondition(
+                id="buy_breakout",
+                symbol="BTC-USD",
+                direction="long",
+                timeframe="1h",
+                entry_rule="timeframe=='1h'",
+                exit_rule="False",
+                category="trend_continuation",
+            )
+        ],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=5.0,
+            max_symbol_exposure_pct=50.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[
+            PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=5.0)
+        ],
+        max_trades_per_day=5,
+        allowed_symbols=["BTC-USD"],
+        allowed_directions=["long"],
+        allowed_trigger_categories=["trend_continuation"],
+    )
+    market_data = {"BTC-USD": {"1h": _build_candles()}}
+    factor_index = list(market_data["BTC-USD"]["1h"].index)
+    factor_df = pd.DataFrame({"market": [0.0] * len(factor_index)}, index=factor_index)
+    run_registry = StrategyRunRegistry(tmp_path / "runs_factor")
+    monkeypatch.setattr(execution_tools, "registry", run_registry)
+    monkeypatch.setattr(execution_tools, "engine", ExecutionEngine())
+    backtester = LLMStrategistBacktester(
+        pairs=["BTC-USD"],
+        start=None,
+        end=None,
+        initial_cash=1000.0,
+        fee_rate=0.0,
+        llm_client=LLMClient(),
+        cache_dir=Path(".cache/strategy_plans"),
+        llm_calls_per_day=1,
+        risk_params=_risk_params(),
+        plan_provider=StubPlanProvider(plan),
+        market_data=market_data,
+        run_registry=run_registry,
+        factor_data=factor_df,
+        auto_hedge_market=True,
+    )
+    result = backtester.run(run_id="test-run-factor")
+    summary = result.daily_reports[-1]
+    assert "factor_exposures" in summary
+    assert result.summary["run_summary"].get("factor_exposures") == summary["factor_exposures"]

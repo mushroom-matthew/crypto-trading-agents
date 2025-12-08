@@ -189,6 +189,7 @@ def build_asset_state(symbol: str, snapshots: Iterable[IndicatorSnapshot]) -> As
     if not snapshot_list:
         raise ValueError("asset state requires at least one snapshot")
     primary = snapshot_list[0]
+    # TODO: attach MarketStructureTelemetry alongside indicator snapshots when structure schema is plumbed into LLM inputs.
     return AssetState(
         symbol=symbol,
         indicators=snapshot_list,

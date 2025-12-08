@@ -612,7 +612,13 @@ def _maybe_shorten(start: str, end: str, smoke_days: int | None) -> tuple[str, s
     return s_smoke.date().isoformat(), e_smoke.date().isoformat()
 
 
-def build_command(scenario: dict, regime_override: str | None, log_dir: Path, smoke_days: int | None) -> List[str]:
+def build_command(
+    scenario: dict,
+    regime_override: str | None,
+    log_dir: Path,
+    smoke_days: int | None,
+    factor_opts: dict[str, str | None] | None = None,
+) -> List[str]:
     start, end = scenario["start"], scenario["end"]
     if regime_override:
         if regime_override not in REGIMES:
@@ -638,6 +644,29 @@ def build_command(scenario: dict, regime_override: str | None, log_dir: Path, sm
         ]
     )
     args.extend(scenario["args"])
+    if factor_opts:
+        if factor_opts.get("auto_fetch"):
+            args.append("--factor-auto-fetch")
+        if factor_opts.get("factor_data"):
+            args.extend(["--factor-data", factor_opts["factor_data"]])
+        if factor_opts.get("btc_csv"):
+            args.extend(["--factor-btc-csv", factor_opts["btc_csv"]])
+        if factor_opts.get("eth_csv"):
+            args.extend(["--factor-eth-csv", factor_opts["eth_csv"]])
+        if factor_opts.get("total_csv"):
+            args.extend(["--factor-total-csv", factor_opts["total_csv"]])
+        if factor_opts.get("factor_start"):
+            args.extend(["--factor-start", factor_opts["factor_start"]])
+        if factor_opts.get("factor_end"):
+            args.extend(["--factor-end", factor_opts["factor_end"]])
+        if factor_opts.get("fetch_days"):
+            args.extend(["--factor-fetch-days", str(factor_opts["fetch_days"])])
+        if factor_opts.get("fetch_interval"):
+            args.extend(["--factor-fetch-interval", factor_opts["fetch_interval"]])
+        if factor_opts.get("auto_hedge_market"):
+            args.append("--auto-hedge-market")
+        if factor_opts.get("use_backtest_cache"):
+            args.append("--factor-use-backtest-cache")
     return args
 
 
@@ -648,6 +677,17 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing.")
     parser.add_argument("--log-dir", default="logs/ab_runs", help="Where to write per-run logs.")
     parser.add_argument("--smoke-days", type=int, help="Optional max days for smoke runs; trims windows longer than this.")
+    parser.add_argument("--factor-auto-fetch", action="store_true", help="Auto-fetch/build factor data per run.")
+    parser.add_argument("--factor-data", help="Existing factor file to use (skips auto-fetch).")
+    parser.add_argument("--factor-btc-csv", help="Local BTC CSV for factor auto-fetch.")
+    parser.add_argument("--factor-eth-csv", help="Local ETH CSV for factor auto-fetch.")
+    parser.add_argument("--factor-total-csv", help="Local total mcap CSV for factor auto-fetch.")
+    parser.add_argument("--factor-start", help="Optional ISO start for factor slicing.")
+    parser.add_argument("--factor-end", help="Optional ISO end for factor slicing.")
+    parser.add_argument("--factor-fetch-days", type=int, default=180, help="Days to fetch if using CoinGecko fallback.")
+    parser.add_argument("--factor-fetch-interval", default="hourly", choices=["hourly", "daily"], help="CoinGecko interval fallback.")
+    parser.add_argument("--auto-hedge-market", action="store_true", help="Enable auto-hedge flag for all scenarios.")
+    parser.add_argument("--factor-use-backtest-cache", action="store_true", help="Build factors from backtest OHLCV cache/fetch.")
     args = parser.parse_args()
 
     missing = [p for p in args.phases if p not in SCENARIOS]
@@ -659,7 +699,22 @@ def main() -> None:
 
     for key in args.phases:
         scenario = SCENARIOS[key]
-        cmd = build_command(scenario, args.regime, log_dir, args.smoke_days)
+        factor_opts = None
+        if args.factor_auto_fetch or args.factor_data or args.factor_btc_csv or args.factor_eth_csv:
+            factor_opts = {
+                "auto_fetch": args.factor_auto_fetch,
+                "factor_data": args.factor_data,
+                "btc_csv": args.factor_btc_csv,
+                "eth_csv": args.factor_eth_csv,
+                "total_csv": args.factor_total_csv,
+                "factor_start": args.factor_start,
+                "factor_end": args.factor_end,
+                "fetch_days": args.factor_fetch_days,
+                "fetch_interval": args.factor_fetch_interval,
+                "auto_hedge_market": args.auto_hedge_market,
+                "use_backtest_cache": args.factor_use_backtest_cache,
+            }
+        cmd = build_command(scenario, args.regime, log_dir, args.smoke_days, factor_opts=factor_opts)
         printable = " ".join(shlex.quote(part) for part in cmd)
         print(f"\n[{key}] {scenario['desc']}\n{printable}")
         if args.dry_run:

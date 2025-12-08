@@ -22,3 +22,4 @@ AGENTS.md
 strategy_export*json
 tmp*/
 .debug/
+*summaries.json

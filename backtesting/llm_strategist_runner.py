@@ -13,7 +13,15 @@ from typing import Any, Dict, List, Mapping, Sequence, Literal
 
 import pandas as pd
 
-from agents.analytics import IndicatorWindowConfig, PortfolioHistory, build_asset_state, compute_indicator_snapshot, compute_portfolio_state
+from agents.analytics import (
+    IndicatorWindowConfig,
+    PortfolioHistory,
+    build_asset_state,
+    build_market_structure_snapshot,
+    compute_factor_loadings,
+    compute_indicator_snapshot,
+    compute_portfolio_state,
+)
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import StrategyPlanProvider
 from agents.strategies.risk_engine import RiskEngine, RiskProfile
@@ -87,6 +95,7 @@ class PortfolioTracker:
         entry_price: float | None = None,
         exit_price: float | None = None,
         entry_side: str | None = None,
+        market_structure_entry: Dict[str, Any] | None = None,
     ) -> None:
         self.trade_log.append(
             {
@@ -100,6 +109,7 @@ class PortfolioTracker:
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "entry_side": entry_side,
+                "market_structure_entry": market_structure_entry,
             }
         )
 
@@ -111,6 +121,7 @@ class PortfolioTracker:
         timestamp: datetime,
         reason: str | None = None,
         timeframe: str | None = None,
+        market_structure_entry: Dict[str, Any] | None = None,
     ) -> None:
         position = self.positions.get(symbol, 0.0)
         avg_price = self.avg_entry_price.get(symbol, price)
@@ -131,6 +142,7 @@ class PortfolioTracker:
                     "opened_at": timestamp,
                     "entry_price": price,
                     "entry_side": "long" if new_position > 0 else "short",
+                    "market_structure_entry": market_structure_entry or meta.get("market_structure_entry"),
                 }
             return
         closing_qty = min(abs(position), abs(delta_qty))
@@ -147,6 +159,7 @@ class PortfolioTracker:
                 entry_price=meta.get("entry_price"),
                 exit_price=price,
                 entry_side=meta.get("entry_side"),
+                market_structure_entry=meta.get("market_structure_entry"),
             )
         remaining = position + delta_qty
         if abs(remaining) <= 1e-9:
@@ -165,7 +178,7 @@ class PortfolioTracker:
                 "entry_side": "long" if remaining > 0 else "short",
             }
 
-    def execute(self, order: Order) -> None:
+    def execute(self, order: Order, market_structure_entry: Dict[str, Any] | None = None) -> None:
         qty = max(order.quantity, 0.0)
         if qty <= 0:
             return
@@ -181,7 +194,15 @@ class PortfolioTracker:
             proceeds = notional - fee
             self.cash += proceeds
             delta = -qty
-        self._update_position(order.symbol, delta, order.price, order.timestamp, order.reason, order.timeframe)
+        self._update_position(
+            order.symbol,
+            delta,
+            order.price,
+            order.timestamp,
+            order.reason,
+            order.timeframe,
+            market_structure_entry=market_structure_entry,
+        )
         self.fills.append(
             {
                 "timestamp": order.timestamp,
@@ -191,6 +212,7 @@ class PortfolioTracker:
                 "price": order.price,
                 "fee": fee,
                 "reason": order.reason,
+                "market_structure_entry": market_structure_entry,
             }
         )
 
@@ -246,6 +268,9 @@ class LLMStrategistBacktester:
         session_trade_multipliers: Sequence[Mapping[str, float | int]] | None = None,
         timeframe_trigger_caps: Mapping[str, int] | None = None,
         flatten_policy: str | None = None,
+        factor_data: pd.DataFrame | None = None,
+        auto_hedge_market: bool = False,
+        factor_data_path: Path | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -314,6 +339,11 @@ class LLMStrategistBacktester:
             if flatten_session_boundary_hour is not None
             else ("daily_close" if flatten_positions_daily else "none")
         )
+        self.factor_data = self._load_factor_data(factor_data_path) if factor_data is None else factor_data
+        if self.factor_data is None or (hasattr(self.factor_data, "empty") and self.factor_data.empty):
+            self.factor_data = self._default_factor_data()
+        self.latest_factor_exposures: Dict[str, Dict[str, Any]] = {}
+        self.auto_hedge_market = auto_hedge_market
         if self.flatten_policy == "daily_close":
             self.flatten_positions_daily = True
             self.flatten_session_boundary_hour = None
@@ -440,22 +470,34 @@ class LLMStrategistBacktester:
             "timestamp": timestamp.isoformat(),
             "pairs": self.pairs,
         }
+        market_structure_context: Dict[str, Any] = {}
         if self.last_slot_report:
             context["recent_activity"] = self.last_slot_report
+            market_structure_context = self.last_slot_report.get("market_structure", {}) or {}
         if self.latest_daily_summary:
             context["latest_daily_report"] = self.latest_daily_summary
             context["judge_feedback"] = self.latest_daily_summary.get("judge_feedback")
+            if not market_structure_context:
+                market_structure_context = self.latest_daily_summary.get("market_structure", {}) or {}
+            if not self.latest_factor_exposures:
+                self.latest_factor_exposures = self.latest_daily_summary.get("factor_exposures", {}) or {}
         context["strategy_memory"] = build_strategy_memory(self.memory_history)
         if self.judge_constraints:
             context["strategist_constraints"] = self.judge_constraints
         if self.active_risk_adjustments:
             context["risk_adjustments"] = list(snapshot_adjustments(self.active_risk_adjustments))
         context["risk_limits"] = self.active_risk_limits.to_risk_params()
+        context["market_structure"] = market_structure_context
+        if self.latest_factor_exposures:
+            context["factor_exposures"] = self.latest_factor_exposures
+        if self.auto_hedge_market:
+            context["auto_hedge_mode"] = "market"
         return LLMInput(
             portfolio=portfolio_state,
             assets=list(asset_states.values()),
             risk_params=self.risk_params,
             global_context=context,
+            market_structure=market_structure_context,
         )
 
     def _refresh_risk_state_from_run(self, run) -> None:
@@ -497,6 +539,79 @@ class LLMStrategistBacktester:
                 run.config.metadata["flatten_policy"] = self.flatten_policy
             run = self.run_registry.update_strategy_run(run)
         self._refresh_risk_state_from_run(run)
+
+    def _default_factor_data(self) -> pd.DataFrame | None:
+        """Build simple crypto factor proxies from available market data (EW market, BTC dominance, ETH/BTC)."""
+
+        if not self.market_data:
+            return None
+        base_tf = self.timeframes[0]
+        closes: Dict[str, pd.Series] = {}
+        for symbol, tf_map in self.market_data.items():
+            df = tf_map.get(base_tf)
+            if df is not None and "close" in df.columns:
+                closes[symbol] = df["close"]
+        if not closes:
+            return None
+        aligned = pd.concat(closes.values(), axis=1, join="inner")
+        aligned.columns = list(closes.keys())
+        market_eqw = aligned.mean(axis=1)
+        btc = aligned.get("BTC-USD")
+        eth = aligned.get("ETH-USD")
+        dominance = None
+        if btc is not None:
+            total = aligned.sum(axis=1)
+            dominance = (btc / total.replace(0.0, pd.NA)).dropna()
+        eth_ratio = None
+        if btc is not None and eth is not None:
+            eth_ratio = eth / btc
+        factors = pd.DataFrame({"market": market_eqw.pct_change()})
+        if dominance is not None:
+            factors["dominance"] = dominance.pct_change()
+        if eth_ratio is not None:
+            factors["eth_beta"] = eth_ratio.pct_change()
+        return factors.dropna()
+
+    def _load_factor_data(self, path: Path | None) -> pd.DataFrame | None:
+        if path is None:
+            return None
+        try:
+            from data_loader.factors import load_cached_factors
+        except Exception as exc:  # pragma: no cover - optional import
+            logger.warning("Could not import factor loader: %s", exc)
+            return None
+        try:
+            df = load_cached_factors(path)
+            return df
+        except FileNotFoundError:
+            logger.warning("Factor data path not found: %s", path)
+            return None
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to load factor data from %s: %s", path, exc)
+            return None
+
+    def _factor_exposures(self, timestamp: datetime) -> Dict[str, Dict[str, Any]]:
+        """Compute factor betas if factor data is available."""
+
+        if self.factor_data is None or self.factor_data.empty:
+            return {}
+        base_tf = self.timeframes[0]
+        frames: Dict[str, pd.DataFrame] = {}
+        for symbol, tf_map in self.market_data.items():
+            df = tf_map.get(base_tf)
+            if df is None:
+                continue
+            subset = df[df.index <= timestamp]
+            if subset.empty:
+                continue
+            frames[symbol] = subset
+        if not frames:
+            return {}
+        factors_subset = self.factor_data[self.factor_data.index <= timestamp]
+        if factors_subset.empty:
+            return {}
+        exposures = compute_factor_loadings(frames, factors_subset)
+        return {symbol: exp.to_dict() for symbol, exp in exposures.items()}
 
     def _build_bar(self, pair: str, timeframe: str, timestamp: datetime) -> Bar:
         df = self.market_data[pair][timeframe]
@@ -563,11 +678,21 @@ class LLMStrategistBacktester:
         compiled_payload: Dict[str, Any] | None,
         blocked_entries: List[dict] | None = None,
         current_load: int = 0,
+        market_structure: Mapping[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         executed_records: List[Dict[str, Any]] = []
         limit_entry = self.limit_enforcement_by_day[day_key]
         reason_map = set(item.value for item in BlockReason)
         custom_reasons = {"timeframe_cap", "session_cap", "trigger_load"}
+
+        def _structure_fields(snapshot: Mapping[str, Any] | None) -> Dict[str, Any]:
+            if not snapshot:
+                return {}
+            return {
+                "distance_to_support_pct": snapshot.get("distance_to_support_pct"),
+                "distance_to_resistance_pct": snapshot.get("distance_to_resistance_pct"),
+                "trend": snapshot.get("trend"),
+            }
 
         def _normalized_reason(raw: str | None) -> str:
             if not raw:
@@ -684,19 +809,22 @@ class LLMStrategistBacktester:
                 if session_window:
                     self.session_trade_counts[day_key][session_window] += 1
                 _record_execution_detail(order, "trigger_engine", risk_used=risk_used, latency_seconds=0.0)
-                self.portfolio.execute(order)
-                executed_records.append(
-                    {
-                        "symbol": order.symbol,
-                        "side": order.side,
-                        "quantity": order.quantity,
-                        "price": order.price,
-                        "timeframe": order.timeframe,
-                        "reason": order.reason,
-                        "risk_used": allowance,
-                        "latency_seconds": 0.0,
-                    }
-                )
+                structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
+                self.portfolio.execute(order, market_structure_entry=structure_snapshot)
+                structure_fields = _structure_fields(structure_snapshot)
+                record = {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "price": order.price,
+                    "timeframe": order.timeframe,
+                    "reason": order.reason,
+                    "risk_used": allowance,
+                    "latency_seconds": 0.0,
+                    "market_structure_entry": structure_snapshot,
+                }
+                record.update(structure_fields)
+                executed_records.append(record)
                 self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
                 logger.debug(
                     "Executed order (no plan gating) trigger=%s symbol=%s side=%s qty=%.6f price=%.2f",
@@ -904,21 +1032,24 @@ class LLMStrategistBacktester:
                     self.session_trade_counts[day_key][session_window[0]] += 1
                 self.archetype_load_by_day[day_key][arche_key] = arche_load + 1
                 _record_execution_detail(order, "execution_engine", risk_used=risk_used, latency_seconds=latency_seconds)
-                self.portfolio.execute(order)
-                executed_records.append(
-                    {
-                        "symbol": order.symbol,
-                        "side": order.side,
-                        "quantity": order.quantity,
-                        "price": order.price,
-                        "timeframe": order.timeframe,
-                        "reason": order.reason,
-                        "risk_used": risk_used,
-                        "latency_seconds": latency_seconds,
-                        "load_scale": load_scale,
-                        "archetype": archetype,
-                    }
-                )
+                structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
+                self.portfolio.execute(order, market_structure_entry=structure_snapshot)
+                structure_fields = _structure_fields(structure_snapshot)
+                record = {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "price": order.price,
+                    "timeframe": order.timeframe,
+                    "reason": order.reason,
+                    "risk_used": risk_used,
+                    "latency_seconds": latency_seconds,
+                    "load_scale": load_scale,
+                    "archetype": archetype,
+                    "market_structure_entry": structure_snapshot,
+                }
+                record.update(structure_fields)
+                executed_records.append(record)
                 self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
                 logger.debug(
                     "Executed order trigger=%s symbol=%s side=%s qty=%.6f price=%.2f",
@@ -1012,6 +1143,7 @@ class LLMStrategistBacktester:
                 if not asset_states:
                     continue
                 active_assets = asset_states
+                self.latest_factor_exposures = self._factor_exposures(ts)
                 llm_input = self._llm_input(ts, asset_states)
                 day_start = datetime(ts.year, ts.month, ts.day, tzinfo=ts.tzinfo)
                 slot_seconds = max(1, int(self.plan_interval.total_seconds()))
@@ -1097,6 +1229,7 @@ class LLMStrategistBacktester:
                 continue
 
             slot_orders: List[Dict[str, Any]] = []
+            market_structure_briefs: Dict[str, Any] = {}
             indicator_briefs = self._indicator_briefs(active_assets)
             for pair in self.pairs:
                 for timeframe in self.timeframes:
@@ -1116,7 +1249,8 @@ class LLMStrategistBacktester:
                         portfolio_state.equity,
                         portfolio_state.cash,
                     )
-                    orders, blocked_entries = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state)
+                    structure_snapshot = market_structure_briefs.get(pair)
+                    orders, blocked_entries = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state, market_structure=structure_snapshot)
                     current_load = len(orders) + (len(blocked_entries) if blocked_entries else 0)
                     executed_records = self._process_orders_with_limits(
                         run_id,
@@ -1127,10 +1261,24 @@ class LLMStrategistBacktester:
                         current_compiled_payload,
                         blocked_entries,
                         current_load=current_load,
+                        market_structure=market_structure_briefs,
                     )
                     slot_orders.extend(executed_records)
                     if timeframe == self.timeframes[0]:
                         latest_prices[pair] = bar.close
+                        try:
+                            structure_snapshot = build_market_structure_snapshot(
+                                subset,
+                                symbol=pair,
+                                timeframe=timeframe,
+                                lookback=self.window_configs[timeframe].medium_window * 3,
+                                swing_window=2,
+                                tolerance_mult=0.75,
+                            )
+                            if structure_snapshot:
+                                market_structure_briefs[pair] = structure_snapshot.to_dict()
+                        except Exception as exc:  # pragma: no cover - defensive only
+                            logger.debug("Market structure snapshot failed for %s %s: %s", pair, timeframe, exc)
             if (
                 self.flatten_session_boundary_hour is not None
                 and ts.hour == self.flatten_session_boundary_hour
@@ -1147,6 +1295,8 @@ class LLMStrategistBacktester:
                 "positions": dict(self.portfolio.positions),
                 "orders": slot_orders,
                 "indicator_context": indicator_briefs,
+                "market_structure": market_structure_briefs,
+                "factor_exposures": self.latest_factor_exposures,
             }
             self.slot_reports_by_day[day_key].append(slot_report)
             self.last_slot_report = slot_report
@@ -1492,6 +1642,8 @@ class LLMStrategistBacktester:
         pnl_breakdown, symbol_pnl, pnl_totals = self._daily_costs(day_key, start_equity if start_equity else 1.0, end_equity)
         trade_count = sum(len(report.get("orders", [])) for report in reports)
         indicator_context = reports[-1].get("indicator_context", {})
+        market_structure_context = reports[-1].get("market_structure", {})
+        # TODO: push market_structure_context into strategy_export and per-trade logs for LLM consumption.
         trigger_activity = self.trigger_activity_by_day.pop(day_key, {})
         top_triggers = sorted(
             ((trigger_id, data.get("executed", 0)) for trigger_id, data in trigger_activity.items()),
@@ -1526,6 +1678,8 @@ class LLMStrategistBacktester:
             "trade_count": trade_count,
             "positions_end": reports[-1]["positions"],
             "indicator_context": indicator_context,
+            "market_structure": market_structure_context,
+            "factor_exposures": self.latest_factor_exposures,
             "top_triggers": top_triggers,
             "skipped_due_to_limits": skipped_limits,
             "attempted_triggers": limit_entry["trades_attempted"],
@@ -1845,6 +1999,8 @@ class LLMStrategistBacktester:
                 },
             )
             payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + max(risk_used, 0.0)
+            payload.setdefault("load_sum", 0.0)
+            payload.setdefault("load_count", 0)
             payload.setdefault("latencies", [])
 
         timeframe_risk_usage: Dict[str, float] = defaultdict(float)

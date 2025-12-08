@@ -52,7 +52,12 @@ class TriggerEngine:
         self.evaluator = evaluator or RuleEvaluator()
         self.trade_risk = trade_risk or TradeRiskEvaluator(risk_engine)
 
-    def _context(self, indicator: IndicatorSnapshot, asset_state: AssetState | None) -> dict[str, float | str | None]:
+    def _context(
+        self,
+        indicator: IndicatorSnapshot,
+        asset_state: AssetState | None,
+        market_structure: dict[str, float | str | None] | None = None,
+    ) -> dict[str, float | str | None]:
         """Build evaluation context, including cross-timeframe aliases."""
 
         def _alias_key(key: str) -> str | None:
@@ -87,6 +92,15 @@ class TriggerEngine:
                     alias = _alias_key(key)
                     if alias:
                         context[f"{prefix}_{alias}"] = value
+        ms_keys = ("nearest_support", "nearest_resistance", "distance_to_support_pct", "distance_to_resistance_pct", "trend")
+        if market_structure:
+            # Surface market-structure telemetry fields directly for rule expressions.
+            for key in ms_keys:
+                if key in market_structure:
+                    context[key] = market_structure.get(key)
+        # Ensure keys exist to avoid unknown identifier errors when no snapshot is available.
+        for key in ms_keys:
+            context.setdefault(key, None)
         return context
 
     def _position_direction(self, symbol: str, portfolio: PortfolioState) -> Literal["long", "short", "flat"]:
@@ -174,10 +188,11 @@ class TriggerEngine:
         indicator: IndicatorSnapshot,
         portfolio: PortfolioState,
         asset_state: AssetState | None = None,
+        market_structure: dict[str, float | str | None] | None = None,
     ) -> tuple[List[Order], List[dict]]:
         orders: List[Order] = []
         block_entries: List[dict] = []
-        context = self._context(indicator, asset_state)
+        context = self._context(indicator, asset_state, market_structure)
         for trigger in self.plan.triggers:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
                 continue

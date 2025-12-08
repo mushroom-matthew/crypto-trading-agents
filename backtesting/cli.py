@@ -21,6 +21,7 @@ from schemas.strategy_run import RiskLimitSettings
 from .llm_strategist_runner import LLMStrategistBacktester
 from .simulator import run_backtest, run_portfolio_backtest
 from .strategies import StrategyWrapperConfig, StrategyParameters
+from data_loader.factors import fetch_or_build_factors
 
 
 def _parse_session_multipliers(raw: str | None) -> list[dict[str, float]] | None:
@@ -237,6 +238,37 @@ def main() -> None:
         choices=["none", "daily_close", "session_close_utc"],
         help="Flattening behavior: none, force daily close, or flatten once per day at --flatten-session-hour",
     )
+    parser.add_argument(
+        "--factor-data",
+        help="Path to cached factor dataframe (parquet or CSV). If omitted, backtester builds simple proxies from price data.",
+    )
+    parser.add_argument(
+        "--auto-hedge-market",
+        action="store_true",
+        help="Enable market beta neutralization guidance for the LLM strategist/judge.",
+    )
+    parser.add_argument(
+        "--factor-auto-fetch",
+        action="store_true",
+        help="Automatically build factor file before backtest (from local CSVs if provided, else CoinGecko).",
+    )
+    parser.add_argument("--factor-btc-csv", help="Local BTC CSV (timestamp,close[,market_cap]) for auto-fetch mode.")
+    parser.add_argument("--factor-eth-csv", help="Local ETH CSV for auto-fetch mode.")
+    parser.add_argument("--factor-total-csv", help="Optional total market cap CSV for auto-fetch mode.")
+    parser.add_argument("--factor-start", help="Optional ISO start to slice factors when auto-fetching.")
+    parser.add_argument("--factor-end", help="Optional ISO end to slice factors when auto-fetching.")
+    parser.add_argument("--factor-fetch-days", type=int, default=180, help="Days to fetch when using CoinGecko fallback.")
+    parser.add_argument(
+        "--factor-fetch-interval",
+        default="hourly",
+        choices=["hourly", "daily"],
+        help="Sampling interval when using CoinGecko fallback.",
+    )
+    parser.add_argument(
+        "--factor-use-backtest-cache",
+        action="store_true",
+        help="Build factors from backtest OHLCV cache/fetch when no CSVs are provided.",
+    )
     args = parser.parse_args()
 
     setup_backtest_logging(level=args.log_level, log_file=args.log_file, json_logs=args.log_json)
@@ -305,6 +337,27 @@ def main() -> None:
                 flatten_policy = "daily_close"
             else:
                 flatten_policy = "none"
+        factor_data_path = Path(args.factor_data) if args.factor_data else None
+        if args.factor_auto_fetch:
+            default_out = factor_data_path or Path("data/factors.auto.parquet")
+            try:
+                factor_data_path = fetch_or_build_factors(
+                    out_path=default_out,
+                    days=args.factor_fetch_days,
+                    interval=args.factor_fetch_interval,
+                    timeframe=(args.timeframes[0] if args.timeframes else None),
+                    btc_csv=Path(args.factor_btc_csv) if args.factor_btc_csv else None,
+                    eth_csv=Path(args.factor_eth_csv) if args.factor_eth_csv else None,
+                    total_csv=Path(args.factor_total_csv) if args.factor_total_csv else None,
+                    start=datetime.fromisoformat(args.factor_start) if args.factor_start else None,
+                    end=datetime.fromisoformat(args.factor_end) if args.factor_end else None,
+                    use_backtest_cache=args.factor_use_backtest_cache,
+                )
+                print(f"[factor] auto-fetched to {factor_data_path}")
+            except Exception as exc:
+                print(f"[factor] auto-fetch failed ({exc}); falling back to inline proxies.")
+                factor_data_path = None
+
         backtester = LLMStrategistBacktester(
             pairs=pairs,
             start=start,
@@ -323,6 +376,8 @@ def main() -> None:
             session_trade_multipliers=session_multipliers,
             timeframe_trigger_caps=timeframe_caps,
             flatten_policy=flatten_policy,
+            factor_data_path=factor_data_path,
+            auto_hedge_market=args.auto_hedge_market,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")
