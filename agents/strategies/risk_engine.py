@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Mapping
 
 from schemas.llm_strategist import IndicatorSnapshot, PortfolioState, PositionSizingRule, RiskConstraint
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class RiskProfile:
@@ -38,6 +40,8 @@ class RiskEngine:
         self.daily_anchor_equity = daily_anchor_equity
         self.risk_profile = risk_profile or RiskProfile()
         self.last_block_reason: str | None = None
+        # Snapshot of last sizing decision for telemetry (allocated vs actual risk).
+        self.last_risk_snapshot: Dict[str, float | None] = {}
 
     def _fraction(self, pct: float | None) -> float:
         return (pct or 0.0) / 100.0
@@ -109,7 +113,10 @@ class RiskEngine:
                 return 0.0
             daily_target = target / math.sqrt(365.0)
             scale = daily_target / realized
-            return equity * min(scale, 1.0)
+            scale = max(scale, 0.0)
+            if scale > 1.0:
+                logger.debug("vol_target uncapped scale used", extra={"scale": scale, "symbol": indicator.symbol})
+            return equity * scale
         raise ValueError(f"unsupported sizing mode {rule.sizing_mode}")
 
     def size_position(
@@ -118,6 +125,7 @@ class RiskEngine:
         price: float,
         portfolio: PortfolioState,
         indicator: IndicatorSnapshot,
+        stop_distance: float | None = None,
     ) -> float:
         self.last_block_reason = None
         if price <= 0:
@@ -133,8 +141,20 @@ class RiskEngine:
             self.last_block_reason = "sizing_zero"
             return 0.0
 
+        # Derive a stop-distance proxy (true stop preferred; fallback to ATR).
+        if stop_distance is None and indicator.atr_14 is not None:
+            stop_distance = float(indicator.atr_14)
+
+        # Compute per-trade risk cap in notional terms; if a stop exists, convert allowed loss to notional.
+        risk_cap_abs = portfolio.equity * self._scaled_fraction(self.constraints.max_position_risk_pct, symbol)
+        if stop_distance and price > 0:
+            qty_cap = risk_cap_abs / max(stop_distance, 1e-9)
+            position_cap = qty_cap * price
+        else:
+            position_cap = risk_cap_abs
+
         caps = {
-            "max_position_risk_pct": self._position_risk_cap(portfolio, symbol),
+            "max_position_risk_pct": position_cap,
             "max_symbol_exposure_pct": self._available_symbol_capacity(symbol, price, portfolio),
             "max_portfolio_exposure_pct": self._available_portfolio_capacity(portfolio),
         }
@@ -155,6 +175,20 @@ class RiskEngine:
             self.last_block_reason = limiting_name
             return 0.0
         quantity = max(0.0, final / price)
+        actual_risk = None
+        if stop_distance and price > 0 and quantity > 0:
+            actual_risk = quantity * stop_distance
+        self.last_risk_snapshot = {
+            "equity": portfolio.equity,
+            "stop_distance": stop_distance,
+            "risk_cap_abs": risk_cap_abs,
+            "risk_cap_notional": position_cap,
+            "desired_notional": desired_notional,
+            "final_notional": final,
+            "allocated_risk_pct": self.constraints.max_position_risk_pct,
+            "allocated_risk_abs": risk_cap_abs,
+            "actual_risk_abs": actual_risk,
+        }
         if quantity <= 0:
             self.last_block_reason = limiting_name
         else:

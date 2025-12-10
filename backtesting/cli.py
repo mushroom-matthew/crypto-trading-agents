@@ -9,6 +9,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from collections import defaultdict
 
 if __package__ is None:  # allow running as `python backtesting/cli.py`
     sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -20,8 +21,10 @@ from backtesting.logging_config import setup_backtest_logging
 from schemas.strategy_run import RiskLimitSettings
 from .llm_strategist_runner import LLMStrategistBacktester
 from .simulator import run_backtest, run_portfolio_backtest
+from backtesting.reports import write_run_summary
 from .strategies import StrategyWrapperConfig, StrategyParameters
 from data_loader.factors import fetch_or_build_factors
+import pandas as pd
 
 
 def _parse_session_multipliers(raw: str | None) -> list[dict[str, float]] | None:
@@ -64,6 +67,120 @@ def _parse_timeframe_caps(raw: str | None) -> dict[str, int] | None:
         if cap_val > 0:
             caps[tf.strip()] = cap_val
     return caps or None
+
+
+def _write_baseline_reports(
+    equity_curve,
+    trades,
+    initial_cash: float,
+    run_id: str,
+) -> None:
+    """Emit daily_reports/run_summary for the non-LLM baseline backtest."""
+
+    cache_root = Path(".cache/strategy_plans") / run_id
+    daily_dir = cache_root / "daily_reports"
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    trades = trades.copy()
+    if not trades.empty and "time" in trades.columns:
+        trades["time"] = pd.to_datetime(trades["time"], utc=True, errors="coerce")
+    equity = equity_curve.copy()
+    equity.index = equity.index.tz_convert("UTC")
+    equity = equity.sort_index()
+    daily_close = equity.resample("1D").last().dropna()
+    daily_reports = []
+    prev_equity = float(initial_cash)
+    for ts, val in daily_close.items():
+        date_str = ts.date().isoformat()
+        ret_pct = (float(val) / prev_equity - 1.0) * 100 if prev_equity else 0.0
+        day_trades = trades[trades["time"].dt.date == ts.date()] if not trades.empty else trades
+        trigger_quality: dict[str, dict[str, float | int]] = {}
+        timeframe_quality: dict[str, dict[str, float | int]] = {}
+        hour_quality: dict[str, dict[str, float | int]] = {}
+        for _, row in day_trades.iterrows():
+            trig = row.get("trigger_id", "baseline_strategy")
+            tf = str(row.get("timeframe", "1h"))
+            hr = row["time"].hour if pd.notna(row.get("time")) else None
+            pnl = float(row.get("pnl", 0.0) or 0.0)
+            risk_used = float(row.get("risk_used_abs", 0.0) or 0.0)
+            actual_risk = float(row.get("actual_risk_at_stop", risk_used) or 0.0)
+            key = f"{trig}|{tf}"
+            payload = trigger_quality.setdefault(
+                key,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                    "risk_used_abs": 0.0,
+                    "actual_risk_abs": 0.0,
+                },
+            )
+            payload["pnl"] += pnl
+            payload["trades"] += 1
+            payload["wins"] += 1 if pnl > 0 else 0
+            payload["losses"] += 1 if pnl < 0 else 0
+            payload["risk_used_abs"] += risk_used
+            payload["actual_risk_abs"] += actual_risk
+            tf_payload = timeframe_quality.setdefault(
+                tf,
+                {"pnl": 0.0, "trades": 0, "wins": 0, "losses": 0, "risk_used_abs": 0.0, "actual_risk_abs": 0.0},
+            )
+            tf_payload["pnl"] += pnl
+            tf_payload["trades"] += 1
+            tf_payload["wins"] += 1 if pnl > 0 else 0
+            tf_payload["losses"] += 1 if pnl < 0 else 0
+            tf_payload["risk_used_abs"] += risk_used
+            tf_payload["actual_risk_abs"] += actual_risk
+            if hr is not None:
+                hr_payload = hour_quality.setdefault(
+                    str(hr),
+                    {"pnl": 0.0, "trades": 0, "wins": 0, "losses": 0, "risk_used_abs": 0.0, "actual_risk_abs": 0.0},
+                )
+                hr_payload["pnl"] += pnl
+                hr_payload["trades"] += 1
+                hr_payload["wins"] += 1 if pnl > 0 else 0
+                hr_payload["losses"] += 1 if pnl < 0 else 0
+                hr_payload["risk_used_abs"] += risk_used
+                hr_payload["actual_risk_abs"] += actual_risk
+
+        daily_reports.append(
+            {
+                "date": date_str,
+                "equity_return_pct": ret_pct,
+                "trade_count": int(len(day_trades)),
+                "risk_budget": {"used_pct": 0.0, "utilization_pct": 0.0},
+                "limit_stats": {
+                    "attempted_triggers": int(len(day_trades)),
+                    "executed_trades": int(len(day_trades)),
+                    "blocked_by_daily_cap": 0,
+                    "blocked_by_plan_limits": 0,
+                    "blocked_by_direction": 0,
+                    "risk_block_breakdown": {},
+                },
+                "pnl_breakdown": {
+                    "flattening_pct": 0.0,
+                    "fees_pct": 0.0,
+                },
+                "trigger_quality": trigger_quality,
+                "timeframe_quality": timeframe_quality,
+                "hour_quality": hour_quality,
+            }
+        )
+        prev_equity = float(val)
+        with (daily_dir / f"{date_str}.json").open("w", encoding="utf-8") as handle:
+            json.dump(daily_reports[-1], handle, indent=2)
+
+    summary_path = cache_root / "run_summary.json"
+    write_run_summary(daily_reports, summary_path)
 
 
 def _emit_limit_debug(
@@ -415,6 +532,7 @@ def main() -> None:
             print(f"{pair}: return={pair_result.summary['return_pct']:.2f}% sharpe={pair_result.summary.get('sharpe_ratio', 0):.2f}")
         print("\nLast 5 aggregated equity points:")
         print(result.equity_curve.tail())
+        _write_baseline_reports(result.equity_curve, result.trades, args.initial_cash, args.llm_run_id or "baseline")
     else:
         result = run_backtest(
             pair=args.pair,
@@ -433,6 +551,7 @@ def main() -> None:
         if not result.trades.empty:
             print("\nSample trades:")
             print(result.trades.tail())
+        _write_baseline_reports(result.equity_curve, result.trades, args.initial_cash, args.llm_run_id or "baseline")
 
 
 if __name__ == "__main__":

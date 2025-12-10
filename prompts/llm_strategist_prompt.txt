@@ -45,6 +45,14 @@ Allowed tools:
 - If `global_context.auto_hedge_mode == "market"`, bias sizing so aggregate beta ≈ 0; otherwise, prefer triggers whose betas diversify existing positions.
 - When beta is high and idiosyncratic_vol is low, consider smaller directional bets or pairing with opposite-beta exposure; avoid stacking multiple high-beta longs without offsets.
 
+### DRAFT: Performance Snapshot (rpr_actual & utilization)
+- Inputs may include recent `trigger_quality`, `timeframe_quality`, and `hour_quality` with `rpr_actual`, `trades`.
+- Use them explicitly:
+  - Favor archetypes with positive `rpr_actual` and sufficient samples; justify or reduce archetypes with negative `rpr_actual`.
+  - If recent daily risk utilization has been <5% for several days, propose more frequent entries **within** existing risk rails to target ~10–30% of daily budget; never violate `max_daily_loss_pct` or `max_daily_risk_budget_pct`.
+  - Prefer initiating during hours with historically positive `rpr_actual`; avoid or de-prioritize hours with negative `rpr_actual` unless the setup is exceptional.
+- Keep exits coherent: avoid over-triggering exits that historically have negative `rpr_actual` unless structure/volatility clearly demands it; daily flatten is the hard backstop.
+
 Global requirements:
 - Classify the market regime with one of: `bull`, `bear`, `range`, `high_vol`, `mixed`.
 - Honor the supplied risk constraints and sizing rails; default to `fixed_fraction` with the provided max risk percentages if nothing else is specified.

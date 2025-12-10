@@ -54,9 +54,30 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
     timeframe_quality: dict[str, dict[str, float | int]] = {}
     hour_quality: dict[str, dict[str, float | int]] = {}
     factor_exposures: dict[str, Any] = {}
+    block_totals: dict[str, int] = {}
 
     for report in daily_reports:
         limit_stats = report.get("limit_stats") or {}
+        base_blocks = limit_stats.get("risk_block_breakdown") or {}
+        block_map = base_blocks | {
+            "daily_loss": report.get("daily_loss_blocks", 0),
+            "daily_cap": report.get("daily_cap_blocks", 0),
+            "risk_budget": report.get("risk_budget_blocks", 0),
+            "session_cap": report.get("session_cap_blocks", 0),
+            "archetype_load": report.get("archetype_load_blocks", 0),
+            "trigger_load": report.get("trigger_load_blocks", 0),
+            "symbol_cap": report.get("symbol_cap_blocks", 0),
+            # Aliases to satisfy reporting consumers.
+            "max_daily_loss_pct": base_blocks.get("max_daily_loss_pct", 0),
+            "max_daily_risk_budget_pct": base_blocks.get("risk_budget", 0),
+            "max_daily_cap": base_blocks.get("daily_cap", 0),
+            "max_symbol_exposure_pct": base_blocks.get("max_symbol_exposure_pct", 0),
+        }
+        for key, val in block_map.items():
+            try:
+                block_totals[key] = block_totals.get(key, 0) + int(val or 0)
+            except (TypeError, ValueError):
+                continue
         risk_entry = report.get("risk_budget") or {}
         used_pct = risk_entry.get("used_pct")
         if used_pct is None:
@@ -100,10 +121,12 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
                     "loss_abs_sum": 0.0,
                     "load_sum": 0.0,
                     "load_count": 0,
+                    "actual_risk_abs": 0.0,
                 },
             )
             agg["pnl"] += float(payload.get("pnl", 0.0))
             agg["risk_used_abs"] += float(payload.get("risk_used_abs", 0.0))
+            agg["actual_risk_abs"] += float(payload.get("actual_risk_abs", 0.0))
             agg["trades"] += int(payload.get("trades", 0))
             agg["wins"] += int(payload.get("wins", 0))
             agg["losses"] += int(payload.get("losses", 0))
@@ -118,15 +141,6 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
             agg["abs_mfe_sum"] += float(payload.get("mfe_pct", 0.0)).__abs__() * float(payload.get("trades", 0))
             agg["win_abs_sum"] += float(payload.get("pnl", 0.0)) if payload.get("pnl", 0.0) > 0 else 0.0
             agg["loss_abs_sum"] += abs(float(payload.get("pnl", 0.0))) if payload.get("pnl", 0.0) < 0 else 0.0
-            load_count = int(payload.get("load_count", 0))
-            agg["load_sum"] += float(payload.get("avg_load", 0.0)) * load_count
-            agg["load_count"] += load_count
-            load_count = int(payload.get("load_count", 0))
-            agg["load_sum"] += float(payload.get("avg_load", 0.0)) * load_count
-            agg["load_count"] += load_count
-            load_count = int(payload.get("load_count", 0))
-            agg["load_sum"] += float(payload.get("avg_load", 0.0)) * load_count
-            agg["load_count"] += load_count
             load_count = int(payload.get("load_count", 0))
             agg["load_sum"] += float(payload.get("avg_load", 0.0)) * load_count
             agg["load_count"] += load_count
@@ -150,10 +164,12 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
                     "loss_abs_sum": 0.0,
                     "load_sum": 0.0,
                     "load_count": 0,
+                    "actual_risk_abs": 0.0,
                 },
             )
             agg["pnl"] += float(payload.get("pnl", 0.0))
             agg["risk_used_abs"] += float(payload.get("risk_used_abs", 0.0))
+            agg["actual_risk_abs"] += float(payload.get("actual_risk_abs", 0.0))
             agg["trades"] += int(payload.get("trades", 0))
             agg["wins"] += int(payload.get("wins", 0))
             agg["losses"] += int(payload.get("losses", 0))
@@ -191,10 +207,12 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
                     "loss_abs_sum": 0.0,
                     "load_sum": 0.0,
                     "load_count": 0,
+                    "actual_risk_abs": 0.0,
                 },
             )
             agg["pnl"] += float(payload.get("pnl", 0.0))
             agg["risk_used_abs"] += float(payload.get("risk_used_abs", 0.0))
+            agg["actual_risk_abs"] += float(payload.get("actual_risk_abs", 0.0))
             agg["trades"] += int(payload.get("trades", 0))
             agg["wins"] += int(payload.get("wins", 0))
             agg["losses"] += int(payload.get("losses", 0))
@@ -259,11 +277,15 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
             loss_abs = float(payload.get("loss_abs_sum", 0.0))
             load_sum = float(payload.get("load_sum", 0.0))
             load_count = int(payload.get("load_count", 0))
+            allocated_risk = float(payload.get("risk_used_abs", 0.0))
+            actual_risk = float(payload.get("actual_risk_abs", 0.0))
             finalized[key] = {
                 "trades": trades,
                 "pnl": pnl,
                 "risk_used_abs": risk_used,
                 "rpr": (pnl / risk_used) if risk_used else 0.0,
+                "rpr_allocated": (pnl / allocated_risk) if allocated_risk else 0.0,
+                "rpr_actual": (pnl / actual_risk) if actual_risk else 0.0,
                 "win_rate": (wins / trades) if trades else 0.0,
                 "mean_r": mean_r,
                 "latency_seconds": latency_avg,
@@ -274,6 +296,8 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
                 "relative_efficiency_mfe": (mean_r / abs_mfe_mean) if abs_mfe_mean else 0.0,
                 "asymmetry": ((win_abs - loss_abs) / (win_abs + loss_abs)) if (win_abs + loss_abs) else 0.0,
                 "avg_load": (load_sum / load_count) if load_count else 0.0,
+                "load_sum": load_sum,
+                "load_count": load_count,
             }
         return finalized
 
@@ -313,6 +337,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
         "timeframe_quality": _finalize_quality(timeframe_quality),
         "hour_quality": _finalize_quality(hour_quality),
         "factor_exposures": factor_exposures,
+        "block_totals": block_totals,
     }
     return summary
 

@@ -34,6 +34,7 @@ class PortfolioBacktestResult:
 def _apply_intents(
     intents: List[Intent],
     portfolio: PortfolioState,
+    cost_basis: Dict[str, float],
     price: float,
     fee_rate: float,
 ) -> List[Dict[str, Any]]:
@@ -51,7 +52,19 @@ def _apply_intents(
                 continue
             portfolio.cash -= total_cost
             portfolio.positions[symbol] = portfolio.positions.get(symbol, 0.0) + qty
-            fills.append({"symbol": symbol, "side": "BUY", "qty": qty, "price": price, "fee": fee})
+            cost_basis[symbol] = cost_basis.get(symbol, 0.0) + total_cost
+            fills.append({
+                "symbol": symbol,
+                "side": "BUY",
+                "qty": qty,
+                "price": price,
+                "fee": fee,
+                "pnl": 0.0,
+                "risk_used_abs": qty * price,
+                "actual_risk_at_stop": qty * price,
+                "trigger_id": "baseline_strategy",
+                "timeframe": "1h",
+            })
         elif intent.action in {"SELL", "CLOSE"}:
             qty_available = portfolio.positions.get(symbol, 0.0)
             if qty_available <= 0:
@@ -60,18 +73,35 @@ def _apply_intents(
             qty_to_sell = qty_available * fraction
             proceeds = qty_to_sell * price
             fee = proceeds * fee_rate
+            basis_total = cost_basis.get(symbol, 0.0)
+            basis_portion = basis_total * fraction
+            pnl = proceeds - fee - basis_portion
             portfolio.cash += proceeds - fee
             new_qty = qty_available - qty_to_sell
             if new_qty <= 1e-8:
                 portfolio.positions.pop(symbol, None)
+                cost_basis.pop(symbol, None)
             else:
                 portfolio.positions[symbol] = new_qty
-            fills.append({"symbol": symbol, "side": "SELL", "qty": qty_to_sell, "price": price, "fee": fee})
+                cost_basis[symbol] = max(0.0, basis_total - basis_portion)
+            fills.append({
+                "symbol": symbol,
+                "side": "SELL",
+                "qty": qty_to_sell,
+                "price": price,
+                "fee": fee,
+                "pnl": pnl,
+                "risk_used_abs": qty_to_sell * price,
+                "actual_risk_at_stop": qty_to_sell * price,
+                "trigger_id": "baseline_strategy",
+                "timeframe": "1h",
+            })
     return fills
 
 
 def _flatten_positions(
     portfolio: PortfolioState,
+    cost_basis: Dict[str, float],
     last_prices: Dict[str, float],
     timestamp: pd.Timestamp | None,
     fee_rate: float,
@@ -89,12 +119,27 @@ def _flatten_positions(
         side = "SELL" if qty > 0 else "BUY"
         notional = abs(qty) * price
         fee = notional * fee_rate
+        basis_total = cost_basis.get(symbol, 0.0)
+        pnl = notional - fee - basis_total if side == "SELL" else -(notional + fee - basis_total)
         if side == "SELL":
             portfolio.cash += notional - fee
         else:
             portfolio.cash -= notional + fee
-        trades.append({"symbol": symbol, "side": side, "qty": abs(qty), "price": price, "fee": fee, "time": timestamp})
+        trades.append({
+            "symbol": symbol,
+            "side": side,
+            "qty": abs(qty),
+            "price": price,
+            "fee": fee,
+            "pnl": pnl,
+            "risk_used_abs": abs(qty) * price,
+            "actual_risk_at_stop": abs(qty) * price,
+            "trigger_id": "baseline_strategy",
+            "timeframe": "1h",
+            "time": timestamp,
+        })
         portfolio.positions.pop(symbol, None)
+        cost_basis.pop(symbol, None)
         updated = True
     if updated:
         portfolio.equity = portfolio.cash
@@ -181,6 +226,7 @@ def run_backtest(
     strategy = ExecutionAgentStrategy(strategy_config)
 
     portfolio = PortfolioState(cash=initial_cash, positions={}, equity=initial_cash, max_equity=initial_cash)
+    cost_basis: Dict[str, float] = {}
     equity_points: List[float] = []
     equity_index: List[pd.Timestamp] = []
     trades: List[Dict[str, Any]] = []
@@ -191,7 +237,7 @@ def run_backtest(
     for ts, row in features.iterrows():
         day = ts.date()
         if flatten_positions_daily and last_day and day != last_day:
-            _flatten_positions(portfolio, last_prices, last_timestamp, fee_rate, trades)
+            _flatten_positions(portfolio, cost_basis, last_prices, last_timestamp, fee_rate, trades)
         price = float(row["close"])
         feature_vector = {
             "symbol": pair,
@@ -204,7 +250,7 @@ def run_backtest(
             "volume_multiple": float(row["volume_multiple"]),
         }
         intents = strategy.decide(feature_vector, portfolio)
-        fills = _apply_intents(intents, portfolio, price, fee_rate)
+        fills = _apply_intents(intents, portfolio, cost_basis, price, fee_rate)
         trades.extend({"time": ts, **fill} for fill in fills)
 
         equity = portfolio.cash
@@ -219,7 +265,7 @@ def run_backtest(
         last_prices[pair] = price
 
     if flatten_positions_daily:
-        _flatten_positions(portfolio, last_prices, last_timestamp, fee_rate, trades)
+        _flatten_positions(portfolio, cost_basis, last_prices, last_timestamp, fee_rate, trades)
 
     equity_series = pd.Series(equity_points, index=equity_index)
     trades_df = pd.DataFrame(trades)

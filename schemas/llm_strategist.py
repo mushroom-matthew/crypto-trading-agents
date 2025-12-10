@@ -105,6 +105,7 @@ class TriggerCondition(SerializableModel):
     timeframe: str
     entry_rule: str
     exit_rule: str
+    stop_loss_pct: float | None = Field(default=None, ge=0.0)
 
 
 class RiskConstraint(SerializableModel):

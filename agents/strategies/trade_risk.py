@@ -32,6 +32,7 @@ class TradeRiskEvaluator:
         price: float,
         portfolio: PortfolioState,
         indicator: IndicatorSnapshot | None = None,
+        stop_distance: float | None = None,
     ) -> RiskCheckResult:
         """Return whether the trade should proceed under configured limits.
 
@@ -46,7 +47,7 @@ class TradeRiskEvaluator:
         if indicator is None:
             return RiskCheckResult(allowed=False, quantity=0.0, reason="missing_indicator")
 
-        quantity = self.engine.size_position(trigger.symbol, price, portfolio, indicator)
+        quantity = self.engine.size_position(trigger.symbol, price, portfolio, indicator, stop_distance=stop_distance)
         if quantity <= 0:
             reason = self.engine.last_block_reason or "sizing_zero"
             return RiskCheckResult(allowed=False, quantity=0.0, reason=reason)

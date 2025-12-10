@@ -35,6 +35,7 @@ class Order:
     timeframe: str
     reason: str
     timestamp: datetime
+    stop_distance: float | None = None
 
 
 class TriggerEngine:
@@ -57,6 +58,7 @@ class TriggerEngine:
         indicator: IndicatorSnapshot,
         asset_state: AssetState | None,
         market_structure: dict[str, float | str | None] | None = None,
+        portfolio: PortfolioState | None = None,
     ) -> dict[str, float | str | None]:
         """Build evaluation context, including cross-timeframe aliases."""
 
@@ -101,6 +103,8 @@ class TriggerEngine:
         # Ensure keys exist to avoid unknown identifier errors when no snapshot is available.
         for key in ms_keys:
             context.setdefault(key, None)
+        if portfolio:
+            context["position"] = self._position_direction(indicator.symbol, portfolio)
         return context
 
     def _position_direction(self, symbol: str, portfolio: PortfolioState) -> Literal["long", "short", "flat"]:
@@ -165,7 +169,10 @@ class TriggerEngine:
             return self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_flat", block_entries)
         if desired == current:
             return None
-        check = self.trade_risk.evaluate(trigger, "entry", bar.close, portfolio, indicator)
+        stop_distance = None
+        if trigger.stop_loss_pct is not None:
+            stop_distance = abs(bar.close * trigger.stop_loss_pct / 100.0)
+        check = self.trade_risk.evaluate(trigger, "entry", bar.close, portfolio, indicator, stop_distance=stop_distance)
         if not check.allowed:
             if block_entries is not None and check.reason:
                 detail = f"Risk constraint {check.reason} prevented sizing"
@@ -180,6 +187,7 @@ class TriggerEngine:
             timeframe=bar.timeframe,
             reason=trigger.id,
             timestamp=bar.timestamp,
+            stop_distance=stop_distance,
         )
 
     def on_bar(
@@ -192,7 +200,7 @@ class TriggerEngine:
     ) -> tuple[List[Order], List[dict]]:
         orders: List[Order] = []
         block_entries: List[dict] = []
-        context = self._context(indicator, asset_state, market_structure)
+        context = self._context(indicator, asset_state, market_structure, portfolio)
         for trigger in self.plan.triggers:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
                 continue

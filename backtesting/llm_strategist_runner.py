@@ -364,6 +364,8 @@ class LLMStrategistBacktester:
         self.archetype_load_by_day: Dict[str, Dict[tuple[str, str, int], int]] = defaultdict(lambda: defaultdict(int))
         self.archetype_load_threshold = int(os.environ.get("ARCHETYPE_LOAD_THRESHOLD", "8"))
         self.archetype_load_scale_start = float(os.environ.get("ARCHETYPE_LOAD_SCALE_START", "0.6"))
+        # Daily loss anchoring: set once per day at day boundary, never refreshed intraday.
+        self.daily_loss_anchor_by_day: Dict[str, float] = {}
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -681,6 +683,7 @@ class LLMStrategistBacktester:
         market_structure: Mapping[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         executed_records: List[Dict[str, Any]] = []
+        risk_engine = getattr(self, "latest_risk_engine", None)
         limit_entry = self.limit_enforcement_by_day[day_key]
         reason_map = set(item.value for item in BlockReason)
         custom_reasons = {"timeframe_cap", "session_cap", "trigger_load"}
@@ -706,9 +709,12 @@ class LLMStrategistBacktester:
             normalized = _normalized_reason(reason)
             limit_entry["skipped"][normalized] += 1
             self.skipped_activity_by_day[day_key][normalized] += 1
+            # Track block breakdown for all reasons (including session/archetype/load caps).
             if normalized == BlockReason.RISK.value:
                 key = reason or BlockReason.RISK.value
                 limit_entry["risk_block_breakdown"][key] += 1
+            else:
+                limit_entry["risk_block_breakdown"][normalized] += 1
             entry = {
                 "timestamp": data.get("timestamp"),
                 "symbol": data.get("symbol"),
@@ -749,10 +755,6 @@ class LLMStrategistBacktester:
                 }
             )
 
-        if blocked_entries:
-            for block in blocked_entries:
-                limit_entry["trades_attempted"] += 1
-                _record_block_entry(block, "trigger_engine")
         def _record_hints(order: Order) -> None:
             hints = self._assess_risk_limits(order, portfolio_state)
             if not hints:
@@ -760,9 +762,34 @@ class LLMStrategistBacktester:
             for hint in hints:
                 limit_entry["risk_limit_hints"][hint] += 1
 
+        def _adjust_budget_post_fill(day_key: str, symbol: str | None, planned: float | None, risk_snapshot: Mapping[str, Any] | None) -> None:
+            if planned is None or planned <= 0:
+                return
+            if not risk_snapshot:
+                return
+            actual = risk_snapshot.get("actual_risk_abs")
+            if actual is None:
+                return
+            entry = self.daily_risk_budget_state.get(day_key)
+            if not entry:
+                return
+            delta = float(actual) - float(planned)
+            if abs(delta) < 1e-9:
+                return
+            entry["used_abs"] = max(0.0, entry.get("used_abs", 0.0) + delta)
+            if symbol:
+                entry["symbol_usage"][symbol] = max(0.0, entry["symbol_usage"].get(symbol, 0.0) + delta)
+            entry["slippage_adjustment"] = entry.get("slippage_adjustment", 0.0) + delta
+
+        if blocked_entries:
+            for block in blocked_entries:
+                limit_entry["trades_attempted"] += 1
+                _record_block_entry(block, "trigger_engine")
+
         if not plan_payload or not compiled_payload:
             for order in orders:
                 limit_entry["trades_attempted"] += 1
+                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
                 _record_hints(order)
                 allowance = self._risk_budget_allowance(day_key, order)
                 if allowance is None:
@@ -787,12 +814,22 @@ class LLMStrategistBacktester:
                 trigger_id = order.reason
                 risk_used = allowance or 0.0
                 self.risk_usage_by_day[day_key][(trigger_id, order.timeframe)] += risk_used
+                actual_risk = None
+                if risk_snapshot:
+                    actual_risk = risk_snapshot.get("actual_risk_abs")
+                if actual_risk is None:
+                    stop_dist = order.stop_distance or (risk_snapshot.get("stop_distance") if risk_snapshot else None)
+                    if stop_dist is not None:
+                        actual_risk = max(order.quantity * stop_dist, 0.0)
+                if actual_risk is None:
+                    actual_risk = risk_used
                 self.risk_usage_events_by_day[day_key].append(
                     {
                         "trigger_id": trigger_id,
                         "timeframe": order.timeframe,
                         "hour": order.timestamp.hour,
                         "risk_used": risk_used,
+                        "actual_risk_at_stop": actual_risk,
                     }
                 )
                 self.timeframe_exec_counts[day_key][str(order.timeframe)] += 1
@@ -810,6 +847,7 @@ class LLMStrategistBacktester:
                     self.session_trade_counts[day_key][session_window] += 1
                 _record_execution_detail(order, "trigger_engine", risk_used=risk_used, latency_seconds=0.0)
                 structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
+                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
                 self.portfolio.execute(order, market_structure_entry=structure_snapshot)
                 structure_fields = _structure_fields(structure_snapshot)
                 record = {
@@ -823,6 +861,11 @@ class LLMStrategistBacktester:
                     "latency_seconds": 0.0,
                     "market_structure_entry": structure_snapshot,
                 }
+                if risk_snapshot:
+                    record["allocated_risk_abs"] = risk_snapshot.get("allocated_risk_abs")
+                    record["actual_risk_at_stop"] = risk_snapshot.get("actual_risk_abs") or actual_risk
+                    record["stop_distance"] = order.stop_distance or risk_snapshot.get("stop_distance")
+                _adjust_budget_post_fill(day_key, order.symbol, risk_used, risk_snapshot)
                 record.update(structure_fields)
                 executed_records.append(record)
                 self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
@@ -984,6 +1027,7 @@ class LLMStrategistBacktester:
                 )
                 continue
             if event and event.get("action") == "executed":
+                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
                 _record_hints(order)
                 allowance = self._risk_budget_allowance(day_key, order)
                 if allowance is None:
@@ -1016,12 +1060,22 @@ class LLMStrategistBacktester:
                     latency_seconds = (order.timestamp - plan_generated_at).total_seconds()
                 risk_used = adjusted_allowance or 0.0
                 self.risk_usage_by_day[day_key][(raw_trigger_id, order.timeframe)] += risk_used
+                actual_risk = None
+                if risk_snapshot:
+                    actual_risk = risk_snapshot.get("actual_risk_abs")
+                if actual_risk is None:
+                    stop_dist = order.stop_distance or (risk_snapshot.get("stop_distance") if risk_snapshot else None)
+                    if stop_dist is not None:
+                        actual_risk = max(order.quantity * stop_dist, 0.0)
+                if actual_risk is None:
+                    actual_risk = risk_used
                 self.risk_usage_events_by_day[day_key].append(
                     {
                         "trigger_id": raw_trigger_id,
                         "timeframe": order.timeframe,
                         "hour": order.timestamp.hour,
                         "risk_used": risk_used,
+                        "actual_risk_at_stop": actual_risk,
                     }
                 )
                 if latency_seconds is not None:
@@ -1033,6 +1087,7 @@ class LLMStrategistBacktester:
                 self.archetype_load_by_day[day_key][arche_key] = arche_load + 1
                 _record_execution_detail(order, "execution_engine", risk_used=risk_used, latency_seconds=latency_seconds)
                 structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
+                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
                 self.portfolio.execute(order, market_structure_entry=structure_snapshot)
                 structure_fields = _structure_fields(structure_snapshot)
                 record = {
@@ -1048,6 +1103,11 @@ class LLMStrategistBacktester:
                     "archetype": archetype,
                     "market_structure_entry": structure_snapshot,
                 }
+                if risk_snapshot:
+                    record["allocated_risk_abs"] = risk_snapshot.get("allocated_risk_abs")
+                    record["actual_risk_at_stop"] = risk_snapshot.get("actual_risk_abs") or actual_risk
+                    record["stop_distance"] = order.stop_distance or risk_snapshot.get("stop_distance")
+                _adjust_budget_post_fill(day_key, order.symbol, risk_used, risk_snapshot)
                 record.update(structure_fields)
                 executed_records.append(record)
                 self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
@@ -1113,6 +1173,7 @@ class LLMStrategistBacktester:
         self.daily_risk_budget_state.clear()
         self.trigger_load_by_day.clear()
         self.archetype_load_by_day.clear()
+        self.daily_loss_anchor_by_day.clear()
         self.current_day_key = None
         self.latest_daily_summary = None
         self.last_slot_report = None
@@ -1134,7 +1195,10 @@ class LLMStrategistBacktester:
                     daily_reports.append(summary)
             if self.current_day_key != day_key:
                 self.current_day_key = day_key
-                self._reset_risk_budget_for_day(day_key)
+                # Capture start-of-day equity once for budget base and loss anchor.
+                start_equity = self.portfolio.portfolio_state(ts).equity
+                self._reset_risk_budget_for_day(day_key, start_equity=start_equity)
+                self._set_daily_loss_anchor(day_key, self.portfolio.portfolio_state(ts).equity)
                 execution_tools.reset_run_state(run_id)
 
             new_plan_needed = current_plan is None or ts >= current_plan.valid_until
@@ -1182,9 +1246,10 @@ class LLMStrategistBacktester:
                 risk_engine = RiskEngine(
                     current_plan.risk_constraints,
                     {rule.symbol: rule for rule in current_plan.sizing_rules},
-                    daily_anchor_equity=self.portfolio.portfolio_state(ts).equity,
+                    daily_anchor_equity=self.daily_loss_anchor_by_day.get(day_key),
                     risk_profile=self.risk_profile,
                 )
+                self.latest_risk_engine = risk_engine
                 trigger_engine = TriggerEngine(current_plan, risk_engine, trade_risk=TradeRiskEvaluator(risk_engine))
                 plan_log.append(
                     {
@@ -1434,15 +1499,20 @@ class LLMStrategistBacktester:
         self.last_slot_report = slot_report
         self.flattened_days.add(day_key)
 
-    def _reset_risk_budget_for_day(self, day_key: str) -> None:
+    def _set_daily_loss_anchor(self, day_key: str, equity: float) -> None:
+        """Set daily loss anchor once per day; ignore intra-day refresh attempts."""
+        if day_key in self.daily_loss_anchor_by_day:
+            return
+        self.daily_loss_anchor_by_day[day_key] = equity
+
+    def _reset_risk_budget_for_day(self, day_key: str, start_equity: float | None = None) -> None:
         pct = self.daily_risk_budget_pct or 0.0
         if pct <= 0:
             self.daily_risk_budget_state.pop(day_key, None)
             return
-        if self.portfolio.equity_records:
-            equity = float(self.portfolio.equity_records[-1]["equity"])
-        else:
-            equity = float(self.initial_cash)
+        equity = float(start_equity) if start_equity is not None else (
+            float(self.portfolio.equity_records[-1]["equity"]) if self.portfolio.equity_records else float(self.initial_cash)
+        )
         budget_abs = equity * (pct / 100.0)
         self.daily_risk_budget_state[day_key] = {
             "budget_pct": pct,
@@ -1451,6 +1521,7 @@ class LLMStrategistBacktester:
             "used_abs": 0.0,
             "symbol_usage": defaultdict(float),
             "blocks": defaultdict(int),
+            "slippage_adjustment": 0.0,
         }
 
     def _risk_budget_allowance(self, day_key: str, order: Order) -> float | None:
@@ -1471,10 +1542,8 @@ class LLMStrategistBacktester:
             target_risk_pct = self.sizing_targets.get(order.symbol)
         if target_risk_pct is None:
             target_risk_pct = self.active_risk_limits.max_position_risk_pct or 0.0
-        # Adaptive boost: if prior day risk usage <10%, allow higher per-trade risk up to 3x.
-        prev_usage = 100.0
-        if self.latest_daily_summary and "risk_budget" in self.latest_daily_summary:
-            prev_usage = self.latest_daily_summary["risk_budget"].get("used_pct", 100.0)
+        # Adaptive boost: based on same-day usage only (no cross-day carry-over).
+        prev_usage = (entry.get("used_abs", 0.0) / budget * 100.0) if budget > 0 else 100.0
         adaptive_multiplier = 3.0 if prev_usage < 10.0 else 1.0
         risk_fraction = max(target_risk_pct * adaptive_multiplier, 0.0) / 100.0
         if risk_fraction <= 0:
@@ -1523,6 +1592,11 @@ class LLMStrategistBacktester:
             "used_pct": used_pct,
             "utilization_pct": util_pct,
             "start_equity": start_equity,
+            "budget_base_equity": start_equity,
+            "budget_allocated_abs": budget,
+            "budget_allocated_pct": budget_pct,
+            "budget_actual_abs": used,
+            "budget_slippage_adjustment": entry.get("slippage_adjustment", 0.0),
             "symbol_usage_pct": symbol_usage_pct,
             "blocks_by_symbol": blocks_by_symbol,
         }
@@ -1663,6 +1737,20 @@ class LLMStrategistBacktester:
         self.session_trade_counts.pop(day_key, None)
         self.archetype_load_by_day.pop(day_key, None)
         trigger_load_events = self.trigger_load_by_day.pop(day_key, [])
+        allocated_risk_abs = 0.0
+        actual_risk_abs = 0.0
+        for evt in risk_usage_events:
+            allocated_risk_abs += float(evt.get("risk_used", 0.0))
+            if evt.get("actual_risk_at_stop") is not None:
+                actual_risk_abs += float(evt.get("actual_risk_at_stop", 0.0))
+        # Explicit block counters for observability.
+        daily_loss_blocks = int(risk_breakdown.get(BlockReason.RISK.value, 0) + risk_breakdown.get("max_daily_loss_pct", 0))
+        daily_cap_blocks = int(risk_breakdown.get("daily_cap", 0))
+        risk_budget_blocks = int(risk_breakdown.get(BlockReason.RISK_BUDGET.value, 0))
+        session_cap_blocks = int(risk_breakdown.get("session_cap", 0))
+        archetype_load_blocks = int(risk_breakdown.get("archetype_load", 0))
+        trigger_load_blocks = int(risk_breakdown.get("trigger_load", 0))
+        symbol_cap_blocks = int(risk_breakdown.get("max_symbol_exposure_pct", 0))
         summary = {
             "date": day_key,
             "start_equity": start_equity,
@@ -1689,6 +1777,17 @@ class LLMStrategistBacktester:
             "flatten_policy": self.flatten_policy,
             "pnl_breakdown": pnl_breakdown,
             "symbol_pnl": symbol_pnl,
+            "allocated_risk_abs": allocated_risk_abs,
+            "actual_risk_abs": actual_risk_abs,
+            "risk_usage": {f"{k[0]}|{k[1]}": v for k, v in (risk_usage or {}).items()},
+            "risk_usage_events": risk_usage_events,
+            "daily_loss_blocks": daily_loss_blocks,
+            "daily_cap_blocks": daily_cap_blocks,
+            "risk_budget_blocks": risk_budget_blocks,
+            "session_cap_blocks": session_cap_blocks,
+            "archetype_load_blocks": archetype_load_blocks,
+            "trigger_load_blocks": trigger_load_blocks,
+            "symbol_cap_blocks": symbol_cap_blocks,
         }
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
@@ -1770,12 +1869,14 @@ class LLMStrategistBacktester:
             summary["timeframe_quality"] = quality_stats["timeframe_quality"]
         if quality_stats["hour_quality"]:
             summary["hour_quality"] = quality_stats["hour_quality"]
-        risk_budget_info = self._risk_budget_summary(day_key)
+        risk_budget_info = self._risk_budget_summary(day_key) or {}
         if risk_budget_info:
             summary["risk_budget"] = risk_budget_info
             limit_stats["risk_budget_used_pct"] = risk_budget_info["used_pct"]
             limit_stats["risk_budget_usage_by_symbol"] = risk_budget_info.get("symbol_usage_pct", {})
             limit_stats["risk_budget_blocks_by_symbol"] = risk_budget_info.get("blocks_by_symbol", {})
+        else:
+            summary["risk_budget"] = {}
         if plan_limits:
             summary["plan_limits"] = plan_limits
             min_trades = plan_limits.get("min_trades_per_day") or 0
@@ -1979,8 +2080,23 @@ class LLMStrategistBacktester:
                 if decay_pct is not None:
                     hr_payload["decay_sum"] += decay_pct
 
-        # attach risk usage totals
-        for (trigger_id, timeframe), risk_used in risk_usage.items():
+        # Attach risk usage totals (allocated + actual at stop if available).
+        actual_usage: Dict[tuple[str, str], float] = defaultdict(float)
+        for evt in risk_usage_events or []:
+            trig = evt.get("trigger_id")
+            tf = str(evt.get("timeframe") or "unknown")
+            actual = evt.get("actual_risk_at_stop")
+            if trig and actual is not None:
+                actual_usage[(trig, tf)] += float(actual)
+
+        for raw_key, risk_used in risk_usage.items():
+            if isinstance(raw_key, str) and "|" in raw_key:
+                trigger_id, timeframe = raw_key.split("|", 1)
+            elif isinstance(raw_key, tuple) and len(raw_key) == 2:
+                trigger_id, timeframe = raw_key
+            else:
+                trigger_id = str(raw_key)
+                timeframe = "unknown"
             key = f"{trigger_id}|{timeframe}"
             payload = trigger_quality.setdefault(
                 key,
@@ -1999,12 +2115,17 @@ class LLMStrategistBacktester:
                 },
             )
             payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + max(risk_used, 0.0)
+            actual_total = actual_usage.get((trigger_id, timeframe))
+            if actual_total is not None:
+                payload["actual_risk_abs"] = payload.get("actual_risk_abs", 0.0) + float(actual_total)
             payload.setdefault("load_sum", 0.0)
             payload.setdefault("load_count", 0)
             payload.setdefault("latencies", [])
 
         timeframe_risk_usage: Dict[str, float] = defaultdict(float)
         hour_risk_usage: Dict[str, float] = defaultdict(float)
+        timeframe_actual_usage: Dict[str, float] = defaultdict(float)
+        hour_actual_usage: Dict[str, float] = defaultdict(float)
         for evt in trigger_load_events or []:
             tf = str(evt.get("timeframe") or "unknown")
             hr = evt.get("hour")
@@ -2078,8 +2199,13 @@ class LLMStrategistBacktester:
             hour_val = evt.get("hour")
             risk_used = float(evt.get("risk_used", 0.0))
             timeframe_risk_usage[tf] += max(risk_used, 0.0)
+            actual_risk_val = evt.get("actual_risk_at_stop")
+            if actual_risk_val is not None:
+                timeframe_actual_usage[tf] += float(actual_risk_val)
             if hour_val is not None:
                 hour_risk_usage[str(hour_val)] += max(risk_used, 0.0)
+                if actual_risk_val is not None:
+                    hour_actual_usage[str(hour_val)] += float(actual_risk_val)
 
         for tf, risk_used in timeframe_risk_usage.items():
             payload = timeframe_quality.setdefault(
@@ -2099,6 +2225,9 @@ class LLMStrategistBacktester:
                 },
             )
             payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + risk_used
+            actual_val = timeframe_actual_usage.get(tf)
+            if actual_val is not None:
+                payload["actual_risk_abs"] = payload.get("actual_risk_abs", 0.0) + actual_val
             payload.setdefault("latencies", [])
 
         for hour, risk_used in hour_risk_usage.items():
@@ -2119,6 +2248,9 @@ class LLMStrategistBacktester:
                 },
             )
             payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + risk_used
+            actual_val = hour_actual_usage.get(hour)
+            if actual_val is not None:
+                payload["actual_risk_abs"] = payload.get("actual_risk_abs", 0.0) + actual_val
             payload.setdefault("latencies", [])
 
         def _finalize(target: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -2143,11 +2275,15 @@ class LLMStrategistBacktester:
                     asymmetry = (win_abs - loss_abs) / max(win_abs + loss_abs, 1e-9)
                 load_count = payload.get("load_count", 0)
                 avg_load = (payload.get("load_sum", 0.0) / load_count) if load_count else 0.0
+                actual_risk = payload.get("actual_risk_abs", 0.0)
                 finalized[key] = {
                     "trades": trades,
                     "pnl": pnl,
                     "risk_used_abs": risk_used,
+                    "actual_risk_abs": actual_risk,
                     "rpr": (pnl / risk_used) if risk_used else 0.0,
+                    "rpr_allocated": (pnl / risk_used) if risk_used else 0.0,
+                    "rpr_actual": (pnl / actual_risk) if actual_risk else 0.0,
                     "win_rate": win_rate,
                     "mean_r": mean_r,
                     "latency_seconds": avg_latency,
