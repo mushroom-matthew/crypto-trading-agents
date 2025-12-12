@@ -47,7 +47,22 @@ class TradeRiskEvaluator:
         if indicator is None:
             return RiskCheckResult(allowed=False, quantity=0.0, reason="missing_indicator")
 
-        quantity = self.engine.size_position(trigger.symbol, price, portfolio, indicator, stop_distance=stop_distance)
+        as_of = getattr(indicator, "as_of", None)
+        hour = as_of.hour if as_of is not None else None
+        symbol_archetype = None
+        if trigger.symbol:
+            symbol_lower = trigger.symbol.lower()
+            symbol_archetype = symbol_lower.split("-")[0]
+        archetype = symbol_archetype or trigger.category
+        quantity = self.engine.size_position(
+            trigger.symbol,
+            price,
+            portfolio,
+            indicator,
+            stop_distance=stop_distance,
+            archetype=archetype,
+            hour=hour,
+        )
         if quantity <= 0:
             reason = self.engine.last_block_reason or "sizing_zero"
             return RiskCheckResult(allowed=False, quantity=0.0, reason=reason)

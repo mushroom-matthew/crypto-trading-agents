@@ -37,8 +37,17 @@ def _apply_intents(
     cost_basis: Dict[str, float],
     price: float,
     fee_rate: float,
+    risk_limits: "RiskLimitSettings | None" = None,
 ) -> List[Dict[str, Any]]:
     fills: List[Dict[str, Any]] = []
+    def _per_trade_cap(equity: float) -> float | None:
+        if risk_limits is None:
+            return None
+        pct = getattr(risk_limits, "max_position_risk_pct", None) or 0.0
+        if pct <= 0:
+            return None
+        return equity * (pct / 100.0)
+
     for intent in intents:
         symbol = intent.symbol
         if intent.action == "BUY":
@@ -53,6 +62,9 @@ def _apply_intents(
             portfolio.cash -= total_cost
             portfolio.positions[symbol] = portfolio.positions.get(symbol, 0.0) + qty
             cost_basis[symbol] = cost_basis.get(symbol, 0.0) + total_cost
+            cap = _per_trade_cap(portfolio.equity)
+            notional = qty * price
+            risk_used = min(notional, cap) if cap is not None else notional
             fills.append({
                 "symbol": symbol,
                 "side": "BUY",
@@ -60,8 +72,8 @@ def _apply_intents(
                 "price": price,
                 "fee": fee,
                 "pnl": 0.0,
-                "risk_used_abs": qty * price,
-                "actual_risk_at_stop": qty * price,
+                "risk_used_abs": risk_used,
+                "actual_risk_at_stop": risk_used,
                 "trigger_id": "baseline_strategy",
                 "timeframe": "1h",
             })
@@ -84,6 +96,9 @@ def _apply_intents(
             else:
                 portfolio.positions[symbol] = new_qty
                 cost_basis[symbol] = max(0.0, basis_total - basis_portion)
+            cap = _per_trade_cap(portfolio.equity)
+            notional = qty_to_sell * price
+            risk_used = min(notional, cap) if cap is not None else notional
             fills.append({
                 "symbol": symbol,
                 "side": "SELL",
@@ -91,8 +106,8 @@ def _apply_intents(
                 "price": price,
                 "fee": fee,
                 "pnl": pnl,
-                "risk_used_abs": qty_to_sell * price,
-                "actual_risk_at_stop": qty_to_sell * price,
+                "risk_used_abs": risk_used,
+                "actual_risk_at_stop": risk_used,
                 "trigger_id": "baseline_strategy",
                 "timeframe": "1h",
             })
@@ -106,6 +121,7 @@ def _flatten_positions(
     timestamp: pd.Timestamp | None,
     fee_rate: float,
     trades: List[Dict[str, Any]],
+    risk_limits: "RiskLimitSettings | None" = None,
 ) -> None:
     if timestamp is None:
         return
@@ -121,6 +137,12 @@ def _flatten_positions(
         fee = notional * fee_rate
         basis_total = cost_basis.get(symbol, 0.0)
         pnl = notional - fee - basis_total if side == "SELL" else -(notional + fee - basis_total)
+        cap = None
+        if risk_limits is not None:
+            pct = getattr(risk_limits, "max_position_risk_pct", None) or 0.0
+            if pct > 0:
+                cap = portfolio.equity * (pct / 100.0)
+        risk_used = min(notional, cap) if cap is not None else notional
         if side == "SELL":
             portfolio.cash += notional - fee
         else:
@@ -132,8 +154,8 @@ def _flatten_positions(
             "price": price,
             "fee": fee,
             "pnl": pnl,
-            "risk_used_abs": abs(qty) * price,
-            "actual_risk_at_stop": abs(qty) * price,
+            "risk_used_abs": risk_used,
+            "actual_risk_at_stop": risk_used,
             "trigger_id": "baseline_strategy",
             "timeframe": "1h",
             "time": timestamp,
@@ -220,6 +242,7 @@ def run_backtest(
     fee_rate: float,
     strategy_config: StrategyWrapperConfig,
     flatten_positions_daily: bool = False,
+    risk_limits: "RiskLimitSettings | None" = None,
 ) -> BacktestResult:
     raw_data = load_ohlcv(pair, start, end, timeframe='1h')
     features = _compute_features(raw_data)
@@ -237,7 +260,7 @@ def run_backtest(
     for ts, row in features.iterrows():
         day = ts.date()
         if flatten_positions_daily and last_day and day != last_day:
-            _flatten_positions(portfolio, cost_basis, last_prices, last_timestamp, fee_rate, trades)
+            _flatten_positions(portfolio, cost_basis, last_prices, last_timestamp, fee_rate, trades, risk_limits=risk_limits)
         price = float(row["close"])
         feature_vector = {
             "symbol": pair,
@@ -250,7 +273,7 @@ def run_backtest(
             "volume_multiple": float(row["volume_multiple"]),
         }
         intents = strategy.decide(feature_vector, portfolio)
-        fills = _apply_intents(intents, portfolio, cost_basis, price, fee_rate)
+        fills = _apply_intents(intents, portfolio, cost_basis, price, fee_rate, risk_limits=risk_limits)
         trades.extend({"time": ts, **fill} for fill in fills)
 
         equity = portfolio.cash
@@ -282,6 +305,7 @@ def run_portfolio_backtest(
     strategy_config: StrategyWrapperConfig,
     weights: Optional[Sequence[float]] = None,
     flatten_positions_daily: bool = False,
+    risk_limits: "RiskLimitSettings | None" = None,
 ) -> PortfolioBacktestResult:
     if not pairs:
         raise ValueError("pairs must not be empty")
@@ -304,6 +328,7 @@ def run_portfolio_backtest(
             fee_rate=fee_rate,
             strategy_config=strategy_config,
             flatten_positions_daily=flatten_positions_daily,
+            risk_limits=risk_limits,
         )
         per_pair[pair] = result
 

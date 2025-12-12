@@ -100,9 +100,12 @@ class TriggerEngine:
             for key in ms_keys:
                 if key in market_structure:
                     context[key] = market_structure.get(key)
+            if "recent_tests" in market_structure:
+                context["recent_tests"] = market_structure.get("recent_tests") or []
         # Ensure keys exist to avoid unknown identifier errors when no snapshot is available.
         for key in ms_keys:
             context.setdefault(key, None)
+        context.setdefault("recent_tests", [])
         if portfolio:
             context["position"] = self._position_direction(indicator.symbol, portfolio)
         return context

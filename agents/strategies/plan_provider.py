@@ -64,6 +64,7 @@ class StrategyPlanProvider:
         self.llm_calls_per_day = llm_calls_per_day
         self.daily_counts = defaultdict(int)
         self.cost_tracker = LLMCostTracker()
+        self.last_generation_info: dict[str, object] = {}
 
     def _cache_path(self, run_id: str, plan_date: datetime, llm_input: LLMInput) -> Path:
         digest = hashlib.sha256(llm_input.to_json().encode("utf-8")).hexdigest()
@@ -82,6 +83,14 @@ class StrategyPlanProvider:
             plan = self._enrich_plan(cached, llm_input)
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(plan.to_json(indent=2))
+            self.last_generation_info = {
+                "source": "cache",
+                "fallback_plan_used": False,
+                "llm_failed_parse": False,
+                "llm_failure_reason": None,
+                "raw_output": None,
+            }
+            object.__setattr__(plan, "_llm_meta", self.last_generation_info)
             return plan
         date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
@@ -92,6 +101,9 @@ class StrategyPlanProvider:
         cache_path.write_text(plan.to_json(indent=2))
         self.daily_counts[date_key] += 1
         self.cost_tracker.record(llm_input.to_json(), plan.to_json())
+        meta = getattr(self.llm_client, "last_generation_info", {}) or {}
+        self.last_generation_info = meta
+        object.__setattr__(plan, "_llm_meta", meta)
         return plan
 
     def _enrich_plan(self, plan: StrategyPlan, llm_input: LLMInput) -> StrategyPlan:
@@ -99,10 +111,17 @@ class StrategyPlanProvider:
 
         plan = plan.model_copy(deep=True)
         universe = sorted({asset.symbol for asset in llm_input.assets})
-        default_max = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "10"))
+        default_max_trades = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "10"))
+        default_max_triggers = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRIGGERS_PER_SYMBOL", str(default_max_trades)))
+        strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
+
         if plan.max_trades_per_day is None:
-            plan.max_trades_per_day = default_max
+            plan.max_trades_per_day = default_max_trades
+        if plan.max_triggers_per_symbol_per_day is None:
+            plan.max_triggers_per_symbol_per_day = default_max_triggers
+
         derived_cap = None
+        derived_trigger_cap = None
         if plan.risk_constraints.max_daily_risk_budget_pct is not None:
             budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
             # Allow higher per-trade risk up to twice the configured cap, bounded by the daily budget.
@@ -114,8 +133,10 @@ class StrategyPlanProvider:
             per_trade_risk = min(target_risks) if target_risks else plan.risk_constraints.max_position_risk_pct
             if per_trade_risk and per_trade_risk > 0:
                 derived_cap = max(8, math.ceil(budget_pct / per_trade_risk))
-                plan.max_trades_per_day = derived_cap
-                plan.max_triggers_per_symbol_per_day = derived_cap
+                derived_trigger_cap = derived_cap
+                if not strict_fixed_caps:
+                    plan.max_trades_per_day = min(plan.max_trades_per_day or derived_cap, derived_cap)
+                    plan.max_triggers_per_symbol_per_day = min(plan.max_triggers_per_symbol_per_day or derived_trigger_cap, derived_trigger_cap)
         # Ensure sizing rules reflect the boosted per-trade risk cap so trades consume more budget.
         for rule in plan.sizing_rules:
             if not rule.target_risk_pct or rule.target_risk_pct < plan.risk_constraints.max_position_risk_pct:
@@ -165,8 +186,10 @@ class StrategyPlanProvider:
             if trigger.direction not in plan.allowed_directions:
                 raise ValueError(f"Trigger {trigger.id} direction {trigger.direction} not permitted by allowed_directions")
         if derived_cap is not None:
-            # Attach derived cap for downstream logging/inspection (not persisted in model_dump).
+            # Attach derived caps for downstream logging/inspection (not persisted in model_dump).
             object.__setattr__(plan, "_derived_trade_cap", derived_cap)
+        if derived_trigger_cap is not None:
+            object.__setattr__(plan, "_derived_trigger_cap", derived_trigger_cap)
         if not plan.allowed_trigger_categories:
             plan.allowed_trigger_categories = [
                 "trend_continuation",

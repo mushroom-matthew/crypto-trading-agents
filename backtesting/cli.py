@@ -74,6 +74,7 @@ def _write_baseline_reports(
     trades,
     initial_cash: float,
     run_id: str,
+    budget_pct: float | None = None,
 ) -> None:
     """Emit daily_reports/run_summary for the non-LLM baseline backtest."""
 
@@ -96,6 +97,20 @@ def _write_baseline_reports(
         trigger_quality: dict[str, dict[str, float | int]] = {}
         timeframe_quality: dict[str, dict[str, float | int]] = {}
         hour_quality: dict[str, dict[str, float | int]] = {}
+        archetype_quality: dict[str, dict[str, float | int]] = {}
+        archetype_hour_quality: dict[str, dict[str, float | int]] = {}
+        risk_usage_events: list[dict[str, float | str | int | None]] = []
+        symbol_usage_abs: dict[str, float] = {}
+
+        def _archetype_for_trigger(trigger_id: str | None, category: str | None = None, symbol: str | None = None) -> str:
+            if symbol:
+                return str(symbol).split("-")[0].lower()
+            if category:
+                return str(category)
+            if not trigger_id:
+                return "unknown"
+            return str(trigger_id).split("_")[0]
+
         for _, row in day_trades.iterrows():
             trig = row.get("trigger_id", "baseline_strategy")
             tf = str(row.get("timeframe", "1h"))
@@ -140,6 +155,17 @@ def _write_baseline_reports(
             tf_payload["losses"] += 1 if pnl < 0 else 0
             tf_payload["risk_used_abs"] += risk_used
             tf_payload["actual_risk_abs"] += actual_risk
+            archetype = _archetype_for_trigger(trig, row.get("category"), row.get("symbol"))
+            arch_payload = archetype_quality.setdefault(
+                archetype,
+                {"pnl": 0.0, "trades": 0, "wins": 0, "losses": 0, "risk_used_abs": 0.0, "actual_risk_abs": 0.0},
+            )
+            arch_payload["pnl"] += pnl
+            arch_payload["trades"] += 1
+            arch_payload["wins"] += 1 if pnl > 0 else 0
+            arch_payload["losses"] += 1 if pnl < 0 else 0
+            arch_payload["risk_used_abs"] += risk_used
+            arch_payload["actual_risk_abs"] += actual_risk
             if hr is not None:
                 hr_payload = hour_quality.setdefault(
                     str(hr),
@@ -151,6 +177,29 @@ def _write_baseline_reports(
                 hr_payload["losses"] += 1 if pnl < 0 else 0
                 hr_payload["risk_used_abs"] += risk_used
                 hr_payload["actual_risk_abs"] += actual_risk
+                arch_hr_key = f"{archetype}|{hr}"
+                arch_hr_payload = archetype_hour_quality.setdefault(
+                    arch_hr_key,
+                    {"pnl": 0.0, "trades": 0, "wins": 0, "losses": 0, "risk_used_abs": 0.0, "actual_risk_abs": 0.0},
+                )
+                arch_hr_payload["pnl"] += pnl
+                arch_hr_payload["trades"] += 1
+                arch_hr_payload["wins"] += 1 if pnl > 0 else 0
+                arch_hr_payload["losses"] += 1 if pnl < 0 else 0
+                arch_hr_payload["risk_used_abs"] += risk_used
+                arch_hr_payload["actual_risk_abs"] += actual_risk
+            symbol = row.get("symbol") or "BASE"
+            symbol_usage_abs[symbol] = symbol_usage_abs.get(symbol, 0.0) + risk_used
+            risk_usage_events.append(
+                {
+                    "trigger_id": trig,
+                    "timeframe": tf,
+                    "hour": hr,
+                    "risk_used": risk_used,
+                    "actual_risk_at_stop": actual_risk,
+                    "archetype": archetype,
+                }
+            )
 
         daily_reports.append(
             {
@@ -173,8 +222,35 @@ def _write_baseline_reports(
                 "trigger_quality": trigger_quality,
                 "timeframe_quality": timeframe_quality,
                 "hour_quality": hour_quality,
+                "archetype_quality": archetype_quality,
+                "archetype_hour_quality": archetype_hour_quality,
+                "risk_usage_events": risk_usage_events,
             }
         )
+        if budget_pct:
+            budget_abs = prev_equity * (budget_pct / 100.0)
+            used_abs = sum(evt.get("risk_used", 0.0) for evt in risk_usage_events)
+            used_pct = (used_abs / budget_abs * 100.0) if budget_abs > 0 else 0.0
+            symbol_usage_pct = {sym: (val / budget_abs * 100.0) if budget_abs > 0 else 0.0 for sym, val in symbol_usage_abs.items()}
+            daily_reports[-1]["risk_budget"] = {
+                "budget_pct": budget_pct,
+                "budget_abs": budget_abs,
+                "used_abs": used_abs,
+                "used_pct": used_pct,
+                "utilization_pct": used_pct,
+                "start_equity": prev_equity,
+                "budget_base_equity": prev_equity,
+                "budget_allocated_abs": budget_abs,
+                "budget_allocated_pct": budget_pct,
+                "budget_actual_abs": used_abs,
+                "budget_slippage_adjustment": 0.0,
+                "symbol_usage_pct": symbol_usage_pct,
+                "blocks_by_symbol": {},
+            }
+            daily_reports[-1]["risk_budget_pct"] = budget_pct
+            daily_reports[-1]["limit_stats"]["risk_budget_used_pct"] = used_pct
+            daily_reports[-1]["limit_stats"]["risk_budget_usage_by_symbol"] = symbol_usage_pct
+            daily_reports[-1]["limit_stats"]["risk_budget_blocks_by_symbol"] = {}
         prev_equity = float(val)
         with (daily_dir / f"{date_str}.json").open("w", encoding="utf-8") as handle:
             json.dump(daily_reports[-1], handle, indent=2)
@@ -429,18 +505,19 @@ def main() -> None:
                 per_symbol_params[symbol] = params
         strategy_cfg.per_symbol_parameters = per_symbol_params
 
+    cli_risk_overrides = {
+        "max_position_risk_pct": args.max_position_risk_pct,
+        "max_symbol_exposure_pct": args.max_symbol_exposure_pct,
+        "max_portfolio_exposure_pct": args.max_portfolio_exposure_pct,
+        "max_daily_loss_pct": args.max_daily_loss_pct,
+        "max_daily_risk_budget_pct": args.max_daily_risk_budget_pct,
+    }
+    risk_limits: RiskLimitSettings = resolve_risk_limits(
+        Path(args.risk_config) if args.risk_config else None,
+        cli_risk_overrides,
+    )
+
     if args.llm_strategist == "enabled":
-        cli_risk_overrides = {
-            "max_position_risk_pct": args.max_position_risk_pct,
-            "max_symbol_exposure_pct": args.max_symbol_exposure_pct,
-            "max_portfolio_exposure_pct": args.max_portfolio_exposure_pct,
-            "max_daily_loss_pct": args.max_daily_loss_pct,
-            "max_daily_risk_budget_pct": args.max_daily_risk_budget_pct,
-        }
-        risk_limits: RiskLimitSettings = resolve_risk_limits(
-            Path(args.risk_config) if args.risk_config else None,
-            cli_risk_overrides,
-        )
         risk_params = risk_limits.to_risk_params()
         pairs = args.pairs or [args.pair]
         prompt_path = Path(args.llm_prompt) if args.llm_prompt else None
@@ -532,7 +609,13 @@ def main() -> None:
             print(f"{pair}: return={pair_result.summary['return_pct']:.2f}% sharpe={pair_result.summary.get('sharpe_ratio', 0):.2f}")
         print("\nLast 5 aggregated equity points:")
         print(result.equity_curve.tail())
-        _write_baseline_reports(result.equity_curve, result.trades, args.initial_cash, args.llm_run_id or "baseline")
+        _write_baseline_reports(
+            result.equity_curve,
+            result.trades,
+            args.initial_cash,
+            args.llm_run_id or "baseline",
+            budget_pct=risk_limits.max_daily_risk_budget_pct,
+        )
     else:
         result = run_backtest(
             pair=args.pair,
@@ -542,6 +625,7 @@ def main() -> None:
             fee_rate=args.fee_rate,
             strategy_config=strategy_cfg,
             flatten_positions_daily=args.flatten_daily,
+            risk_limits=risk_limits,
         )
         print("=== Summary ===")
         for key, value in result.summary.items():
@@ -551,7 +635,13 @@ def main() -> None:
         if not result.trades.empty:
             print("\nSample trades:")
             print(result.trades.tail())
-        _write_baseline_reports(result.equity_curve, result.trades, args.initial_cash, args.llm_run_id or "baseline")
+        _write_baseline_reports(
+            result.equity_curve,
+            result.trades,
+            args.initial_cash,
+            args.llm_run_id or "baseline",
+            budget_pct=risk_limits.max_daily_risk_budget_pct,
+        )
 
 
 if __name__ == "__main__":

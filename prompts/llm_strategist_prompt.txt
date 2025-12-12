@@ -45,13 +45,17 @@ Allowed tools:
 - If `global_context.auto_hedge_mode == "market"`, bias sizing so aggregate beta ≈ 0; otherwise, prefer triggers whose betas diversify existing positions.
 - When beta is high and idiosyncratic_vol is low, consider smaller directional bets or pairing with opposite-beta exposure; avoid stacking multiple high-beta longs without offsets.
 
-### DRAFT: Performance Snapshot (rpr_actual & utilization)
-- Inputs may include recent `trigger_quality`, `timeframe_quality`, and `hour_quality` with `rpr_actual`, `trades`.
-- Use them explicitly:
-  - Favor archetypes with positive `rpr_actual` and sufficient samples; justify or reduce archetypes with negative `rpr_actual`.
-  - If recent daily risk utilization has been <5% for several days, propose more frequent entries **within** existing risk rails to target ~10–30% of daily budget; never violate `max_daily_loss_pct` or `max_daily_risk_budget_pct`.
-  - Prefer initiating during hours with historically positive `rpr_actual`; avoid or de-prioritize hours with negative `rpr_actual` unless the setup is exceptional.
-- Keep exits coherent: avoid over-triggering exits that historically have negative `rpr_actual` unless structure/volatility clearly demands it; daily flatten is the hard backstop.
+### Performance Snapshot & RPR Integration
+- Inputs may include `trigger_quality`, `timeframe_quality`, `hour_quality`, and `rpr_comparison` with GOOD/NEUTRAL/BAD labels and multipliers derived from baseline vs. LLM `rpr_actual` deltas.
+- Risk utilization: target **20–40%** daily utilization under normal conditions. If utilization stays <10% for two straight days, widen entry windows (RSI ±10, ATR tolerance +15–20%), lean on GOOD archetypes × hours, and allow permissive volatility gating. Stay inside `max_position_risk_pct`, symbol/portfolio exposure rails, and daily budget/loss caps.
+- Archetype weighting: GOOD slices get priority; BAD slices require tighter confirmation or should be skipped unless structure is exceptional. Archetype RPR > +0.10 → priority; RPR < –0.05 → suppress or downgrade to C-grade.
+- Sizing elasticity: anchor base sizing to `max_position_risk_pct` with confidence weights (A=1.0×, B=0.6×, C=0.3×), then multiply by archetype multipliers and GOOD-hour multipliers (GOOD 1.1–1.3×). BAD hours/archetypes must scale down (0.3–0.6×). Never exceed exposure rails.
+- Trigger cadence: when regime confidence >0.6 and archetype quality is GOOD, aim for **1–2 actionable triggers per symbol per day**. If fewer exist, widen RSI/ATR/MACD thresholds slightly (±5–10%) or allow 15m refinement earlier, while staying inside budgets.
+- Volatility gating flexibility: if ATR/realized-vol checks are borderline but structure/trend is strong, allow a permissive gate (ATR vs 1h/4h ATR MA) for GOOD archetypes. Use strict gates for NEUTRAL/BAD archetypes.
+- Support/resistance usage: include at least one trigger per asset near support/resistance. Favor longs within 1–2% of support (after successful test/reclaim). Avoid longs within ~1–1.5% of resistance unless the broader trend is bullish or the level has flipped.
+- Exit logic: do not exit solely on volatility spikes; require structural deterioration. Avoid exit archetypes with negative `rpr_actual` unless clearly necessary; prefer wider exits for GOOD entries.
+- Cross-symbol balance: when BTC has A-grade conviction but ETH has a B-grade with GOOD-hour multipliers, allow ETH alongside BTC if portfolio exposure ≤ 80%. Prefer complementary beta rather than starving ETH.
+- Missing data robustness: never suppress a trigger because a timeframe indicator is missing—substitute the nearest available timeframe (e.g., use 1h MACD if 4h is absent) and proceed.
 
 Global requirements:
 - Classify the market regime with one of: `bull`, `bear`, `range`, `high_vol`, `mixed`.

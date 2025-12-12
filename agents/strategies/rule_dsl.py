@@ -61,6 +61,11 @@ class RuleEvaluator:
             raise RuleSyntaxError("unsupported boolean operator")
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return not self._eval_node(node.operand, ctx, allowed)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = self._eval_node(node.operand, ctx, allowed)
+            if isinstance(value, (int, float)):
+                return value if isinstance(node.op, ast.UAdd) else -value
+            return None
         if isinstance(node, ast.Compare):
             left = self._eval_node(node.left, ctx, allowed)
             result = True
@@ -81,6 +86,25 @@ class RuleEvaluator:
             if name not in ctx:
                 raise MissingIndicatorError(f"missing indicator '{name}' in rule")
             return ctx.get(name)
+        if isinstance(node, ast.Subscript):
+            base = self._eval_node(node.value, ctx, allowed)
+            if not isinstance(node.slice, ast.Constant) or not isinstance(node.slice.value, int):
+                raise RuleSyntaxError(f"unsupported subscript in rule: {ast.dump(node)}")
+            if node.slice.value < 0:
+                raise RuleSyntaxError(f"negative index not allowed in rule: {ast.dump(node)}")
+            if base is None:
+                return None
+            try:
+                return base[node.slice.value]
+            except Exception:
+                return None
+        if isinstance(node, ast.Attribute):
+            base = self._eval_node(node.value, ctx, allowed)
+            if base is None:
+                return None
+            if isinstance(base, Mapping):
+                return base.get(node.attr)
+            return getattr(base, node.attr, None)
         if isinstance(node, ast.Constant):
             return node.value
         raise RuleSyntaxError(f"unsupported expression in rule: {ast.dump(node)}")

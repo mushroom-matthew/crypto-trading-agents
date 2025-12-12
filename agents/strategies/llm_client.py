@@ -38,6 +38,7 @@ class LLMClient:
         self.allow_fallback = True if allow_fallback is None else allow_fallback
         self.max_retries = int(os.environ.get("LLM_CLIENT_MAX_RETRIES", "2"))
         self._client = None
+        self.last_generation_info: Dict[str, Any] = {}
 
     @property
     def client(self) -> OpenAI:
@@ -48,8 +49,17 @@ class LLMClient:
     def generate_plan(self, llm_input: LLMInput, prompt_template: str | None = None) -> StrategyPlan:
         if self.transport:
             raw = self.transport(llm_input.to_json())
-            return StrategyPlan.from_json(raw)
+            plan = StrategyPlan.from_json(raw)
+            self.last_generation_info = {
+                "source": "transport",
+                "fallback_plan_used": False,
+                "llm_failed_parse": False,
+                "llm_failure_reason": None,
+                "raw_output": raw,
+            }
+            return plan
         last_error: Exception | None = None
+        raw_output: str | None = None
         attempts = max(1, self.max_retries)
         for attempt in range(1, attempts + 1):
             try:
@@ -65,23 +75,71 @@ class LLMClient:
                         max_output_tokens=1200,
                     )
                     content = completion.output[0].content[0].text
+                    raw_output = content
                     if span:
                         span.end(output=content)
-                    plan_dict = json.loads(content)
+                    plan_dict = self._extract_plan_json(content)
                     plan_dict = self._sanitize_plan_dict(plan_dict)
-                    return StrategyPlan.model_validate(plan_dict)
+                    plan = StrategyPlan.model_validate(plan_dict)
+                    self.last_generation_info = {
+                        "source": "llm",
+                        "fallback_plan_used": False,
+                        "llm_failed_parse": False,
+                        "llm_failure_reason": None,
+                        "raw_output": raw_output,
+                    }
+                    return plan
             except ValidationError as exc:
                 last_error = exc
                 logging.warning("Strategy plan validation failed (attempt %s/%s): %s", attempt, attempts, exc)
                 continue
             except Exception as exc:
                 last_error = exc
-                logging.warning("LLM strategist call failed (attempt %s/%s): %s", attempt, attempts, exc)
+                logging.warning("LLM strategist call failed (attempt %s/%s): %s; raw_output=%s", attempt, attempts, exc, raw_output)
                 continue
         if not self.allow_fallback and last_error:
             raise last_error
-        logging.warning("LLM strategist fallback triggered after retries: %s", last_error)
-        return self._fallback_plan(llm_input)
+        logging.warning("LLM strategist fallback triggered after retries: %s; raw_output=%s", last_error, raw_output)
+        plan = self._fallback_plan(llm_input)
+        self.last_generation_info = {
+            "source": "fallback",
+            "fallback_plan_used": True,
+            "llm_failed_parse": True,
+            "llm_failure_reason": str(last_error) if last_error else "unknown_failure",
+            "raw_output": raw_output,
+        }
+        return plan
+
+    def _extract_plan_json(self, content: str) -> Dict[str, Any]:
+        """Strip fences/prose and return parsed JSON with light validation."""
+
+        raw = (content or "").strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            if len(parts) >= 3:
+                raw = parts[1] if parts[1].strip() else parts[2]
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+        if not raw.startswith("{"):
+            first = raw.find("{")
+            last = raw.rfind("}")
+            if first != -1 and last != -1 and last > first:
+                raw = raw[first : last + 1]
+        try:
+            parsed = json.loads(raw)
+        except Exception as exc:
+            logging.warning("Failed to parse strategist output as JSON: %s; raw_output=%s", exc, raw)
+            raise
+        if not isinstance(parsed, dict):
+            raise ValueError("Strategist output is not a JSON object")
+        triggers = parsed.get("triggers")
+        if triggers is not None and not isinstance(triggers, list):
+            raise ValueError("Strategist output 'triggers' must be a list")
+        required_keys = {"risk_constraints", "sizing_rules"}
+        missing = sorted(key for key in required_keys if key not in parsed)
+        if missing:
+            raise ValueError(f"Strategist output missing keys: {', '.join(missing)}")
+        return parsed
 
     def _fallback_plan(self, llm_input: LLMInput) -> StrategyPlan:
         now = datetime.now(timezone.utc)

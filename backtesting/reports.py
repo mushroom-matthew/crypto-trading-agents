@@ -8,6 +8,14 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any, Iterable, Mapping, Sequence
 
+GOOD_RPR_THRESHOLD = 0.2
+BAD_RPR_THRESHOLD = -0.2
+MIN_TRADES_FOR_RPR = 5
+DELTA_PENALTY = 0.1
+GOOD_MULTIPLIER = 1.2
+NEUTRAL_MULTIPLIER = 1.0
+BAD_MULTIPLIER = 0.5
+
 
 def _safe_mean(values: Iterable[float]) -> float:
     values = list(values)
@@ -31,7 +39,86 @@ def _pearson(x: Sequence[float], y: Sequence[float]) -> float:
     return (cov / denom) if denom else 0.0
 
 
-def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _multiplier_for_label(label: str) -> float:
+    if label == "good":
+        return GOOD_MULTIPLIER
+    if label == "bad":
+        return BAD_MULTIPLIER
+    return NEUTRAL_MULTIPLIER
+
+
+def _label_for_rpr(llm_rpr: float, trades: int, baseline_rpr: float) -> str:
+    if trades < MIN_TRADES_FOR_RPR:
+        return "neutral"
+    if llm_rpr >= GOOD_RPR_THRESHOLD and (baseline_rpr - llm_rpr) < DELTA_PENALTY:
+        return "good"
+    if llm_rpr <= BAD_RPR_THRESHOLD or (baseline_rpr - llm_rpr) >= DELTA_PENALTY:
+        return "bad"
+    return "neutral"
+
+
+def _comparison_entry(llm_payload: Mapping[str, Any] | None, baseline_payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    llm_rpr = float((llm_payload or {}).get("rpr_actual", 0.0))
+    llm_trades = int((llm_payload or {}).get("trades", 0))
+    baseline_rpr = float((baseline_payload or {}).get("rpr_actual", 0.0))
+    baseline_trades = int((baseline_payload or {}).get("trades", 0))
+    delta_rpr = llm_rpr - baseline_rpr
+    label = _label_for_rpr(llm_rpr, llm_trades, baseline_rpr)
+    return {
+        "llm": {"rpr_actual": llm_rpr, "trades": llm_trades},
+        "baseline": {"rpr_actual": baseline_rpr, "trades": baseline_trades},
+        "delta": {"rpr_actual": delta_rpr},
+        "label": label,
+        "multiplier": _multiplier_for_label(label),
+    }
+
+
+def _build_rpr_comparison(current_summary: Mapping[str, Any], baseline_summary: Mapping[str, Any]) -> dict[str, Any]:
+    archetype_entries: dict[str, Any] = {}
+    archetype_hour_entries: dict[str, Any] = {}
+    current_archetypes = current_summary.get("archetype_quality") or {}
+    baseline_archetypes = baseline_summary.get("archetype_quality") or {}
+    baseline_hours = baseline_summary.get("archetype_hour_quality") or {}
+    if not baseline_archetypes and not baseline_hours:
+        return {
+            "archetypes": {},
+            "archetype_hours": {},
+            "thresholds": {
+                "good_rpr_threshold": GOOD_RPR_THRESHOLD,
+                "bad_rpr_threshold": BAD_RPR_THRESHOLD,
+                "min_trades": MIN_TRADES_FOR_RPR,
+                "delta_penalty": DELTA_PENALTY,
+                "multipliers": {
+                    "good": GOOD_MULTIPLIER,
+                    "neutral": NEUTRAL_MULTIPLIER,
+                    "bad": BAD_MULTIPLIER,
+                },
+            },
+            "baseline_missing": True,
+        }
+    for key in set(current_archetypes.keys()) | set(baseline_archetypes.keys()):
+        archetype_entries[key] = _comparison_entry(current_archetypes.get(key), baseline_archetypes.get(key))
+    current_hour = current_summary.get("archetype_hour_quality") or {}
+    for key in set(current_hour.keys()) | set(baseline_hours.keys()):
+        archetype_hour_entries[key] = _comparison_entry(current_hour.get(key), baseline_hours.get(key))
+    return {
+        "archetypes": archetype_entries,
+        "archetype_hours": archetype_hour_entries,
+        "thresholds": {
+            "good_rpr_threshold": GOOD_RPR_THRESHOLD,
+            "bad_rpr_threshold": BAD_RPR_THRESHOLD,
+            "min_trades": MIN_TRADES_FOR_RPR,
+            "delta_penalty": DELTA_PENALTY,
+            "multipliers": {
+                "good": GOOD_MULTIPLIER,
+                "neutral": NEUTRAL_MULTIPLIER,
+                "bad": BAD_MULTIPLIER,
+            },
+        },
+    }
+
+
+def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summary: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Aggregate daily reports into a compact run-level summary."""
 
     risk_usage_pct: list[float] = []
@@ -53,10 +140,22 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
     trigger_quality: dict[str, dict[str, float | int]] = {}
     timeframe_quality: dict[str, dict[str, float | int]] = {}
     hour_quality: dict[str, dict[str, float | int]] = {}
+    archetype_quality: dict[str, dict[str, float | int]] = {}
+    archetype_hour_quality: dict[str, dict[str, float | int]] = {}
     factor_exposures: dict[str, Any] = {}
     block_totals: dict[str, int] = {}
+    risk_profile_snapshot: dict[str, Any] | None = None
+    llm_fallback_days = 0
+    llm_plan_fail_days = 0
+    rpr_source_days = 0
+    rpr_filtered_days = 0
 
     for report in daily_reports:
+        data_quality = report.get("llm_data_quality") or "ok"
+        if data_quality == "fallback":
+            llm_fallback_days += 1
+        if report.get("llm_failed_parse"):
+            llm_plan_fail_days += 1
         limit_stats = report.get("limit_stats") or {}
         base_blocks = limit_stats.get("risk_block_breakdown") or {}
         block_map = base_blocks | {
@@ -79,6 +178,18 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
             except (TypeError, ValueError):
                 continue
         risk_entry = report.get("risk_budget") or {}
+        if not risk_entry and report.get("risk_budget_pct"):
+            budget_pct = float(report.get("risk_budget_pct") or 0.0)
+            budget_abs = float(report.get("start_equity", 0.0)) * (budget_pct / 100.0)
+            used_abs = sum(float(evt.get("risk_used", 0.0)) for evt in (report.get("risk_usage_events") or []))
+            used_pct = (used_abs / budget_abs * 100.0) if budget_abs > 0 else 0.0
+            risk_entry = {
+                "budget_pct": budget_pct,
+                "budget_abs": budget_abs,
+                "used_abs": used_abs,
+                "used_pct": used_pct,
+                "utilization_pct": used_pct,
+            }
         used_pct = risk_entry.get("used_pct")
         if used_pct is None:
             used_pct = limit_stats.get("risk_budget_used_pct", 0.0)
@@ -101,6 +212,12 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
         fee_pcts.append(fees_pct)
         if abs(flattening_pct) > 1e-9 or report.get("flatten_positions_daily") or report.get("flatten_session_hour") is not None:
             flatten_days += 1
+        include_for_rpr = data_quality != "fallback"
+        if include_for_rpr:
+            rpr_source_days += 1
+        else:
+            rpr_filtered_days += 1
+            continue
         for key, payload in (report.get("trigger_quality") or {}).items():
             agg = trigger_quality.setdefault(
                 key,
@@ -144,6 +261,8 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
             load_count = int(payload.get("load_count", 0))
             agg["load_sum"] += float(payload.get("avg_load", 0.0)) * load_count
             agg["load_count"] += load_count
+        if not include_for_rpr:
+            continue
         for tf, payload in (report.get("timeframe_quality") or {}).items():
             agg = timeframe_quality.setdefault(
                 tf,
@@ -227,6 +346,86 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
             agg["abs_mfe_sum"] += float(payload.get("mfe_pct", 0.0)).__abs__() * float(payload.get("trades", 0))
             agg["win_abs_sum"] += float(payload.get("pnl", 0.0)) if payload.get("pnl", 0.0) > 0 else 0.0
             agg["loss_abs_sum"] += abs(float(payload.get("pnl", 0.0))) if payload.get("pnl", 0.0) < 0 else 0.0
+        for archetype, payload in (report.get("archetype_quality") or {}).items():
+            agg = archetype_quality.setdefault(
+                archetype,
+                {
+                    "pnl": 0.0,
+                    "risk_used_abs": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "latency_sum": 0.0,
+                    "latency_count": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                    "actual_risk_abs": 0.0,
+                },
+            )
+            agg["pnl"] += float(payload.get("pnl", 0.0))
+            agg["risk_used_abs"] += float(payload.get("risk_used_abs", 0.0))
+            agg["actual_risk_abs"] += float(payload.get("actual_risk_abs", 0.0))
+            agg["trades"] += int(payload.get("trades", 0))
+            agg["wins"] += int(payload.get("wins", 0))
+            agg["losses"] += int(payload.get("losses", 0))
+            latency = payload.get("latency_seconds")
+            if latency is not None:
+                agg["latency_sum"] += float(latency)
+                agg["latency_count"] += 1
+            agg["mae_sum"] += float(payload.get("mae_pct", 0.0)) * float(payload.get("trades", 0))
+            agg["mfe_sum"] += float(payload.get("mfe_pct", 0.0)) * float(payload.get("trades", 0))
+            agg["decay_sum"] += float(payload.get("response_decay_pct", 0.0)) * float(payload.get("trades", 0))
+            agg["abs_mae_sum"] += float(payload.get("mae_pct", 0.0)).__abs__() * float(payload.get("trades", 0))
+            agg["abs_mfe_sum"] += float(payload.get("mfe_pct", 0.0)).__abs__() * float(payload.get("trades", 0))
+            agg["win_abs_sum"] += float(payload.get("pnl", 0.0)) if payload.get("pnl", 0.0) > 0 else 0.0
+            agg["loss_abs_sum"] += abs(float(payload.get("pnl", 0.0))) if payload.get("pnl", 0.0) < 0 else 0.0
+        for arch_hour, payload in (report.get("archetype_hour_quality") or {}).items():
+            agg = archetype_hour_quality.setdefault(
+                arch_hour,
+                {
+                    "pnl": 0.0,
+                    "risk_used_abs": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "latency_sum": 0.0,
+                    "latency_count": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                    "actual_risk_abs": 0.0,
+                },
+            )
+            agg["pnl"] += float(payload.get("pnl", 0.0))
+            agg["risk_used_abs"] += float(payload.get("risk_used_abs", 0.0))
+            agg["actual_risk_abs"] += float(payload.get("actual_risk_abs", 0.0))
+            agg["trades"] += int(payload.get("trades", 0))
+            agg["wins"] += int(payload.get("wins", 0))
+            agg["losses"] += int(payload.get("losses", 0))
+            latency = payload.get("latency_seconds")
+            if latency is not None:
+                agg["latency_sum"] += float(latency)
+                agg["latency_count"] += 1
+            agg["mae_sum"] += float(payload.get("mae_pct", 0.0)) * float(payload.get("trades", 0))
+            agg["mfe_sum"] += float(payload.get("mfe_pct", 0.0)) * float(payload.get("trades", 0))
+            agg["decay_sum"] += float(payload.get("response_decay_pct", 0.0)) * float(payload.get("trades", 0))
+            agg["abs_mae_sum"] += float(payload.get("mae_pct", 0.0)).__abs__() * float(payload.get("trades", 0))
+            agg["abs_mfe_sum"] += float(payload.get("mfe_pct", 0.0)).__abs__() * float(payload.get("trades", 0))
+            agg["win_abs_sum"] += float(payload.get("pnl", 0.0)) if payload.get("pnl", 0.0) > 0 else 0.0
+            agg["loss_abs_sum"] += abs(float(payload.get("pnl", 0.0))) if payload.get("pnl", 0.0) < 0 else 0.0
         for entry in (limit_stats.get("blocked_details") or []) + (limit_stats.get("executed_details") or []):
             tf = entry.get("timeframe")
             if tf:
@@ -247,6 +446,8 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
                     continue
         if report.get("factor_exposures"):
             factor_exposures = report["factor_exposures"]
+        if report.get("risk_profile"):
+            risk_profile_snapshot = report.get("risk_profile")
         daily_cap = blocked_daily_cap[-1] > 0
         plan_cap = blocked_plan[-1] > 0
         if daily_cap and plan_cap:
@@ -336,16 +537,42 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]]) -> dict[str, A
         "trigger_quality": _finalize_quality(trigger_quality),
         "timeframe_quality": _finalize_quality(timeframe_quality),
         "hour_quality": _finalize_quality(hour_quality),
+        "archetype_quality": _finalize_quality(archetype_quality),
+        "archetype_hour_quality": _finalize_quality(archetype_hour_quality),
         "factor_exposures": factor_exposures,
         "block_totals": block_totals,
+        "llm_fallback_days": llm_fallback_days,
+        "llm_plan_fail_days": llm_plan_fail_days,
+        "llm_rpr_source_days": rpr_source_days,
+        "llm_rpr_filtered_days": rpr_filtered_days,
     }
+    if risk_profile_snapshot:
+        summary["risk_profile"] = risk_profile_snapshot
+
+    if baseline_summary:
+        summary["rpr_comparison"] = _build_rpr_comparison(
+            summary,
+            baseline_summary,
+        )
+    else:
+        summary["rpr_comparison"] = {}
     return summary
 
 
-def write_run_summary(daily_reports: Sequence[Mapping[str, Any]], target_path: Path) -> dict[str, Any]:
+def write_run_summary(
+    daily_reports: Sequence[Mapping[str, Any]],
+    target_path: Path,
+    baseline_summary_path: Path | None = None,
+    baseline_summary: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build and write a run summary JSON next to daily reports."""
 
-    summary = build_run_summary(daily_reports)
+    if baseline_summary is None and baseline_summary_path and baseline_summary_path.exists():
+        try:
+            baseline_summary = json.loads(baseline_summary_path.read_text())
+        except json.JSONDecodeError:
+            baseline_summary = None
+    summary = build_run_summary(daily_reports, baseline_summary=baseline_summary)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(json.dumps(summary, indent=2))
     return summary

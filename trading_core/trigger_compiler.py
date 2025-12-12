@@ -74,6 +74,12 @@ def _validate_ast(node: ast.AST, allowed_names: Set[str]) -> None:
             identifier = child.id
             if identifier not in allowed_names and identifier.lower() not in {"true", "false", "none"}:
                 raise TriggerCompilationError(f"Unknown identifier '{identifier}' in trigger expression")
+        if isinstance(child, ast.Subscript):
+            # Only allow constant, non-negative integer indexes (e.g., recent_tests[0]).
+            if not isinstance(child.slice, ast.Constant) or not isinstance(child.slice.value, int):
+                raise TriggerCompilationError(f"Unsupported subscript in trigger: {ast.dump(child)}")
+            if child.slice.value < 0:
+                raise TriggerCompilationError(f"Negative index not allowed in trigger: {ast.dump(child)}")
 
 
 def _compile_expression(expr: str, allowed_names: Set[str]) -> CompiledExpression:

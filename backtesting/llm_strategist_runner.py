@@ -312,6 +312,13 @@ class LLMStrategistBacktester:
         self.active_risk_adjustments: Dict[str, RiskAdjustmentState] = {}
         self.risk_params = self.active_risk_limits.to_risk_params()
         self.risk_profile = RiskProfile()
+        arch_mults, arch_hour_mults, multiplier_meta = self._load_archetype_multipliers()
+        self._loaded_archetype_multipliers = dict(arch_mults)
+        self._loaded_archetype_hour_multipliers = dict(arch_hour_mults)
+        self.risk_profile.archetype_multipliers = arch_mults
+        self.risk_profile.archetype_hour_multipliers = arch_hour_mults
+        self.multiplier_meta = multiplier_meta
+        self.rpr_comparison_snapshot: Dict[str, Any] = self._load_rpr_comparison_snapshot()
         self.daily_risk_budget_state: Dict[str, Dict[str, float]] = {}
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
         self.prompt_template = prompt_template_path.read_text() if prompt_template_path and prompt_template_path.exists() else None
@@ -366,6 +373,7 @@ class LLMStrategistBacktester:
         self.archetype_load_scale_start = float(os.environ.get("ARCHETYPE_LOAD_SCALE_START", "0.6"))
         # Daily loss anchoring: set once per day at day boundary, never refreshed intraday.
         self.daily_loss_anchor_by_day: Dict[str, float] = {}
+        self.llm_generation_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -374,6 +382,118 @@ class LLMStrategistBacktester:
             self.end,
             self.plan_interval.total_seconds() / 3600,
         )
+
+    def _load_archetype_multipliers(self) -> tuple[Dict[str, float], Dict[str, float], Dict[str, Any]]:
+        """Load archetype and archetype|hour multipliers from a JSON blob or file path (optional)."""
+
+        def _normalize_map(raw: Any) -> tuple[Dict[str, float], Dict[str, float], Dict[str, Any]]:
+            archetypes: Dict[str, float] = {}
+            archetype_hours: Dict[str, float] = {}
+            meta: Dict[str, Any] = {}
+            if not isinstance(raw, dict):
+                return archetypes, archetype_hours, meta
+            if "meta" in raw and isinstance(raw.get("meta"), dict):
+                meta = dict(raw.get("meta") or {})
+
+            def _coerce_multiplier(val: Any) -> float | None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return None
+
+            def _coerce_label(payload: Mapping[str, Any]) -> float | None:
+                label = str(payload.get("label")).lower()
+                if label == "good":
+                    return 1.2
+                if label == "bad":
+                    return 0.5
+                return 1.0
+
+            if "archetypes" in raw and isinstance(raw.get("archetypes"), dict):
+                for key, payload in raw["archetypes"].items():
+                    if isinstance(payload, dict):
+                        multiplier = payload.get("multiplier")
+                        if multiplier is None and "label" in payload:
+                            multiplier = _coerce_label(payload)
+                    else:
+                        multiplier = _coerce_multiplier(payload)
+                    if multiplier is not None:
+                        archetypes[str(key)] = float(multiplier)
+            if "archetype_hours" in raw and isinstance(raw.get("archetype_hours"), dict):
+                for key, payload in raw["archetype_hours"].items():
+                    if isinstance(payload, dict):
+                        multiplier = payload.get("multiplier")
+                        if multiplier is None and "label" in payload:
+                            multiplier = _coerce_label(payload)
+                    else:
+                        multiplier = _coerce_multiplier(payload)
+                    if multiplier is not None:
+                        archetype_hours[str(key)] = float(multiplier)
+            # Backwards compatibility: allow a flat map with no namespaces.
+            if not archetypes and not archetype_hours:
+                for key, val in raw.items():
+                    coerced = _coerce_multiplier(val)
+                    if coerced is not None:
+                        archetypes[str(key)] = coerced
+            return archetypes, archetype_hours, meta
+
+        raw_inline = os.environ.get("ARCHETYPE_MULTIPLIERS")
+        source = None
+        if raw_inline:
+            try:
+                parsed = json.loads(raw_inline)
+                archetypes, archetype_hours, meta = _normalize_map(parsed)
+                if archetypes or archetype_hours:
+                    source = "env"
+                    logger.info(
+                        "Loaded archetype multipliers from env: %s archetypes, %s hours",
+                        len(archetypes),
+                        len(archetype_hours),
+                    )
+                    return archetypes, archetype_hours, meta
+            except Exception as exc:  # pragma: no cover - defensive parse guard
+                logger.warning("Failed to parse ARCHETYPE_MULTIPLIERS env: %s", exc)
+        path_val = os.environ.get("ARCHETYPE_MULTIPLIERS_PATH")
+        if path_val:
+            candidate = Path(path_val)
+            if candidate.exists():
+                try:
+                    parsed = json.loads(candidate.read_text())
+                    archetypes, archetype_hours, meta = _normalize_map(parsed)
+                    if archetypes or archetype_hours:
+                        source = str(candidate)
+                        logger.info(
+                            "Loaded archetype multipliers from %s: %s archetypes, %s hours",
+                            source,
+                            len(archetypes),
+                            len(archetype_hours),
+                        )
+                        return archetypes, archetype_hours, meta
+                except Exception as exc:  # pragma: no cover - defensive parse guard
+                    logger.warning("Failed to load archetype multipliers from %s: %s", candidate, exc)
+            else:
+                logger.info("ARCHETYPE_MULTIPLIERS_PATH set but file missing: %s", candidate)
+        if source is None:
+            logger.info("No archetype multipliers loaded (env/ARCHETYPE_MULTIPLIERS_PATH empty); using defaults of 1.0")
+        return {}, {}, {}
+
+    def _load_rpr_comparison_snapshot(self) -> Dict[str, Any]:
+        """Optionally load a precomputed RPR comparison snapshot for prompt context."""
+
+        path_val = os.environ.get("RPR_COMPARISON_PATH")
+        if not path_val:
+            return {}
+        candidate = Path(path_val)
+        if not candidate.exists():
+            return {}
+        try:
+            parsed = json.loads(candidate.read_text())
+        except Exception as exc:  # pragma: no cover - defensive parse guard
+            logger.warning("Failed to load RPR comparison snapshot from %s: %s", candidate, exc)
+            return {}
+        if isinstance(parsed, dict) and "rpr_comparison" in parsed:
+            parsed = parsed.get("rpr_comparison") or {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def _normalize_market_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
         normalized: Dict[str, Dict[str, pd.DataFrame]] = {}
@@ -489,6 +609,8 @@ class LLMStrategistBacktester:
         if self.active_risk_adjustments:
             context["risk_adjustments"] = list(snapshot_adjustments(self.active_risk_adjustments))
         context["risk_limits"] = self.active_risk_limits.to_risk_params()
+        if self.rpr_comparison_snapshot:
+            context["rpr_comparison"] = self.rpr_comparison_snapshot
         context["market_structure"] = market_structure_context
         if self.latest_factor_exposures:
             context["factor_exposures"] = self.latest_factor_exposures
@@ -508,6 +630,13 @@ class LLMStrategistBacktester:
         self.active_risk_limits = effective_risk_limits(run)
         self.risk_params = self.active_risk_limits.to_risk_params()
         self.risk_profile = build_risk_profile(run)
+        # Preserve externally loaded archetype/hour multipliers (baseline-relative caps).
+        arch_mults = getattr(self, "_loaded_archetype_multipliers", {}) or {}
+        arch_hour_mults = getattr(self, "_loaded_archetype_hour_multipliers", {}) or {}
+        if arch_mults:
+            self.risk_profile.archetype_multipliers.update(arch_mults)
+        if arch_hour_mults:
+            self.risk_profile.archetype_hour_multipliers.update(arch_hour_mults)
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
 
     def _ensure_strategy_run(self, run_id: str) -> None:
@@ -660,7 +789,9 @@ class LLMStrategistBacktester:
             warnings.append("max_portfolio_exposure_pct")
         return warnings
 
-    def _archetype_for_trigger(self, day_key: str, trigger_id: str) -> str:
+    def _archetype_for_trigger(self, day_key: str, trigger_id: str, symbol: str | None = None) -> str:
+        if symbol:
+            return str(symbol).split("-")[0].lower()
         plan_limits = self.plan_limits_by_day.get(day_key) or {}
         catalog = plan_limits.get("trigger_catalog") or {}
         entry = catalog.get(trigger_id) or catalog.get(trigger_id.split("_exit")[0]) or {}
@@ -774,11 +905,9 @@ class LLMStrategistBacktester:
             if not entry:
                 return
             delta = float(actual) - float(planned)
-            if abs(delta) < 1e-9:
-                return
-            entry["used_abs"] = max(0.0, entry.get("used_abs", 0.0) + delta)
-            if symbol:
-                entry["symbol_usage"][symbol] = max(0.0, entry["symbol_usage"].get(symbol, 0.0) + delta)
+            # Record slippage between planned allocation and observed risk, but do not
+            # retroactively shrink budget usage. Budget consumption stays at planned risk;
+            # actual risk is tracked separately via risk_usage_events.
             entry["slippage_adjustment"] = entry.get("slippage_adjustment", 0.0) + delta
 
         if blocked_entries:
@@ -830,6 +959,9 @@ class LLMStrategistBacktester:
                         "hour": order.timestamp.hour,
                         "risk_used": risk_used,
                         "actual_risk_at_stop": actual_risk,
+                        "profile_multiplier": risk_snapshot.get("profile_multiplier") if risk_snapshot else None,
+                        "profile_multiplier_components": risk_snapshot.get("profile_multiplier_components") if risk_snapshot else None,
+                        "archetype": risk_snapshot.get("archetype") if risk_snapshot else None,
                     }
                 )
                 self.timeframe_exec_counts[day_key][str(order.timeframe)] += 1
@@ -865,6 +997,10 @@ class LLMStrategistBacktester:
                     record["allocated_risk_abs"] = risk_snapshot.get("allocated_risk_abs")
                     record["actual_risk_at_stop"] = risk_snapshot.get("actual_risk_abs") or actual_risk
                     record["stop_distance"] = order.stop_distance or risk_snapshot.get("stop_distance")
+                    if risk_snapshot.get("profile_multiplier") is not None:
+                        record["profile_multiplier"] = risk_snapshot.get("profile_multiplier")
+                        record["profile_multiplier_components"] = risk_snapshot.get("profile_multiplier_components")
+                        record["profile_archetype"] = risk_snapshot.get("archetype")
                 _adjust_budget_post_fill(day_key, order.symbol, risk_used, risk_snapshot)
                 record.update(structure_fields)
                 executed_records.append(record)
@@ -1076,6 +1212,9 @@ class LLMStrategistBacktester:
                         "hour": order.timestamp.hour,
                         "risk_used": risk_used,
                         "actual_risk_at_stop": actual_risk,
+                        "archetype": archetype,
+                        "profile_multiplier": risk_snapshot.get("profile_multiplier") if risk_snapshot else None,
+                        "profile_multiplier_components": risk_snapshot.get("profile_multiplier_components") if risk_snapshot else None,
                     }
                 )
                 if latency_seconds is not None:
@@ -1107,6 +1246,9 @@ class LLMStrategistBacktester:
                     record["allocated_risk_abs"] = risk_snapshot.get("allocated_risk_abs")
                     record["actual_risk_at_stop"] = risk_snapshot.get("actual_risk_abs") or actual_risk
                     record["stop_distance"] = order.stop_distance or risk_snapshot.get("stop_distance")
+                    record["profile_multiplier"] = risk_snapshot.get("profile_multiplier")
+                    record["profile_multiplier_components"] = risk_snapshot.get("profile_multiplier_components")
+                    record["profile_archetype"] = risk_snapshot.get("archetype")
                 _adjust_budget_post_fill(day_key, order.symbol, risk_used, risk_snapshot)
                 record.update(structure_fields)
                 executed_records.append(record)
@@ -1174,6 +1316,7 @@ class LLMStrategistBacktester:
         self.trigger_load_by_day.clear()
         self.archetype_load_by_day.clear()
         self.daily_loss_anchor_by_day.clear()
+        self.llm_generation_by_day.clear()
         self.current_day_key = None
         self.latest_daily_summary = None
         self.last_slot_report = None
@@ -1251,6 +1394,8 @@ class LLMStrategistBacktester:
                 )
                 self.latest_risk_engine = risk_engine
                 trigger_engine = TriggerEngine(current_plan, risk_engine, trade_risk=TradeRiskEvaluator(risk_engine))
+                llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
+                self.llm_generation_by_day[day_key].append(llm_meta)
                 plan_log.append(
                     {
                         "plan_id": current_plan.plan_id,
@@ -1391,7 +1536,20 @@ class LLMStrategistBacktester:
         gross_trade_pnl = sum(float(entry.get("pnl", 0.0)) for entry in self.portfolio.trade_log)
         gross_trade_return_pct = (gross_trade_pnl / self.initial_cash * 100.0) if self.initial_cash else 0.0
         run_summary_path = cache_base / "run_summary.json"
-        run_summary = write_run_summary(daily_reports, run_summary_path)
+        baseline_summary_path = None
+        env_baseline_path = os.environ.get("BASELINE_SUMMARY_PATH")
+        if env_baseline_path:
+            baseline_summary_path = Path(env_baseline_path)
+        else:
+            baseline_run_id = os.environ.get("BASELINE_RUN_ID")
+            if baseline_run_id:
+                baseline_candidate = Path(self.plan_provider.cache_dir) / baseline_run_id / "run_summary.json"
+                baseline_summary_path = baseline_candidate
+            else:
+                baseline_candidate = Path(self.plan_provider.cache_dir) / "baseline" / "run_summary.json"
+                if baseline_candidate.exists():
+                    baseline_summary_path = baseline_candidate
+        run_summary = write_run_summary(daily_reports, run_summary_path, baseline_summary_path=baseline_summary_path)
         summary = {
             "final_equity": final_equity,
             "equity_return_pct": equity_return_pct,
@@ -1545,13 +1703,17 @@ class LLMStrategistBacktester:
         # Adaptive boost: based on same-day usage only (no cross-day carry-over).
         prev_usage = (entry.get("used_abs", 0.0) / budget * 100.0) if budget > 0 else 100.0
         adaptive_multiplier = 3.0 if prev_usage < 10.0 else 1.0
-        risk_fraction = max(target_risk_pct * adaptive_multiplier, 0.0) / 100.0
-        if risk_fraction <= 0:
+        # Per-trade risk allowance expressed in currency, not double-scaled by notional.
+        base_equity = entry.get("start_equity", self.initial_cash)
+        per_trade_cap = max(target_risk_pct * adaptive_multiplier, 0.0) / 100.0
+        contribution = base_equity * per_trade_cap
+        if contribution <= 0:
             return 0.0
-        contribution = notional * risk_fraction
         used = entry.get("used_abs", 0.0)
-        if used + contribution > budget + 1e-9:
+        remaining = budget - used
+        if remaining <= 0:
             return None
+        contribution = min(contribution, remaining)
         return contribution
 
     def _commit_risk_budget(self, day_key: str, contribution: float, symbol: str | None) -> None:
@@ -1599,6 +1761,35 @@ class LLMStrategistBacktester:
             "budget_slippage_adjustment": entry.get("slippage_adjustment", 0.0),
             "symbol_usage_pct": symbol_usage_pct,
             "blocks_by_symbol": blocks_by_symbol,
+        }
+    def _risk_budget_fallback(
+        self,
+        start_equity: float,
+        risk_usage_events: List[Dict[str, Any]],
+        budget_pct: float | None = None,
+    ) -> Dict[str, float] | None:
+        """Derive risk budget stats from risk_usage_events when budget state is missing."""
+
+        pct = budget_pct if budget_pct is not None else (self.active_risk_limits.max_daily_risk_budget_pct or 0.0)
+        if pct <= 0:
+            return None
+        budget_abs = start_equity * (pct / 100.0)
+        used_abs = sum(float(evt.get("risk_used", 0.0)) for evt in risk_usage_events or [])
+        used_pct = (used_abs / budget_abs * 100.0) if budget_abs > 0 else 0.0
+        return {
+            "budget_pct": pct,
+            "budget_abs": budget_abs,
+            "used_abs": used_abs,
+            "used_pct": used_pct,
+            "utilization_pct": used_pct,
+            "start_equity": start_equity,
+            "budget_base_equity": start_equity,
+            "budget_allocated_abs": budget_abs,
+            "budget_allocated_pct": pct,
+            "budget_actual_abs": used_abs,
+            "budget_slippage_adjustment": 0.0,
+            "symbol_usage_pct": {},
+            "blocks_by_symbol": {},
         }
 
     @staticmethod
@@ -1737,6 +1928,15 @@ class LLMStrategistBacktester:
         self.session_trade_counts.pop(day_key, None)
         self.archetype_load_by_day.pop(day_key, None)
         trigger_load_events = self.trigger_load_by_day.pop(day_key, [])
+        llm_meta_entries = self.llm_generation_by_day.pop(day_key, [])
+        llm_failed_parse = any(entry.get("llm_failed_parse") for entry in llm_meta_entries)
+        fallback_used = any(entry.get("fallback_plan_used") for entry in llm_meta_entries)
+        llm_failure_reason = None
+        for entry in reversed(llm_meta_entries):
+            if entry.get("llm_failure_reason"):
+                llm_failure_reason = entry.get("llm_failure_reason")
+                break
+        llm_data_quality = "fallback" if (llm_failed_parse or fallback_used) else "ok"
         allocated_risk_abs = 0.0
         actual_risk_abs = 0.0
         for evt in risk_usage_events:
@@ -1788,6 +1988,17 @@ class LLMStrategistBacktester:
             "archetype_load_blocks": archetype_load_blocks,
             "trigger_load_blocks": trigger_load_blocks,
             "symbol_cap_blocks": symbol_cap_blocks,
+            "risk_profile": {
+                "global_multiplier": getattr(self.risk_profile, "global_multiplier", 1.0),
+                "symbol_multipliers": dict(getattr(self.risk_profile, "symbol_multipliers", {}) or {}),
+                "archetype_multipliers": dict(getattr(self.risk_profile, "archetype_multipliers", {}) or {}),
+                "archetype_hour_multipliers": dict(getattr(self.risk_profile, "archetype_hour_multipliers", {}) or {}),
+            },
+            "risk_budget_pct": self.daily_risk_budget_pct,
+            "llm_failed_parse": llm_failed_parse,
+            "fallback_plan_used": fallback_used,
+            "llm_failure_reason": llm_failure_reason,
+            "llm_data_quality": llm_data_quality,
         }
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
@@ -1869,7 +2080,13 @@ class LLMStrategistBacktester:
             summary["timeframe_quality"] = quality_stats["timeframe_quality"]
         if quality_stats["hour_quality"]:
             summary["hour_quality"] = quality_stats["hour_quality"]
+        if quality_stats["archetype_quality"]:
+            summary["archetype_quality"] = quality_stats["archetype_quality"]
+        if quality_stats["archetype_hour_quality"]:
+            summary["archetype_hour_quality"] = quality_stats["archetype_hour_quality"]
         risk_budget_info = self._risk_budget_summary(day_key) or {}
+        if not risk_budget_info:
+            risk_budget_info = self._risk_budget_fallback(start_equity, risk_usage_events, budget_pct=self.daily_risk_budget_pct) or {}
         if risk_budget_info:
             summary["risk_budget"] = risk_budget_info
             limit_stats["risk_budget_used_pct"] = risk_budget_info["used_pct"]
@@ -1907,6 +2124,8 @@ class LLMStrategistBacktester:
         trigger_quality: Dict[str, Dict[str, Any]] = {}
         timeframe_quality: Dict[str, Dict[str, Any]] = {}
         hour_quality: Dict[str, Dict[str, Any]] = {}
+        archetype_quality: Dict[str, Dict[str, Any]] = {}
+        archetype_hour_quality: Dict[str, Dict[str, Any]] = {}
 
         latency_lookup: Dict[tuple[str, str], float] = {
             key: (sum(vals) / len(vals)) for key, vals in latency_samples.items() if vals
@@ -1952,6 +2171,11 @@ class LLMStrategistBacktester:
                 decay_pct = ((exit_price - best_price) / entry_price) * 100.0
             return (mae_pct, mfe_pct, decay_pct)
 
+        def _archetype_for_entry(trigger_id: str | None) -> str:
+            if not trigger_id:
+                return "unknown"
+            return self._archetype_for_trigger(day_key, trigger_id)
+
         for entry in entries:
             trigger_id = entry.get("entry_reason") or entry.get("reason") or "unknown"
             timeframe = entry.get("entry_timeframe") or "unknown"
@@ -1966,6 +2190,7 @@ class LLMStrategistBacktester:
                     hour = None
             pnl = float(entry.get("pnl", 0.0))
             key = f"{trigger_id}|{timeframe}"
+            archetype = _archetype_for_entry(trigger_id)
             mae_pct, mfe_pct, decay_pct = _excursions(entry)
             payload = trigger_quality.setdefault(
                 key,
@@ -2042,6 +2267,43 @@ class LLMStrategistBacktester:
             if decay_pct is not None:
                 tf_payload["decay_sum"] += decay_pct
 
+            arch_payload = archetype_quality.setdefault(
+                archetype,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                    "load_sum": 0.0,
+                    "load_count": 0,
+                },
+            )
+            arch_payload["pnl"] += pnl
+            arch_payload["trades"] += 1
+            arch_payload["wins"] += 1 if pnl > 0 else 0
+            arch_payload["losses"] += 1 if pnl < 0 else 0
+            if pnl > 0:
+                arch_payload["win_abs_sum"] += abs(pnl)
+            elif pnl < 0:
+                arch_payload["loss_abs_sum"] += abs(pnl)
+            if latency is not None:
+                arch_payload.setdefault("latencies", []).append(latency)
+            if mae_pct is not None:
+                arch_payload["mae_sum"] += mae_pct
+                arch_payload["abs_mae_sum"] += abs(mae_pct)
+            if mfe_pct is not None:
+                arch_payload["mfe_sum"] += mfe_pct
+                arch_payload["abs_mfe_sum"] += abs(mfe_pct)
+            if decay_pct is not None:
+                arch_payload["decay_sum"] += decay_pct
+
             if hour is not None:
                 hr_payload = hour_quality.setdefault(
                     str(hour),
@@ -2079,6 +2341,43 @@ class LLMStrategistBacktester:
                     hr_payload["abs_mfe_sum"] += abs(mfe_pct)
                 if decay_pct is not None:
                     hr_payload["decay_sum"] += decay_pct
+                arch_hour_key = f"{archetype}|{hour}"
+                arch_hour_payload = archetype_hour_quality.setdefault(
+                    arch_hour_key,
+                    {
+                        "pnl": 0.0,
+                        "trades": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "mae_sum": 0.0,
+                        "mfe_sum": 0.0,
+                        "decay_sum": 0.0,
+                        "abs_mae_sum": 0.0,
+                        "abs_mfe_sum": 0.0,
+                        "win_abs_sum": 0.0,
+                        "loss_abs_sum": 0.0,
+                        "load_sum": 0.0,
+                        "load_count": 0,
+                    },
+                )
+                arch_hour_payload["pnl"] += pnl
+                arch_hour_payload["trades"] += 1
+                arch_hour_payload["wins"] += 1 if pnl > 0 else 0
+                arch_hour_payload["losses"] += 1 if pnl < 0 else 0
+                if pnl > 0:
+                    arch_hour_payload["win_abs_sum"] += abs(pnl)
+                elif pnl < 0:
+                    arch_hour_payload["loss_abs_sum"] += abs(pnl)
+                if latency is not None:
+                    arch_hour_payload.setdefault("latencies", []).append(latency)
+                if mae_pct is not None:
+                    arch_hour_payload["mae_sum"] += mae_pct
+                    arch_hour_payload["abs_mae_sum"] += abs(mae_pct)
+                if mfe_pct is not None:
+                    arch_hour_payload["mfe_sum"] += mfe_pct
+                    arch_hour_payload["abs_mfe_sum"] += abs(mfe_pct)
+                if decay_pct is not None:
+                    arch_hour_payload["decay_sum"] += decay_pct
 
         # Attach risk usage totals (allocated + actual at stop if available).
         actual_usage: Dict[tuple[str, str], float] = defaultdict(float)
@@ -2126,6 +2425,10 @@ class LLMStrategistBacktester:
         hour_risk_usage: Dict[str, float] = defaultdict(float)
         timeframe_actual_usage: Dict[str, float] = defaultdict(float)
         hour_actual_usage: Dict[str, float] = defaultdict(float)
+        archetype_risk_usage: Dict[str, float] = defaultdict(float)
+        archetype_actual_usage: Dict[str, float] = defaultdict(float)
+        archetype_hour_risk_usage: Dict[str, float] = defaultdict(float)
+        archetype_hour_actual_usage: Dict[str, float] = defaultdict(float)
         for evt in trigger_load_events or []:
             tf = str(evt.get("timeframe") or "unknown")
             hr = evt.get("hour")
@@ -2202,10 +2505,18 @@ class LLMStrategistBacktester:
             actual_risk_val = evt.get("actual_risk_at_stop")
             if actual_risk_val is not None:
                 timeframe_actual_usage[tf] += float(actual_risk_val)
+            archetype = _archetype_for_entry(evt.get("trigger_id"))
+            archetype_risk_usage[archetype] += max(risk_used, 0.0)
+            if actual_risk_val is not None:
+                archetype_actual_usage[archetype] += float(actual_risk_val)
             if hour_val is not None:
                 hour_risk_usage[str(hour_val)] += max(risk_used, 0.0)
                 if actual_risk_val is not None:
                     hour_actual_usage[str(hour_val)] += float(actual_risk_val)
+                arch_hour_key = f"{archetype}|{hour_val}"
+                archetype_hour_risk_usage[arch_hour_key] += max(risk_used, 0.0)
+                if actual_risk_val is not None:
+                    archetype_hour_actual_usage[arch_hour_key] += float(actual_risk_val)
 
         for tf, risk_used in timeframe_risk_usage.items():
             payload = timeframe_quality.setdefault(
@@ -2249,6 +2560,52 @@ class LLMStrategistBacktester:
             )
             payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + risk_used
             actual_val = hour_actual_usage.get(hour)
+            if actual_val is not None:
+                payload["actual_risk_abs"] = payload.get("actual_risk_abs", 0.0) + actual_val
+            payload.setdefault("latencies", [])
+
+        for archetype, risk_used in archetype_risk_usage.items():
+            payload = archetype_quality.setdefault(
+                archetype,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                },
+            )
+            payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + risk_used
+            actual_val = archetype_actual_usage.get(archetype)
+            if actual_val is not None:
+                payload["actual_risk_abs"] = payload.get("actual_risk_abs", 0.0) + actual_val
+            payload.setdefault("latencies", [])
+
+        for arch_hour, risk_used in archetype_hour_risk_usage.items():
+            payload = archetype_hour_quality.setdefault(
+                arch_hour,
+                {
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "mae_sum": 0.0,
+                    "mfe_sum": 0.0,
+                    "decay_sum": 0.0,
+                    "abs_mae_sum": 0.0,
+                    "abs_mfe_sum": 0.0,
+                    "win_abs_sum": 0.0,
+                    "loss_abs_sum": 0.0,
+                },
+            )
+            payload["risk_used_abs"] = payload.get("risk_used_abs", 0.0) + risk_used
+            actual_val = archetype_hour_actual_usage.get(arch_hour)
             if actual_val is not None:
                 payload["actual_risk_abs"] = payload.get("actual_risk_abs", 0.0) + actual_val
             payload.setdefault("latencies", [])
@@ -2304,6 +2661,8 @@ class LLMStrategistBacktester:
             "trigger_quality": _finalize(trigger_quality),
             "timeframe_quality": _finalize(timeframe_quality),
             "hour_quality": _finalize(hour_quality),
+            "archetype_quality": _finalize(archetype_quality),
+            "archetype_hour_quality": _finalize(archetype_hour_quality),
         }
 
     def _judge_feedback(self, summary: Dict[str, Any]) -> Dict[str, Any]:

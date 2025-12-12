@@ -35,6 +35,7 @@ class StrategistPlanService:
         self.registry = registry or strategy_run_registry
         self.default_max_trades = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "10"))
         self.min_trade_hint_cap = int(os.environ.get("STRATEGIST_PLAN_MIN_TRADE_CAP", "3"))
+        self.strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
 
     def generate_plan_for_run(
         self,
@@ -55,13 +56,15 @@ class StrategistPlanService:
         # Prefer derived caps when a daily budget exists; otherwise derive a fallback.
         derived_cap = getattr(plan, "_derived_trade_cap", None)
         if derived_cap:
-            plan.max_trades_per_day = derived_cap
+            if not self.strict_fixed_caps:
+                plan.max_trades_per_day = derived_cap
         elif plan.risk_constraints.max_daily_risk_budget_pct is not None and plan.risk_constraints.max_position_risk_pct > 0:
             fallback_cap = max(
                 8,
                 math.ceil(plan.risk_constraints.max_daily_risk_budget_pct / plan.risk_constraints.max_position_risk_pct),
             )
-            plan.max_trades_per_day = fallback_cap
+            if not self.strict_fixed_caps:
+                plan.max_trades_per_day = fallback_cap
             object.__setattr__(plan, "_derived_trade_cap", fallback_cap)
         plan.run_id = run.run_id
         combined_symbols = sorted({*(run.config.symbols or []), *(asset.symbol for asset in llm_input.assets)})
@@ -162,6 +165,8 @@ class StrategistPlanService:
         """Ensure plans with a daily risk budget enforce the derived trade cap."""
 
         if plan.risk_constraints.max_daily_risk_budget_pct is None:
+            return plan
+        if self.strict_fixed_caps:
             return plan
         derived_cap = getattr(plan, "_derived_trade_cap", None)
         if not derived_cap:

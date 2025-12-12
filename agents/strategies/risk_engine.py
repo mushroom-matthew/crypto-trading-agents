@@ -17,12 +17,26 @@ class RiskProfile:
 
     global_multiplier: float = 1.0
     symbol_multipliers: Dict[str, float] = field(default_factory=dict)
+    archetype_multipliers: Dict[str, float] = field(default_factory=dict)
+    archetype_hour_multipliers: Dict[str, float] = field(default_factory=dict)
 
-    def multiplier_for(self, symbol: str | None = None) -> float:
+    def multiplier_components(self, symbol: str | None = None, archetype: str | None = None, hour: int | None = None) -> Dict[str, float]:
         base = max(0.0, self.global_multiplier)
-        if symbol and symbol in self.symbol_multipliers:
-            return base * max(0.0, self.symbol_multipliers[symbol])
-        return base
+        symbol_mult = max(0.0, self.symbol_multipliers.get(symbol, 1.0)) if symbol else 1.0
+        archetype_mult = max(0.0, self.archetype_multipliers.get(archetype, 1.0)) if archetype else 1.0
+        hour_key = f"{archetype}|{hour}" if archetype is not None and hour is not None else None
+        archetype_hour_mult = max(0.0, self.archetype_hour_multipliers.get(hour_key, 1.0)) if hour_key else 1.0
+        total = base * symbol_mult * archetype_mult * archetype_hour_mult
+        return {
+            "global": base,
+            "symbol": symbol_mult,
+            "archetype": archetype_mult,
+            "archetype_hour": archetype_hour_mult,
+            "total": total,
+        }
+
+    def multiplier_for(self, symbol: str | None = None, archetype: str | None = None, hour: int | None = None) -> float:
+        return self.multiplier_components(symbol, archetype, hour)["total"]
 
 
 class RiskEngine:
@@ -46,12 +60,15 @@ class RiskEngine:
     def _fraction(self, pct: float | None) -> float:
         return (pct or 0.0) / 100.0
 
-    def _profile_multiplier(self, symbol: str | None = None) -> float:
-        multiplier = self.risk_profile.multiplier_for(symbol)
-        return multiplier if multiplier > 0 else 0.0
+    def _profile_multiplier(self, symbol: str | None = None, archetype: str | None = None, hour: int | None = None) -> tuple[float, Dict[str, float]]:
+        components = self.risk_profile.multiplier_components(symbol, archetype, hour)
+        multiplier = components.get("total", 0.0)
+        multiplier = multiplier if multiplier > 0 else 0.0
+        return multiplier, components
 
-    def _scaled_fraction(self, pct: float | None, symbol: str | None = None) -> float:
-        return self._fraction(pct) * self._profile_multiplier(symbol)
+    def _scaled_fraction(self, pct: float | None, symbol: str | None = None, archetype: str | None = None, hour: int | None = None) -> float:
+        multiplier, _ = self._profile_multiplier(symbol, archetype, hour)
+        return self._fraction(pct) * multiplier
 
     def _within_daily_loss(self, equity: float) -> bool:
         if self.daily_anchor_equity is None:
@@ -126,6 +143,8 @@ class RiskEngine:
         portfolio: PortfolioState,
         indicator: IndicatorSnapshot,
         stop_distance: float | None = None,
+        archetype: str | None = None,
+        hour: int | None = None,
     ) -> float:
         self.last_block_reason = None
         if price <= 0:
@@ -135,7 +154,7 @@ class RiskEngine:
             self.last_block_reason = "max_daily_loss_pct"
             return 0.0
         rule = self._rule_for(symbol)
-        multiplier = self._profile_multiplier(symbol)
+        multiplier, multiplier_components = self._profile_multiplier(symbol, archetype, hour)
         desired_notional = self._notional_from_rule(rule, portfolio, indicator) * multiplier
         if desired_notional <= 0:
             self.last_block_reason = "sizing_zero"
@@ -146,7 +165,7 @@ class RiskEngine:
             stop_distance = float(indicator.atr_14)
 
         # Compute per-trade risk cap in notional terms; if a stop exists, convert allowed loss to notional.
-        risk_cap_abs = portfolio.equity * self._scaled_fraction(self.constraints.max_position_risk_pct, symbol)
+        risk_cap_abs = portfolio.equity * self._scaled_fraction(self.constraints.max_position_risk_pct, symbol, archetype, hour)
         if stop_distance and price > 0:
             qty_cap = risk_cap_abs / max(stop_distance, 1e-9)
             position_cap = qty_cap * price
@@ -188,6 +207,10 @@ class RiskEngine:
             "allocated_risk_pct": self.constraints.max_position_risk_pct,
             "allocated_risk_abs": risk_cap_abs,
             "actual_risk_abs": actual_risk,
+            "archetype": archetype,
+            "hour": hour,
+            "profile_multiplier": multiplier,
+            "profile_multiplier_components": multiplier_components,
         }
         if quantity <= 0:
             self.last_block_reason = limiting_name
