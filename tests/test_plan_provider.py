@@ -11,6 +11,7 @@ from schemas.llm_strategist import (
     IndicatorSnapshot,
     LLMInput as StrategistInput,
     PortfolioState,
+    PositionSizingRule,
     RiskConstraint,
     StrategyPlan,
     TriggerCondition,
@@ -66,7 +67,7 @@ def _plan_without_limits() -> StrategyPlan:
             max_portfolio_exposure_pct=80.0,
             max_daily_loss_pct=3.0,
         ),
-        sizing_rules=[],
+        sizing_rules=[PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
         max_trades_per_day=None,
     )
 
@@ -84,3 +85,32 @@ def test_plan_provider_persists_enriched_limits(tmp_path, monkeypatch):
     saved = json.loads(cache_files[0].read_text())
     assert saved["max_trades_per_day"] == enriched.max_trades_per_day
     assert saved["allowed_symbols"] == ["BTC-USD"]
+
+
+def test_plan_provider_fixed_caps_preserve_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "30")
+    monkeypatch.setenv("STRATEGIST_PLAN_DEFAULT_MAX_TRIGGERS_PER_SYMBOL", "30")
+    monkeypatch.setenv("STRATEGIST_STRICT_FIXED_CAPS", "true")
+    plan = _plan_without_limits()
+    plan.risk_constraints.max_daily_risk_budget_pct = 10.0
+    provider = StrategyPlanProvider(DummyLLMClient(plan), cache_dir=tmp_path, llm_calls_per_day=1)
+    enriched = provider.get_plan("run-fixed", datetime(2024, 1, 1, tzinfo=timezone.utc), _llm_input())
+    assert enriched.max_trades_per_day == 30
+    assert enriched.max_triggers_per_symbol_per_day == 30
+    assert getattr(enriched, "_derived_trade_cap") == 10
+    cap_inputs = getattr(enriched, "_cap_inputs", {})
+    assert cap_inputs.get("risk_budget_pct") == 10.0
+    assert cap_inputs.get("per_trade_risk_pct") == 1.0
+
+
+def test_plan_provider_legacy_caps_apply_derivation(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "30")
+    monkeypatch.setenv("STRATEGIST_PLAN_DEFAULT_MAX_TRIGGERS_PER_SYMBOL", "30")
+    monkeypatch.setenv("STRATEGIST_STRICT_FIXED_CAPS", "false")
+    plan = _plan_without_limits()
+    plan.risk_constraints.max_daily_risk_budget_pct = 10.0
+    provider = StrategyPlanProvider(DummyLLMClient(plan), cache_dir=tmp_path, llm_calls_per_day=1)
+    enriched = provider.get_plan("run-legacy", datetime(2024, 1, 1, tzinfo=timezone.utc), _llm_input())
+    assert enriched.max_trades_per_day == 10
+    assert enriched.max_triggers_per_symbol_per_day == 10
+    assert getattr(enriched, "_derived_trade_cap") == 10

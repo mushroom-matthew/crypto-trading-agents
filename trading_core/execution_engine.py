@@ -329,3 +329,24 @@ class ExecutionEngine:
             reason="",
             detail=None,
         )
+
+    def revert_trade(
+        self,
+        run_id: str,
+        plan_id: str,
+        bar_time: datetime,
+        symbol: str,
+        timeframe: str | None = None,
+    ) -> None:
+        """Rollback counters when a downstream check blocks an already-counted trade."""
+
+        state = self._get_state(run_id, bar_time)
+        if state.trades_today > 0:
+            state.trades_today -= 1
+        if symbol in state.symbol_trades and state.symbol_trades[symbol] > 0:
+            state.symbol_trades[symbol] -= 1
+        if timeframe and timeframe in state.timeframe_trades and state.timeframe_trades[timeframe] > 0:
+            state.timeframe_trades[timeframe] -= 1
+        plan_key = self._plan_key(run_id, plan_id, bar_time)
+        if plan_key in self.plan_trade_counts and self.plan_trade_counts[plan_key] > 0:
+            self.plan_trade_counts[plan_key] -= 1

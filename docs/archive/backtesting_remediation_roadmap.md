@@ -23,12 +23,13 @@ Checklist-driven plan to address advisor feedback across backtesting and live al
 ## Risk Usage Visibility
 - [x] Add a run-level backtest summary (`backtesting/reports.py`): mean/median `risk_budget_used_pct`, % of days with <10% usage, mean trade_count, blocked_by_daily_cap/direction/plan_limit, heuristic correlation of `risk_budget_used_pct` vs `equity_return_pct`.
 - [x] Emit summary JSON alongside daily reports; verified `run_summary.json` generated for `short-telemetry-smoke-3` (risk usage still 0% → highlights underuse).
-- [ ] Replace the “<10% usage” equity-based stat with budget utilization: compute per-day `risk_budget_utilization_pct = used_abs / (start_equity * max_daily_risk_budget_pct)` and report mean/median plus % days <25%, 25–75%, >75%. Feed utilization into judge context (low utilization with positive returns → gently raise sizing/caps; high utilization with losses → tighten).
+- [x] Replace the “<10% usage” equity-based stat with budget utilization: `risk_budget_utilization_pct` now recorded per-day and aggregated (mean/median plus % days under_25/between_25_75/over_75); downstream prompts/adjusters still need to consume it.
 
 ## Trade Budget Regimes (daily_cap vs plan_limit)
 - [x] Instrument per-run stats showing which brake was active each day (daily_cap vs plan_limit) and execution rate (in run summary, plus `active_brake`/`execution_rate` per daily report going forward).
 - [x] Introduce risk-budget-derived daily cap: if `max_daily_risk_budget_pct` is set, derive `max_trades_per_day` from per-trade risk (min sizing rule target or `max_position_risk_pct`) and log `derived_max_trades_per_day` in plan limits.
-- [ ] Add validation/backtest to confirm no overlapping brakes and expected execution rate under the unified cap; tune derived cap thresholds as needed. *(Risk usage still <10%; daily_cap active on some days; day-1 plans sometimes lack `derived_max_trades_per_day` in limits.)*
+- [x] Add strict cap flag (`STRATEGIST_STRICT_FIXED_CAPS`) so derived caps become telemetry-only when desired; honors configured caps instead of shrinking them.
+- [ ] Validate with backtests that caps are no longer the dominant brake when strict mode is on (recent runs still show plan_limit/daily_cap blocking heavily; needs re-run with env set and higher fixed caps).
 
 ## Trigger Catalog Hygiene
 - [x] Prune or refactor dead variants (`*_exit_exit`, `*_exit_flat`) that never execute; remove from the catalog or merge semantics.

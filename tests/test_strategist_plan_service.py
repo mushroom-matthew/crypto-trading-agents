@@ -238,6 +238,97 @@ def test_plan_service_scales_limits_with_active_adjustments(tmp_path):
     assert result.risk_constraints.max_position_risk_pct == pytest.approx(1.0)
 
 
+def test_plan_service_respects_fixed_caps_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGIST_STRICT_FIXED_CAPS", "true")
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    risk_limits = RiskLimitSettings(
+        max_position_risk_pct=1.0,
+        max_symbol_exposure_pct=25.0,
+        max_portfolio_exposure_pct=80.0,
+        max_daily_loss_pct=3.0,
+        max_daily_risk_budget_pct=10.0,
+    )
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7, risk_limits=risk_limits)
+    )
+    registry.update_strategy_run(run)
+
+    plan = _base_plan()
+    plan.max_trades_per_day = 30
+    plan.max_triggers_per_symbol_per_day = 30
+    plan.risk_constraints.max_daily_risk_budget_pct = 10.0
+    stub = StubPlanProvider(plan)
+    service = StrategistPlanService(plan_provider=stub, registry=registry)
+
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.max_trades_per_day == 30
+    assert result.max_triggers_per_symbol_per_day == 30
+    assert getattr(result, "_derived_trade_cap") == 10
+    cap_inputs = getattr(result, "_cap_inputs", {})
+    assert cap_inputs.get("risk_budget_pct") == 10.0
+    assert cap_inputs.get("per_trade_risk_pct") == 1.0
+
+
+def test_plan_service_triggers_floor_with_fixed_caps(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGIST_STRICT_FIXED_CAPS", "true")
+    monkeypatch.setenv("STRATEGIST_PLAN_DEFAULT_MAX_TRIGGERS_PER_SYMBOL", "40")
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    risk_limits = RiskLimitSettings(
+        max_position_risk_pct=1.0,
+        max_symbol_exposure_pct=25.0,
+        max_portfolio_exposure_pct=80.0,
+        max_daily_loss_pct=3.0,
+        max_daily_risk_budget_pct=10.0,
+    )
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7, risk_limits=risk_limits)
+    )
+    registry.update_strategy_run(run)
+
+    plan = _base_plan()
+    plan.max_triggers_per_symbol_per_day = 4
+    plan.max_trades_per_day = 5
+    plan.risk_constraints.max_daily_risk_budget_pct = 10.0
+    stub = StubPlanProvider(plan)
+    service = StrategistPlanService(plan_provider=stub, registry=registry)
+
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.max_triggers_per_symbol_per_day == 40
+    assert getattr(result, "_policy_max_triggers_per_symbol_per_day") == 40
+    assert getattr(result, "_derived_trigger_cap") == 10
+    assert getattr(result, "_resolved_trigger_cap") == 40
+
+
+def test_plan_service_triggers_legacy_min_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGIST_STRICT_FIXED_CAPS", "false")
+    monkeypatch.setenv("STRATEGIST_PLAN_DEFAULT_MAX_TRIGGERS_PER_SYMBOL", "40")
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    risk_limits = RiskLimitSettings(
+        max_position_risk_pct=1.0,
+        max_symbol_exposure_pct=25.0,
+        max_portfolio_exposure_pct=80.0,
+        max_daily_loss_pct=3.0,
+        max_daily_risk_budget_pct=10.0,
+    )
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7, risk_limits=risk_limits)
+    )
+    registry.update_strategy_run(run)
+
+    plan = _base_plan()
+    plan.max_triggers_per_symbol_per_day = 4
+    plan.max_trades_per_day = 5
+    plan.risk_constraints.max_daily_risk_budget_pct = 10.0
+    stub = StubPlanProvider(plan)
+    service = StrategistPlanService(plan_provider=stub, registry=registry)
+
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.max_triggers_per_symbol_per_day == 4
+    assert getattr(result, "_policy_max_triggers_per_symbol_per_day") == 4
+    assert getattr(result, "_derived_trigger_cap") == 10
+    assert getattr(result, "_resolved_trigger_cap") == 4
+
+
 def test_plan_service_enforces_judge_trigger_budget(tmp_path):
     registry = StrategyRunRegistry(tmp_path / "runs")
     run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))

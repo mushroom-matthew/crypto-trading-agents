@@ -321,6 +321,7 @@ class LLMStrategistBacktester:
         self.rpr_comparison_snapshot: Dict[str, Any] = self._load_rpr_comparison_snapshot()
         self.daily_risk_budget_state: Dict[str, Dict[str, float]] = {}
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
+        self.strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
         self.prompt_template = prompt_template_path.read_text() if prompt_template_path and prompt_template_path.exists() else None
         self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.trigger_activity_by_day: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -818,6 +819,7 @@ class LLMStrategistBacktester:
         limit_entry = self.limit_enforcement_by_day[day_key]
         reason_map = set(item.value for item in BlockReason)
         custom_reasons = {"timeframe_cap", "session_cap", "trigger_load"}
+        plan_id = (plan_payload or {}).get("plan_id")
 
         def _structure_fields(snapshot: Mapping[str, Any] | None) -> Dict[str, Any]:
             if not snapshot:
@@ -937,6 +939,8 @@ class LLMStrategistBacktester:
                         },
                         "risk_budget",
                     )
+                    if plan_id:
+                        execution_tools.engine.revert_trade(run_id, plan_id, order.timestamp, order.symbol, order.timeframe)
                     continue
                 self._commit_risk_budget(day_key, allowance, order.symbol)
                 limit_entry["trades_executed"] += 1
@@ -1062,7 +1066,14 @@ class LLMStrategistBacktester:
             if not window:
                 return False
             plan_limits = self.plan_limits_by_day.get(day_key) or {}
-            base_cap = plan_limits.get("derived_max_trades_per_day") or plan_limits.get("max_trades_per_day")
+            policy_cap = plan_limits.get("max_trades_per_day")
+            derived_cap = plan_limits.get("derived_max_trades_per_day")
+            # Always use the larger of policy vs derived when both exist so session scaling
+            # cannot further constrict an already conservative cap.
+            if policy_cap and derived_cap:
+                base_cap = max(policy_cap, derived_cap)
+            else:
+                base_cap = derived_cap or policy_cap
             if not base_cap:
                 return False
             window_key, multiplier = window
@@ -1182,6 +1193,8 @@ class LLMStrategistBacktester:
                         },
                         "risk_budget",
                     )
+                    if plan_id:
+                        execution_tools.engine.revert_trade(run_id, plan_id, order.timestamp, order.symbol, order.timeframe)
                     continue
                 load_scale = 1.0
                 if self.archetype_load_threshold > 0:
@@ -1410,18 +1423,53 @@ class LLMStrategistBacktester:
                         "trigger_budgets": current_plan.trigger_budgets,
                     }
                 )
+                policy_max_trades = getattr(current_plan, "_policy_max_trades_per_day", current_plan.max_trades_per_day)
+                policy_max_triggers = getattr(
+                    current_plan, "_policy_max_triggers_per_symbol_per_day", current_plan.max_triggers_per_symbol_per_day
+                )
+                if policy_max_trades is None:
+                    policy_max_trades = current_plan.max_trades_per_day
+                if policy_max_triggers is None:
+                    policy_max_triggers = current_plan.max_triggers_per_symbol_per_day
+                derived_trade_cap = getattr(current_plan, "_derived_trade_cap", None)
+                derived_trigger_cap = getattr(current_plan, "_derived_trigger_cap", None)
+                resolved_max_trades = getattr(current_plan, "_resolved_trade_cap", current_plan.max_trades_per_day)
+                resolved_max_triggers = getattr(
+                    current_plan, "_resolved_trigger_cap", current_plan.max_triggers_per_symbol_per_day
+                )
+                cap_inputs = getattr(current_plan, "_cap_inputs", None) or {}
+                session_caps: Dict[str, int] = {}
+                if self.session_trade_multipliers:
+                    base = resolved_max_trades or policy_max_trades or derived_trade_cap
+                    for window in self.session_trade_multipliers:
+                        try:
+                            start = int(window.get("start_hour", -1))
+                            end = int(window.get("end_hour", -1))
+                            mult = float(window.get("multiplier", 1.0))
+                        except (TypeError, ValueError):
+                            continue
+                        if start < 0 or end < 0 or start >= end:
+                            continue
+                        if base:
+                            session_caps[f"{start}-{end}"] = int(base * mult)
                 self.plan_limits_by_day[day_key] = {
                     "plan_id": current_plan.plan_id,
-                    "max_trades_per_day": current_plan.max_trades_per_day,
-                    "derived_max_trades_per_day": getattr(current_plan, "_derived_trade_cap", None),
+                    "max_trades_per_day": policy_max_trades,
+                    "max_triggers_per_symbol_per_day": policy_max_triggers,
+                    "derived_max_trades_per_day": derived_trade_cap,
+                    "derived_max_triggers_per_symbol_per_day": derived_trigger_cap,
+                    "resolved_max_trades_per_day": resolved_max_trades,
+                    "resolved_max_triggers_per_symbol_per_day": resolved_max_triggers,
                     "min_trades_per_day": current_plan.min_trades_per_day,
                     "allowed_symbols": current_plan.allowed_symbols,
-                    "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
                     "trigger_budgets": dict(current_plan.trigger_budgets or {}),
                     "trigger_budget_trimmed": dict(self.latest_trigger_trim),
                     "session_trade_multipliers": self.session_trade_multipliers,
+                    "session_caps": session_caps,
                     "timeframe_trigger_caps": self.timeframe_trigger_caps,
                     "flatten_policy": self.flatten_policy,
+                    "cap_inputs": cap_inputs,
+                    "strict_fixed_caps": self.strict_fixed_caps,
                     "trigger_catalog": {
                         trigger.id: {"symbol": trigger.symbol, "category": trigger.category, "direction": trigger.direction}
                         for trigger in current_plan.triggers
@@ -1587,8 +1635,11 @@ class LLMStrategistBacktester:
         return briefs
 
     def _apply_trigger_budget(self, plan: StrategyPlan) -> StrategyPlan:
-        default_cap = plan.max_triggers_per_symbol_per_day or self.default_symbol_trigger_cap
-        trimmed_plan, stats = enforce_trigger_budget(plan, default_cap=default_cap, fallback_symbols=self.pairs)
+        resolved_cap = getattr(plan, "_resolved_trigger_cap", None)
+        default_cap = resolved_cap or plan.max_triggers_per_symbol_per_day or self.default_symbol_trigger_cap
+        trimmed_plan, stats = enforce_trigger_budget(
+            plan, default_cap=default_cap, fallback_symbols=self.pairs, resolved_cap=resolved_cap
+        )
         trimmed = sum(stats.values())
         meaningful = {symbol: count for symbol, count in stats.items() if count > 0}
         self.latest_trigger_trim = meaningful
@@ -2099,6 +2150,26 @@ class LLMStrategistBacktester:
             min_trades = plan_limits.get("min_trades_per_day") or 0
             if min_trades and summary["executed_trades"] < min_trades:
                 summary["missed_min_trades"] = True
+            summary["cap_state"] = {
+                "policy": {
+                    "max_trades_per_day": plan_limits.get("max_trades_per_day"),
+                    "max_triggers_per_symbol_per_day": plan_limits.get("max_triggers_per_symbol_per_day"),
+                },
+                "derived": {
+                    "max_trades_per_day": plan_limits.get("derived_max_trades_per_day"),
+                    "max_triggers_per_symbol_per_day": plan_limits.get("derived_max_triggers_per_symbol_per_day"),
+                },
+                "resolved": {
+                    "max_trades_per_day": plan_limits.get("resolved_max_trades_per_day"),
+                    "max_triggers_per_symbol_per_day": plan_limits.get("resolved_max_triggers_per_symbol_per_day"),
+                },
+                "session_caps": plan_limits.get("session_caps") or {},
+                "flags": {
+                    "strict_fixed_caps": plan_limits.get("strict_fixed_caps", False),
+                    "legacy_mode": not plan_limits.get("strict_fixed_caps", False),
+                },
+                "inputs": plan_limits.get("cap_inputs") or {},
+            }
         raw_feedback = self._judge_feedback(summary)
         summary["judge_feedback"] = raw_feedback
         feedback_obj = JudgeFeedback.model_validate(raw_feedback)

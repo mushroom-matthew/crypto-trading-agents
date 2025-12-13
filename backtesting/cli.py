@@ -399,7 +399,7 @@ def main() -> None:
     parser.add_argument("--plan-file", help="Path to JSON file with planner plans")
     parser.add_argument("--use-saved-plans", action="store_true", help="Load plan metadata from data/strategy_configs.json")
     parser.add_argument("--llm-strategist", choices=["enabled", "disabled"], default="disabled", help="Enable the LLM strategist workflow")
-    parser.add_argument("--llm-calls-per-day", type=int, default=8)
+    parser.add_argument("--llm-calls-per-day", type=int, default=1)
     parser.add_argument("--llm-cache-dir", default=".cache/strategy_plans")
     parser.add_argument("--llm-run-id", default="default")
     parser.add_argument("--llm-prompt", help="Optional prompt template path for the strategist")

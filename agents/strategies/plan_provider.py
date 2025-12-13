@@ -119,9 +119,18 @@ class StrategyPlanProvider:
             plan.max_trades_per_day = default_max_trades
         if plan.max_triggers_per_symbol_per_day is None:
             plan.max_triggers_per_symbol_per_day = default_max_triggers
+        if strict_fixed_caps:
+            if plan.max_trades_per_day is not None and plan.max_trades_per_day < default_max_trades:
+                plan.max_trades_per_day = default_max_trades
+            if (
+                plan.max_triggers_per_symbol_per_day is not None
+                and plan.max_triggers_per_symbol_per_day < default_max_triggers
+            ):
+                plan.max_triggers_per_symbol_per_day = default_max_triggers
 
         derived_cap = None
         derived_trigger_cap = None
+        cap_inputs: dict[str, float] | None = None
         if plan.risk_constraints.max_daily_risk_budget_pct is not None:
             budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
             # Allow higher per-trade risk up to twice the configured cap, bounded by the daily budget.
@@ -134,6 +143,7 @@ class StrategyPlanProvider:
             if per_trade_risk and per_trade_risk > 0:
                 derived_cap = max(8, math.ceil(budget_pct / per_trade_risk))
                 derived_trigger_cap = derived_cap
+                cap_inputs = {"risk_budget_pct": budget_pct, "per_trade_risk_pct": per_trade_risk}
                 if not strict_fixed_caps:
                     plan.max_trades_per_day = min(plan.max_trades_per_day or derived_cap, derived_cap)
                     plan.max_triggers_per_symbol_per_day = min(plan.max_triggers_per_symbol_per_day or derived_trigger_cap, derived_trigger_cap)
@@ -190,6 +200,8 @@ class StrategyPlanProvider:
             object.__setattr__(plan, "_derived_trade_cap", derived_cap)
         if derived_trigger_cap is not None:
             object.__setattr__(plan, "_derived_trigger_cap", derived_trigger_cap)
+        if cap_inputs:
+            object.__setattr__(plan, "_cap_inputs", cap_inputs)
         if not plan.allowed_trigger_categories:
             plan.allowed_trigger_categories = [
                 "trend_continuation",

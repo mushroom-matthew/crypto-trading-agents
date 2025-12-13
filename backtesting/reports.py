@@ -121,6 +121,17 @@ def _build_rpr_comparison(current_summary: Mapping[str, Any], baseline_summary: 
 def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summary: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Aggregate daily reports into a compact run-level summary."""
 
+    def _cap_stats(values: Iterable[float | int | None]) -> dict[str, float] | None:
+        nums = [float(v) for v in values if v is not None]
+        if not nums:
+            return None
+        return {
+            "mean": _safe_mean(nums),
+            "median": _safe_median(nums),
+            "min": min(nums),
+            "max": max(nums),
+        }
+
     risk_usage_pct: list[float] = []
     risk_utilization_pct: list[float] = []
     returns: list[float] = []
@@ -149,6 +160,15 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
     llm_plan_fail_days = 0
     rpr_source_days = 0
     rpr_filtered_days = 0
+    policy_trades: list[float] = []
+    policy_triggers: list[float] = []
+    derived_trades: list[float] = []
+    derived_triggers: list[float] = []
+    resolved_trades: list[float] = []
+    resolved_triggers: list[float] = []
+    session_cap_samples: dict[str, list[float]] = {}
+    strict_days = 0
+    legacy_days = 0
 
     for report in daily_reports:
         data_quality = report.get("llm_data_quality") or "ok"
@@ -458,6 +478,33 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
             brake_counts["plan_limit"] += 1
         else:
             brake_counts["neither"] += 1
+        cap_state = report.get("cap_state") or {}
+        policy_cap = cap_state.get("policy") or {}
+        derived_cap = cap_state.get("derived") or {}
+        resolved_cap = cap_state.get("resolved") or {}
+        if policy_cap.get("max_trades_per_day") is not None:
+            policy_trades.append(policy_cap["max_trades_per_day"])
+        if policy_cap.get("max_triggers_per_symbol_per_day") is not None:
+            policy_triggers.append(policy_cap["max_triggers_per_symbol_per_day"])
+        if derived_cap.get("max_trades_per_day") is not None:
+            derived_trades.append(derived_cap["max_trades_per_day"])
+        if derived_cap.get("max_triggers_per_symbol_per_day") is not None:
+            derived_triggers.append(derived_cap["max_triggers_per_symbol_per_day"])
+        if resolved_cap.get("max_trades_per_day") is not None:
+            resolved_trades.append(resolved_cap["max_trades_per_day"])
+        if resolved_cap.get("max_triggers_per_symbol_per_day") is not None:
+            resolved_triggers.append(resolved_cap["max_triggers_per_symbol_per_day"])
+        for window, cap in (cap_state.get("session_caps") or {}).items():
+            try:
+                val = float(cap)
+            except (TypeError, ValueError):
+                continue
+            session_cap_samples.setdefault(str(window), []).append(val)
+        flags = cap_state.get("flags") or {}
+        if flags.get("strict_fixed_caps"):
+            strict_days += 1
+        elif flags:
+            legacy_days += 1
 
     def _finalize_quality(agg_map: dict[str, dict[str, float | int]]) -> dict[str, dict[str, float]]:
         finalized: dict[str, dict[str, float]] = {}
@@ -546,6 +593,27 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
         "llm_rpr_source_days": rpr_source_days,
         "llm_rpr_filtered_days": rpr_filtered_days,
     }
+    cap_summary = {
+        "policy": {
+            "max_trades_per_day": _cap_stats(policy_trades),
+            "max_triggers_per_symbol_per_day": _cap_stats(policy_triggers),
+        },
+        "derived": {
+            "max_trades_per_day": _cap_stats(derived_trades),
+            "max_triggers_per_symbol_per_day": _cap_stats(derived_triggers),
+        },
+        "resolved": {
+            "max_trades_per_day": _cap_stats(resolved_trades),
+            "max_triggers_per_symbol_per_day": _cap_stats(resolved_triggers),
+        },
+        "session_caps": {window: _cap_stats(values) for window, values in session_cap_samples.items()},
+        "flags": {
+            "strict_fixed_caps_days": strict_days,
+            "legacy_mode_days": legacy_days,
+        },
+    }
+    # Remove None entries for cleaner output.
+    summary["cap_state"] = cap_summary
     if risk_profile_snapshot:
         summary["risk_profile"] = risk_profile_snapshot
 
@@ -567,7 +635,12 @@ def write_run_summary(
 ) -> dict[str, Any]:
     """Build and write a run summary JSON next to daily reports."""
 
-    if baseline_summary is None and baseline_summary_path and baseline_summary_path.exists():
+    if (
+        baseline_summary is None
+        and baseline_summary_path
+        and baseline_summary_path.exists()
+        and baseline_summary_path.is_file()
+    ):
         try:
             baseline_summary = json.loads(baseline_summary_path.read_text())
         except json.JSONDecodeError:

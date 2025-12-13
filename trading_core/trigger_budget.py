@@ -32,6 +32,7 @@ def enforce_trigger_budget(
     plan: StrategyPlan,
     default_cap: int = 6,
     fallback_symbols: Iterable[str] | None = None,
+    resolved_cap: int | None = None,
 ) -> tuple[StrategyPlan, Dict[str, int]]:
     """Return a new StrategyPlan with triggers trimmed to declared budgets."""
 
@@ -46,7 +47,8 @@ def enforce_trigger_budget(
             grouped.setdefault(symbol, [])
 
     trimmed_triggers: List[TriggerCondition] = []
-    global_cap = max(0, plan.max_triggers_per_symbol_per_day or default_cap or 0)
+    cap_source = resolved_cap if resolved_cap is not None else plan.max_triggers_per_symbol_per_day
+    global_cap = max(0, cap_source or default_cap or 0)
 
     for symbol, triggers in grouped.items():
         unique = _dedupe_near_duplicates(triggers)
