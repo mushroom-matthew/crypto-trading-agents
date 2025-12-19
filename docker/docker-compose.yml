@@ -12,7 +12,7 @@ services:
 
   temporal-worker:
     build: ..
-    command: ["python", "worker/main.py"]
+    command: ["python", "worker/run.py"]
     depends_on:
       - temporal-server
     environment:
@@ -27,51 +27,35 @@ services:
       - COINBASE_API_KEY=${COINBASE_API_KEY:-changeme}
     volumes:
       - ..:/app
+    profiles: ["legacy_live"]
 
   indicator-engine:
     build: ..
     command: ["python", "services/indicator_engine.py"]
     volumes:
       - ..:/app
+    profiles: ["legacy_live"]
 
-  llm-planner:
+  mcp-server:
     build: ..
-    command: ["python", "services/planner_agent.py"]
+    command: ["uv", "run", "uvicorn", "mcp_server.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      - temporal-server
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-changeme}
-    volumes:
-      - ..:/app
-
-  signal-agent:
-    build: ..
-    command: ["python", "services/signal_agent_service.py"]
-    volumes:
-      - ..:/app
-
-  judge-agent:
-    build: ..
-    command: ["python", "services/judge_agent_service.py"]
-    volumes:
-      - ..:/app
-
-  execution-agent:
-    build: ..
-    command: ["python", "services/execution_agent_service.py"]
-    environment:
-      - COINBASE_API_KEY=${COINBASE_API_KEY:-changeme}
-      - COINBASE_API_SECRET=${COINBASE_API_SECRET:-changeme}
-    volumes:
-      - ..:/app
-
-  backtester:
-    build: ..
-    command: ["python", "services/backtester_service.py"]
-    volumes:
-      - ..:/app
-
-  metrics-logger:
-    image: prom/prometheus:latest
+      - TEMPORAL_ADDRESS=temporal-server:7233
     ports:
-      - "9090:9090"
+      - "8080:8080"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ..:/app
+
+  ops-api:
+    build: ..
+    command: ["uv", "run", "python", "ops_api/app.py"]
+    environment:
+      - TRADING_STACK=${TRADING_STACK:-agent}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - LIVE_TRADING_ACK=${LIVE_TRADING_ACK:-false}
+    ports:
+      - "8081:8081"
+    volumes:
+      - ..:/app

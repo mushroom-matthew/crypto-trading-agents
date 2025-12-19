@@ -9,11 +9,13 @@ from typing import Any, Dict, List
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from uuid import uuid4
+from functools import partial
 
 from mcp.server.fastmcp import FastMCP
 import logging
 from temporalio.client import Client, RPCError, RPCStatusCode, WorkflowExecutionStatus
-from starlette.responses import JSONResponse, Response, StreamingResponse, PlainTextResponse
+from starlette.responses import JSONResponse, Response, PlainTextResponse
 from starlette.requests import Request
 
 # Import workflow classes
@@ -37,6 +39,8 @@ from agents.workflows import (
 )
 from tools.agent_logger import AgentLogger
 from metrics import list_metrics as registry_list_metrics
+from agents.event_emitter import emit_event, set_event_store
+from ops_api.event_store import EventStore
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="[%(asctime)s] %(levelname)s: %(message)s")
@@ -58,12 +62,36 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.temporal_utils import get_temporal_client
 from agents.strategy_planner import plan_strategy_spec
+from agents.runtime_mode import get_runtime_mode
 
 # Initialize FastMCP
 app = FastMCP("crypto-trading-server")
 
-# Simple in-memory signal log for backward compatibility
-signal_log: dict[str, list[dict]] = {}
+
+def configure_event_store(store: EventStore) -> None:
+    """Share a single EventStore across endpoints and emitters."""
+    global event_store, _append_event
+    event_store = store
+    set_event_store(store)
+    _append_event = partial(emit_event, store=event_store)
+
+
+configure_event_store(EventStore())
+
+
+
+@app.custom_route("/status", methods=["GET"])
+async def status(request: Request) -> Response:
+    """Expose runtime mode/latch state for Ops/UI."""
+    runtime = get_runtime_mode()
+    payload = {
+        "stack": runtime.stack,
+        "mode": runtime.mode,
+        "live_trading_ack": runtime.live_trading_ack,
+        "ui_unlock": runtime.ui_unlock,
+        "banner": runtime.banner,
+    }
+    return JSONResponse(payload)
 
 
 async def ensure_strategy_spec_handle(client: Client):
@@ -466,6 +494,15 @@ async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
     fills = await handle.result()
     logger.info("Order workflow %s completed with %d fills", workflow_id, len(fills))
     
+    # Emit order submitted event
+    await _append_event(
+        "order_submitted",
+        {"orders": [order.model_dump() for order in batch_intent.orders]},
+        source="place_mock_batch_order",
+        run_id=batch_intent.orders[0].symbol if batch_intent.orders else None,
+        correlation_id=workflow_id,
+    )
+    
     # Record all fills in ledger
     try:
         ledger_wf_id = os.environ.get("LEDGER_WF_ID", "mock-ledger")
@@ -489,6 +526,13 @@ async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
         for fill in fills:
             await ledger.signal("record_fill", fill)
             logger.info("Recorded fill in ledger: %s %s %s", fill["side"], fill["qty"], fill["symbol"])
+            await _append_event(
+                "fill",
+                fill,
+                source="place_mock_batch_order",
+                run_id=batch_intent.orders[0].symbol if batch_intent.orders else None,
+                correlation_id=fill.get("order_id"),
+            )
             
     except Exception as exc:
         logger.error("Failed to record fills in ledger: %s", exc)
@@ -1377,22 +1421,39 @@ def _log_tick_continuity_summary() -> None:
 
 @app.custom_route("/signal/{name}", methods=["POST"])
 async def record_signal(request: Request) -> Response:
-    """Record a signal event for services still using HTTP polling."""
+    """Record a signal event (durable via event store)."""
     name = request.path_params["name"]
-    logger.debug("Recording signal %s", name)
     payload = await request.json()
     ts = payload.get("ts")
     if ts is None:
         ts = int(datetime.now(timezone.utc).timestamp())
         payload["ts"] = ts
-    signal_log.setdefault(name, []).append(payload)
-    
+
+    event_type = "intent"
+    if name == "market_tick":
+        event_type = "tick"
+    elif name == "approved_intent":
+        event_type = "intent"
+    elif name == "order_submitted":
+        event_type = "order_submitted"
+    elif name == "position_update":
+        event_type = "position_update"
+
+    await _append_event(
+        event_type,
+        payload,
+        source=name,
+        run_id=payload.get("run_id"),
+        correlation_id=payload.get("correlation_id"),
+        dedupe_key=payload.get("dedupe_key"),
+    )
+
     # Log market tick data for continuity monitoring
     if name == "market_tick":
         try:
             symbol = payload.get("symbol")
             tick_timestamp = payload.get("timestamp", ts)
-            
+
             # Update tick statistics
             tick_stats["total_ticks"] += 1
             if symbol:
@@ -1402,13 +1463,12 @@ async def record_signal(request: Request) -> Response:
                         "first_timestamp": tick_timestamp,
                         "last_timestamp": tick_timestamp
                     }
-                
+
                 symbol_stats = tick_stats["symbols"][symbol]
                 symbol_stats["count"] += 1
                 symbol_stats["last_timestamp"] = max(symbol_stats["last_timestamp"], tick_timestamp)
                 symbol_stats["first_timestamp"] = min(symbol_stats["first_timestamp"], tick_timestamp)
-            
-            # Log individual tick
+
             market_tick_logger.log_action(
                 action_type="market_tick_received",
                 details={
@@ -1425,46 +1485,32 @@ async def record_signal(request: Request) -> Response:
                 signal_name=name,
                 payload_timestamp=ts
             )
-            
-            # Log periodic summary (every 100 ticks)
+
             if tick_stats["total_ticks"] % 100 == 0:
                 _log_tick_continuity_summary()
-                
+
         except Exception as log_error:
             logger.error(f"Failed to log market tick: {log_error}")
-    
+
     logger.debug("Recorded signal %s", name)
     return Response(status_code=204)
 
 
 @app.custom_route("/signal/{name}", methods=["GET"])
 async def fetch_signals(request: Request) -> Response:
-    """Stream signal events newer than the provided ``after`` timestamp."""
+    """Return signal events newer than the provided ``after`` timestamp."""
 
     name = request.path_params["name"]
     after = int(request.query_params.get("after", "0"))
+    after_dt = datetime.fromtimestamp(after, tz=timezone.utc)
 
-    async def event_stream() -> Any:
-        cursor = after
-        idx = 0
-        events = signal_log.setdefault(name, [])
-        # Skip past events before ``cursor``
-        while idx < len(events) and events[idx].get("ts", 0) <= cursor:
-            idx += 1
-
-        while not await request.is_disconnected():
-            events = signal_log.get(name, [])
-            while idx < len(events):
-                evt = events[idx]
-                idx += 1
-                ts = evt.get("ts", 0)
-                if ts > cursor:
-                    cursor = ts
-                yield f"data: {json.dumps(evt)}\n\n"
-            await asyncio.sleep(0.1)
-
-    logger.debug("Starting signal stream for %s after %s", name, after)
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    events = await asyncio.to_thread(event_store.list_events, 500)
+    filtered = [
+        json.loads(evt.model_dump_json())
+        for evt in events
+        if evt.source == name and evt.ts.replace(tzinfo=timezone.utc) > after_dt
+    ]
+    return JSONResponse(filtered)
 
 
 @app.custom_route("/healthz", methods=["GET"])

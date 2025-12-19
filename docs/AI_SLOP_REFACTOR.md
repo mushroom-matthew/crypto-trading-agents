@@ -101,14 +101,14 @@ This replaces prior drafts; keep it current as changes land.
 - CI fails on new root artifacts or unused scripts.
 
 ## Suggested PR Sequencing (updated)
-1. Worker allowlists + profile split
-2. Quarantine legacy behind profile + CI import fence
-3. Contract-first schemas (events/read models/Ops API spec)
-4. Compose canonical + initial UI scaffold (even if minimal)
-5. Ops API read endpoints + UI parity for status/plan/block reasons
-6. Durable event log + materializer; remove in-memory signal log
-7. LLM client factory + Langfuse spans
-8. WalletProvider + paper/live gating + UI unlock
+1. Worker allowlists + profile split **(DONE)**
+2. Quarantine legacy behind profile + CI import fence **(DONE; manifest/guard added)** 
+3. Contract-first schemas (events/read models/Ops API spec) **(DONE: ops_api/schemas.py, docs/contracts/events.md)**
+4. Compose canonical + initial UI scaffold (even if minimal) **(IN PROGRESS: compose updated to use worker/run.py + ops_api service; MCP server container added; legacy services gated behind `legacy_live` profile; UI now served from ops_api; tmux doc archived; run_stack.sh still present until parity proven)**
+5. Ops API read endpoints + UI parity for status/plan/block reasons **(IN PROGRESS: ops_api/app.py wired to materializer and serves the static UI with permissive CORS; UI consuming /status, /workflows, /block_reasons, /fills; needs richer cards + commands)**
+6. Durable event log + materializer; remove in-memory signal log **(IN PROGRESS: SQLite event_store + materializer added; /signal now writes to event store and returns durable events with a test; fills emit events; execution agent emits trade_blocked; LLM client emits llm_call; position updates emit position_update with price/PnL; order submissions emit order_submitted; broker/plan/judge emit intent/plan_generated/plan_judged. Remaining: ensure all clients use durable events and archive legacy signal docs.)** 
+7. LLM client factory + Langfuse spans **(IN PROGRESS: client factory added; strategist, execution, judge, broker, context_manager now use Langfuse-instrumented client)**
+8. WalletProvider + paper/live gating + UI unlock **(IN PROGRESS: WalletProvider interface with Paper/Live placeholder added; runtime latches enforced; execution ledger debits/credits cash via provider and emits paper balance; live provider remains stubbed but guarded; tests ensure paper runs never touch live path)** 
 9. Slop purge + dependency/workspace hygiene
 
 ## Done criteria for removing tmux (UI-driven)

@@ -9,11 +9,14 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Protocol
+from uuid import uuid4
 
-from openai import OpenAI
 from pydantic import ValidationError
 
 from agents.langfuse_utils import langfuse_span
+from agents.llm.client_factory import get_llm_client
+from ops_api.event_store import EventStore
+from ops_api.schemas import Event
 from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint, StrategyPlan
 
 
@@ -43,10 +46,27 @@ class LLMClient:
     @property
     def client(self) -> OpenAI:
         if self._client is None:
-            self._client = OpenAI()
+            self._client = get_llm_client()
         return self._client
 
     def generate_plan(self, llm_input: LLMInput, prompt_template: str | None = None) -> StrategyPlan:
+        def _emit_llm_event(payload: Dict[str, Any]) -> None:
+            try:
+                store = EventStore()
+                event = Event(
+                    event_id=str(uuid4()),
+                    ts=datetime.now(timezone.utc),
+                    source="llm_client",
+                    type="llm_call",  # type: ignore[arg-type]
+                    payload=payload,
+                    dedupe_key=None,
+                    run_id=None,
+                    correlation_id=None,
+                )
+                store.append(event)
+            except Exception:
+                pass
+
         if self.transport:
             raw = self.transport(llm_input.to_json())
             plan = StrategyPlan.from_json(raw)
@@ -57,6 +77,13 @@ class LLMClient:
                 "llm_failure_reason": None,
                 "raw_output": raw,
             }
+            _emit_llm_event(
+                {
+                    "model": self.model,
+                    "source": "transport",
+                    "raw_len": len(raw or ""),
+                }
+            )
             return plan
         last_error: Exception | None = None
         raw_output: str | None = None
@@ -88,6 +115,15 @@ class LLMClient:
                         "llm_failure_reason": None,
                         "raw_output": raw_output,
                     }
+                    _emit_llm_event(
+                        {
+                            "model": self.model,
+                            "source": "llm",
+                            "raw_len": len(raw_output or ""),
+                            "tokens_in": completion.usage.input_tokens if hasattr(completion, "usage") else 0,
+                            "tokens_out": completion.usage.output_tokens if hasattr(completion, "usage") else 0,
+                        }
+                    )
                     return plan
             except ValidationError as exc:
                 last_error = exc
@@ -108,6 +144,14 @@ class LLMClient:
             "llm_failure_reason": str(last_error) if last_error else "unknown_failure",
             "raw_output": raw_output,
         }
+        _emit_llm_event(
+            {
+                "model": self.model,
+                "source": "fallback",
+                "raw_len": len(raw_output or ""),
+                "llm_failure_reason": str(last_error) if last_error else None,
+            }
+        )
         return plan
 
     def _extract_plan_json(self, content: str) -> Dict[str, Any]:

@@ -7,7 +7,8 @@ import logging
 from typing import Any, Dict, List
 import tiktoken
 
-from agents.langfuse_utils import openai, create_openai_client, init_langfuse
+from agents.langfuse_utils import openai, init_langfuse
+from agents.llm.client_factory import get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class ContextManager:
         self.summary_threshold = summary_threshold
         self.min_recent_messages = min_recent_messages
         init_langfuse()
-        self.openai_client = openai_client or create_openai_client()
+        self.openai_client = openai_client or get_llm_client()
         
         # Initialize tokenizer
         try:

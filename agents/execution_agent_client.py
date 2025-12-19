@@ -36,7 +36,8 @@ EXECUTION_AGENT
 )
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
-from agents.langfuse_utils import create_openai_client, init_langfuse
+from agents.langfuse_utils import init_langfuse
+from agents.llm.client_factory import get_llm_client
 from tools.strategy_executor import evaluate_signals, TradeSignal
 from tools.strategy_spec import PositionState, StrategySpec
 from tools import execution_tools
@@ -61,7 +62,7 @@ ALLOWED_TOOLS = {
 logger = setup_logging(__name__)
 
 init_langfuse()
-openai_client = create_openai_client()
+openai_client = get_llm_client()
 
 DEFAULT_STRATEGY_TIMEFRAME = os.environ.get("STRATEGY_TIMEFRAME", "15m")
 USE_LEGACY_LLM_EXECUTION = os.environ.get("USE_LEGACY_LLM_EXECUTION", "0") == "1"
@@ -429,6 +430,23 @@ def _should_execute_signal(run: StrategyRun, spec: StrategySpec, ts: int) -> Tup
     outcome = event_list[-1]
     if outcome.get("action") == "executed":
         return True, ""
+
+    # Emit a durable block reason event for Ops visibility
+    try:
+        from mcp_server.app import _append_event  # type: ignore
+
+        asyncio.create_task(
+            _append_event(
+                "trade_blocked",
+                {"reason": outcome.get("reason", "blocked"), "outcome": outcome},
+                source="execution_agent",
+                run_id=run.run_id,
+                correlation_id=outcome.get("trigger_id"),
+            )
+        )
+    except Exception:
+        pass
+
     return False, outcome.get("reason", "blocked")
 
 
@@ -718,16 +736,16 @@ async def run_execution_agent(server_url: str = "http://localhost:8080") -> None
                                 if isinstance(tick, dict):
                                     # Try both 'ts' and 'timestamp' fields
                                     tick_ts = tick.get('ts', 0) or tick.get('timestamp', 0)
-                                        if tick_ts > 0:
-                                            max_timestamp = max(max_timestamp, tick_ts)
-                                            latest_price = tick.get("price")
-                                            if latest_price is not None:
-                                                prev_ts = latest_symbol_context.get(symbol, {}).get("timestamp", -1)
-                                                if tick_ts >= prev_ts:
-                                                    latest_symbol_context[symbol] = {
-                                                        "price": float(latest_price),
-                                                        "timestamp": tick_ts,
-                                                    }
+                                    if tick_ts > 0:
+                                        max_timestamp = max(max_timestamp, tick_ts)
+                                        latest_price = tick.get("price")
+                                        if latest_price is not None:
+                                            prev_ts = latest_symbol_context.get(symbol, {}).get("timestamp", -1)
+                                            if tick_ts >= prev_ts:
+                                                latest_symbol_context[symbol] = {
+                                                    "price": float(latest_price),
+                                                    "timestamp": tick_ts,
+                                                }
                     
                     if max_timestamp > 0:
                         latest_processed_ts = max_timestamp

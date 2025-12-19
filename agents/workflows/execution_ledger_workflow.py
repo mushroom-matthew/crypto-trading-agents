@@ -10,6 +10,7 @@ from temporalio import workflow
 from temporalio.client import Client
 
 from agents.activities.ledger import persist_fill_activity
+from agents.wallet_provider import get_wallet_provider, PaperWalletProvider, WalletProvider
 import logging
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class ExecutionLedgerWorkflow:
         self.trading_wallet_id = self._env_int("LEDGER_TRADING_WALLET_ID")
         self.trading_wallet_name = os.environ.get("LEDGER_TRADING_WALLET_NAME", "mock_trading")
         self.equity_wallet_name = os.environ.get("LEDGER_EQUITY_WALLET_NAME", "system_equity")
+        self.wallet_provider: WalletProvider | None = None
 
     def _env_int(self, key: str) -> int | None:
         value = os.environ.get(key)
@@ -82,6 +84,9 @@ class ExecutionLedgerWorkflow:
     @workflow.signal
     def record_fill(self, fill: Dict) -> None:
         sequence = self.fill_count + 1
+        if self.wallet_provider is None:
+            # Initialize wallet provider on first fill
+            self.wallet_provider = get_wallet_provider({"CASH": self.cash})
         if self.enable_real_ledger:
             try:
                 info = workflow.info()
@@ -125,6 +130,11 @@ class ExecutionLedgerWorkflow:
         current_qty = self.positions.get(symbol, Decimal("0"))
         if side == "BUY":
             self.cash -= cost
+            try:
+                if self.wallet_provider:
+                    self.wallet_provider.debit("CASH", cost)
+            except Exception:
+                pass
             new_qty = current_qty + qty
             
             # Calculate weighted average entry price
@@ -141,6 +151,11 @@ class ExecutionLedgerWorkflow:
             self.positions[symbol] = new_qty
         else:  # SELL
             self.cash += cost
+            try:
+                if self.wallet_provider:
+                    self.wallet_provider.credit("CASH", cost)
+            except Exception:
+                pass
             new_qty = current_qty - qty
             
             # Calculate realized PnL for the sold quantity
@@ -161,13 +176,45 @@ class ExecutionLedgerWorkflow:
                         workflow.logger.info(message)
                     except Exception:
                         logger.info(message)
-            
-            if new_qty <= 0:
-                self.positions.pop(symbol, None)
-                self.entry_price.pop(symbol, None)
-            else:
-                self.positions[symbol] = new_qty
+        
+        if new_qty <= 0:
+            self.positions.pop(symbol, None)
+            self.entry_price.pop(symbol, None)
+        else:
+            self.positions[symbol] = new_qty
         self.fill_count += 1
+
+        # Emit position update event for ops telemetry
+        try:
+            from agents.event_emitter import emit_event  # type: ignore
+            from agents.wallet_provider import get_wallet_provider, PaperWalletProvider  # type: ignore
+
+            unrealized_pnl = float(self.get_unrealized_pnl_decimal())
+            payload = {
+                "symbol": symbol,
+                "qty": float(self.positions.get(symbol, Decimal("0"))),
+                "cash": float(self.cash),
+                "realized_pnl": float(self.realized_pnl),
+                "unrealized_pnl": unrealized_pnl,
+                "pnl": float(self.realized_pnl) + unrealized_pnl,
+                "mark_price": float(price),
+                "entry_price": float(self.entry_price.get(symbol, Decimal("0"))) if symbol in self.entry_price else None,
+                "scraped_profits": float(self.scraped_profits),
+            }
+            # Paper wallet snapshot for visibility; live provider would integrate real balances.
+            if isinstance(self.wallet_provider, PaperWalletProvider):
+                payload["paper_balance_cash"] = float(self.wallet_provider.get_balance("CASH"))
+            workflow.create_task(
+                emit_event(
+                    "position_update",
+                    payload,
+                    source="execution_ledger",
+                    run_id=info.workflow_id if "info" in locals() and info else None,
+                    correlation_id=str(sequence),
+                )
+            )
+        except Exception:
+            pass
 
     async def _persist_fill(self, payload: Dict[str, Any]) -> None:
         try:

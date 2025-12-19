@@ -168,7 +168,7 @@ Each block corresponds to one or more MCP tools (Temporal workflows) described b
 | `JudgeAgentWorkflow`     | Individual judge agent logging and evaluations  | Performance analysis |
 | `BrokerAgentWorkflow`    | Broker agent state and user interaction logging | User interactions    |
 
-## Getting Started
+## Getting Started (Compose-first)
 
 ### Prerequisites
 
@@ -176,7 +176,7 @@ Each block corresponds to one or more MCP tools (Temporal workflows) described b
 | ------------ | ------------- | --------------------------------------------- |
 | Python       | 3.11 or newer | Data & strategy agents                        |
 | Temporal CLI | 1.24+         | `brew install temporal` or use Temporal Cloud |
-| tmux         | latest        | Required for `run_stack.sh` start script      |
+| Docker + Compose | latest    | Required for `docker compose up` bootstrap    |
 
 Required environment variables:
 
@@ -190,12 +190,12 @@ Required environment variables:
 
 ### Preparing Coinbase Wallets for Live Trading
 
-1. **Fund Coinbase wallets** – Deposit ETH and BTC into the Coinbase account tied to your API key. Only these balances will be used; no transfers occur until you explicitly allow trading.
+1. **Fund Coinbase wallets** – Deposit ETH and BTC into the Coinbase account tied to your API key. Only these balances will be used; live mode also requires `TRADING_MODE=live` **and** `LIVE_TRADING_ACK=true`.
 2. **Seed the ledger** – Pull wallets/balances into the internal database so Temporal workflows see real holdings:
    ```bash
    UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main ledger seed-from-coinbase
    ```
-3. **Inspect wallet IDs and cached balances** – Use the new wallet inspector to note the `wallet_id` for ETH and BTC:
+3. **Inspect wallet IDs and cached balances** – Use the wallet inspector to note the `wallet_id` for ETH and BTC:
    ```bash
    UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main wallet list
    ```
@@ -284,25 +284,31 @@ Open <http://localhost:8081/> to:
 - Inspect Coinbase-linked wallets, tradable fractions, and balances per strategy/portfolio.
 - Review the short-term backlog (see `docs/ROADMAP.md`) and plan future automation without leaving the UI.
 
-# Launch the full stack
-./run_stack.sh
+# Launch the full stack (Compose)
+```bash
+# baseline (agent stack + MCP + Ops API + UI)
+docker compose up
+
+# legacy services only when you explicitly need them
+docker compose --profile legacy_live up
 ```
 
-Point your agent workers at `localhost:8080` (default MCP port) and confirm health at <http://localhost:8080/healthz>.
+What runs:
+- MCP server at `http://localhost:8080` (tools/endpoints).
+- Ops API + UI at `http://localhost:8081/` (UI served by the Ops API).
+- Temporal dev server at `localhost:7233`.
+
+Notes:
+- Set `OPENAI_API_KEY` (and other secrets) in your shell or `.env` before composing.
+- Only use the `legacy_live` profile when you intentionally need legacy services; default stack is agent-only.
 
 ## Demo
 
-The quickest way to see the stack in action is to run the included `run_stack.sh` script which launches everything in a single `tmux` session.
-
-```bash
-./run_stack.sh
-```
-
-This starts the Temporal dev server, Python worker, MCP server and several sample agents. Each component runs in its own `tmux` pane so you can watch log output as orders flow through the system. Detach from the session with `Ctrl-b d` and reattach anytime by running the script again. Shutdown is as simple as ctrl+c in any tmux pane and then entering `tmux kill-server`
+The quickest way to see the stack in action is to run `docker compose up`, which launches the Temporal dev server, Python worker, MCP server, Ops API, and (once wired) UI. Logs stream via container output; use `docker compose logs -f` to inspect services. To stop, press `Ctrl+C` in the compose terminal.
 
 ### Walking through the demo
 
-1. Run the shell script `./run_stack.sh`
+1. Run `docker compose up`
 2. When prompted for trading pairs, tell the broker agent **"BTC/USD, ETH/USD, DOGE/USD"** (recommended 2-4 pairs for optimal performance).
 3. `start_market_stream` automatically loads 1 hour of historical data, then spawns a `subscribe_cex_stream` workflow that broadcasts each ticker to its `ComputeFeatureVector` child.
 4. The execution agent wakes up periodically via a scheduled workflow and analyzes market data to decide whether to trade using `place_mock_order`.
@@ -358,9 +364,10 @@ and `VECTOR_HISTORY_LIMIT` environment variables.
 │   ├── execution.py              # Order execution
 │   └── ...
 ├── mcp_server/               # FastAPI server exposing the tools
-├── worker/                   # Temporal worker loading workflows
+├── ops_api/                  # Ops API (UI backend) for status/controls
+├── worker/                   # Temporal worker (agent/legacy split)
 ├── tests/                    # Unit tests for tools and agents
-├── run_stack.sh             # tmux helper to launch local stack
+├── docker-compose.yml        # Canonical bootstrap
 └── ticker_ui_service.py     # Simple websocket ticker UI
 ```
 
@@ -374,6 +381,7 @@ and `VECTOR_HISTORY_LIMIT` environment variables.
 - **`performance_analysis.py`**: Comprehensive trading performance analysis tools
 - **`market_data.py`**: Historical data loading and streaming with configurable windows
 - **`agent_logger.py`**: Distributed logging system routing to individual agent workflows
+- **`ops_api/`**: Ops API (UI backend) exposing status, block reasons, events, and telemetry
 
 ## 🧠 LLM as Judge System
 

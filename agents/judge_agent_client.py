@@ -28,14 +28,16 @@ from agents.constants import (
 )
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
-from agents.langfuse_utils import create_openai_client, init_langfuse
+from agents.langfuse_utils import init_langfuse
+from agents.llm.client_factory import get_llm_client
+from agents.event_emitter import emit_event
 from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
 from services.risk_adjustment_service import multiplier_from_instruction
 
 logger = setup_logging(__name__, level="INFO")
 
 init_langfuse()
-openai_client = create_openai_client()
+openai_client = get_llm_client()
 
 
 def _split_notes_and_json(response_text: str) -> Tuple[str, str]:
@@ -737,6 +739,23 @@ Return ONLY the improved system prompt, no explanations."""
             handle = self.temporal_client.get_workflow_handle("judge-agent")
             await handle.signal("record_evaluation", evaluation)
             logger.info("Recorded evaluation with score %.1f", evaluation["overall_score"])
+            try:
+                payload = {
+                    "overall_score": evaluation.get("overall_score"),
+                    "component_scores": evaluation.get("component_scores"),
+                    "recommendations": evaluation.get("recommendations", []),
+                    "context_update": evaluation.get("context_update"),
+                    "strategy_replans": evaluation.get("strategy_replans", []),
+                }
+                await emit_event(
+                    "plan_judged",
+                    payload,
+                    source="judge_agent",
+                    run_id="judge-agent",
+                    correlation_id=str(evaluation.get("overall_score", "")),
+                )
+            except Exception:
+                logger.debug("Failed to emit plan_judged event", exc_info=True)
         except Exception as exc:
             logger.error("Failed to record evaluation: %s", exc)
     

@@ -1,23 +1,11 @@
 #!/usr/bin/env python
-"""Temporal worker entrypoint."""
+"""Backward-compatible worker entrypoint routing to ``worker/run.py``."""
 
 from __future__ import annotations
 
 import asyncio
-import importlib
-import os
-import pkgutil
-import sys
 from pathlib import Path
-from typing import Any, Iterable, Sequence
-from concurrent.futures import ThreadPoolExecutor
-
-from temporalio.client import Client
-from temporalio.worker import Worker
-# Import UnsandboxedWorkflowRunner from temporalio.worker to ensure
-# compatibility with latest Temporal SDK versions where the class is exported
-# directly from the worker package.
-from temporalio.worker import UnsandboxedWorkflowRunner
+import sys
 
 
 def _add_project_root_to_path() -> None:
@@ -27,79 +15,11 @@ def _add_project_root_to_path() -> None:
         sys.path.insert(0, str(root))
 
 
-def _discover_modules() -> Iterable[Any]:
-    """Yield all imported modules under ``tools`` and ``agents``."""
-    import tools
-    import agents
-    import workflows
-
-    # Include the base packages themselves
-    yield tools
-    yield agents
-    yield workflows
-
-    for finder, name, ispkg in pkgutil.walk_packages(tools.__path__, prefix="tools."):
-        try:
-            module = importlib.import_module(name)
-        except Exception as exc:  # pragma: no cover - import errors should not kill worker
-            print(f"Failed to import {name}: {exc}", file=sys.stderr)
-            continue
-        yield module
-
-    for finder, name, ispkg in pkgutil.walk_packages(agents.__path__, prefix="agents."):
-        try:
-            module = importlib.import_module(name)
-        except Exception as exc:  # pragma: no cover - import errors should not kill worker
-            print(f"Failed to import {name}: {exc}", file=sys.stderr)
-            continue
-        yield module
-
-    for finder, name, ispkg in pkgutil.walk_packages(workflows.__path__, prefix="workflows."):
-        try:
-            module = importlib.import_module(name)
-        except Exception as exc:
-            print(f"Failed to import {name}: {exc}", file=sys.stderr)
-            continue
-        yield module
-
-
-def _collect_definitions(modules: Iterable[Any]) -> tuple[Sequence[type], Sequence[Any]]:
-    """Collect unique workflow and activity definitions from modules."""
-    workflows: set[type] = set()
-    activities: set[Any] = set()
-    for module in modules:
-        for obj in module.__dict__.values():
-            if hasattr(obj, "__temporal_workflow_definition"):
-                workflows.add(obj)
-            elif hasattr(obj, "__temporal_activity_definition"):
-                activities.add(obj)
-    return list(workflows), list(activities)
-
-
 async def main() -> None:
     _add_project_root_to_path()
+    from worker.run import main as run_main
 
-    modules = list(_discover_modules())
-    workflows, activities = _collect_definitions(modules)
-
-    print(f"Loaded {len(workflows)} workflows and {len(activities)} activities")
-
-    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
-    client = await Client.connect(address, namespace=namespace)
-    task_queue = os.environ.get("TASK_QUEUE", "mcp-tools")
-
-    with ThreadPoolExecutor() as activity_executor:
-        worker = Worker(
-            client,
-            task_queue=task_queue,
-            workflows=workflows,
-            activities=activities,
-            activity_executor=activity_executor,
-            workflow_runner=UnsandboxedWorkflowRunner(),
-        )
-
-        await worker.run()
+    await run_main()
 
 
 if __name__ == "__main__":

@@ -10,16 +10,18 @@ from openai import OpenAI
 from temporalio.client import Client, RPCError, RPCStatusCode
 
 from agents.logging_utils import setup_logging
+from agents.event_emitter import emit_event
 from agents.prompt_manager import PromptManager
 from agents.temporal_utils import connect_temporal
-from agents.langfuse_utils import create_openai_client, init_langfuse
+from agents.langfuse_utils import init_langfuse
+from agents.llm.client_factory import get_llm_client
 from agents.workflows.strategy_spec_workflow import StrategySpecWorkflow
 from tools.strategy_spec import StrategySpec
 
 logger = setup_logging(__name__)
 
 init_langfuse()
-openai_client: OpenAI = create_openai_client()
+openai_client: OpenAI = get_llm_client()
 prompt_manager = PromptManager()
 
 
@@ -124,4 +126,14 @@ async def plan_strategy_spec(
         "Strategy planned",
         extra={"strategy_id": spec.strategy_id, "market": market, "timeframe": timeframe},
     )
+    try:
+        await emit_event(
+            "plan_generated",
+            spec.model_dump(),
+            source="strategy_planner",
+            run_id=spec.strategy_id,
+            correlation_id=spec.strategy_id,
+        )
+    except Exception:
+        logger.debug("Failed to emit plan_generated event", exc_info=True)
     return spec.model_dump()

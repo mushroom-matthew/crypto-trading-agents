@@ -11,7 +11,9 @@ from agents.utils import stream_chat_completion, tool_result_data
 from agents.context_manager import create_context_manager
 from agents.constants import ORANGE, PINK, RESET, EXCHANGE, DEFAULT_LOG_LEVEL, BROKER_AGENT
 from agents.logging_utils import setup_logging
-from agents.langfuse_utils import create_openai_client, init_langfuse
+from agents.langfuse_utils import init_langfuse
+from agents.llm.client_factory import get_llm_client
+from agents.event_emitter import emit_event
 
 # Tools this agent is allowed to call
 ALLOWED_TOOLS = {
@@ -37,7 +39,7 @@ ALLOWED_TOOLS = {
 logger = setup_logging(__name__)
 
 init_langfuse()
-_openai_client = create_openai_client()
+_openai_client = get_llm_client()
 
 
 SYSTEM_PROMPT = (
@@ -173,6 +175,14 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
                     continue
 
                 logger.info("User command: %s", user_request)
+                asyncio.create_task(
+                    emit_event(
+                        "intent",
+                        {"text": user_request},
+                        source="broker_agent",
+                        correlation_id=str(len(conversation)),
+                    )
+                )
                 conversation.append({"role": "user", "content": user_request})
 
                 tools_payload = [
