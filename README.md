@@ -251,7 +251,7 @@ The production ledger stack lives under `app/` and exposes a CLI for seeding wal
    uv run python -m app.cli.main wallet set-tradeable-fraction --wallet 1 --frac 0.5
    ```
 
-5. Place a cost-gated trade:
+5. Place a cost-gated trade **(LIVE Coinbase call — not a mock)**:
 
    ```bash
    uv run python -m app.cli.main trade place \
@@ -263,6 +263,7 @@ The production ledger stack lives under `app/` and exposes a CLI for seeding wal
      --expected-edge 15 \
      --idempotency-key demo-trade-001
    ```
+   ⚠️ This hits Coinbase Advanced Trade with your API keys. There is no paper/dry-run flag in this CLI; only the cost gate and your wallet fraction guard execution. Use sandbox/test credentials or skip this step if you do not intend to place a real order.
 
 6. Reconcile the internal ledger with Coinbase balances (writes a drift report to stdout):
 
