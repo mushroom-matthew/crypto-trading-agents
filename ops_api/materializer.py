@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from datetime import datetime
 from typing import List
+import logging
 
 from ops_api.event_store import EventStore
 from ops_api.schemas import (
@@ -16,6 +18,9 @@ from ops_api.schemas import (
     PositionSnapshot,
     RunSummary,
 )
+from ops_api.temporal_client import get_runtime_mode
+
+logger = logging.getLogger(__name__)
 
 
 class Materializer:
@@ -102,33 +107,62 @@ class Materializer:
         return telemetry
 
     def list_runs(self) -> List[RunSummary]:
-        # For now, synthesize from events; later use Temporal visibility + durable state.
+        """
+        Synthesize run summaries from events.
+
+        Note: Status is determined by recent activity (events within last 5 minutes = running).
+        Mode is read from actual runtime configuration.
+        TODO: Integrate with Temporal visibility API for true workflow status.
+        """
         events = self.store.list_events(limit=500)
         summaries: dict[str, RunSummary] = {}
         now = datetime.utcnow()
+
+        # Get actual runtime mode
+        try:
+            actual_mode = get_runtime_mode()
+        except Exception as e:
+            logger.warning("Failed to get runtime mode, defaulting to 'paper': %s", e)
+            actual_mode = "paper"
+
         for event in events:
             rid = event.run_id or "default"
             if rid not in summaries:
+                # Determine status based on recent activity
+                # If last event is within 5 minutes, consider it running, otherwise stopped
+                time_since_update = (now - event.ts.replace(tzinfo=None)).total_seconds()
+                status = "running" if time_since_update < 300 else "stopped"
+
                 summaries[rid] = RunSummary(
                     run_id=rid,
                     latest_plan_id=None,
                     latest_judge_id=None,
-                    status="running",
+                    status=status,  # type: ignore[arg-type]
                     last_updated=event.ts,
-                    mode="paper",
+                    mode=actual_mode,  # Use actual mode from config
                 )
             summaries[rid].last_updated = max(summaries[rid].last_updated, event.ts)
+
+            # Update status based on most recent event
+            time_since_update = (now - summaries[rid].last_updated.replace(tzinfo=None)).total_seconds()
+            summaries[rid].status = "running" if time_since_update < 300 else "stopped"  # type: ignore[assignment]
+
             if event.type == "plan_generated":
                 summaries[rid].latest_plan_id = event.payload.get("plan_id")
             if event.type == "plan_judged":
                 summaries[rid].latest_judge_id = event.payload.get("judge_id")
-        return list(summaries.values()) or [
-            RunSummary(
-                run_id="execution",
-                latest_plan_id=None,
-                latest_judge_id=None,
-                status="running",
-                last_updated=now,
-                mode="paper",
-            )
-        ]
+
+        # Only fall back to default if no events exist at all
+        if not summaries:
+            return [
+                RunSummary(
+                    run_id="no_events",
+                    latest_plan_id=None,
+                    latest_judge_id=None,
+                    status="stopped",  # No activity = stopped
+                    last_updated=now,
+                    mode=actual_mode,
+                )
+            ]
+
+        return list(summaries.values())

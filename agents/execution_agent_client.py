@@ -38,6 +38,7 @@ from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import init_langfuse
 from agents.llm.client_factory import get_llm_client
+from agents.event_emitter import emit_event
 from tools.strategy_executor import evaluate_signals, TradeSignal
 from tools.strategy_spec import PositionState, StrategySpec
 from tools import execution_tools
@@ -433,19 +434,23 @@ def _should_execute_signal(run: StrategyRun, spec: StrategySpec, ts: int) -> Tup
 
     # Emit a durable block reason event for Ops visibility
     try:
-        from mcp_server.app import _append_event  # type: ignore
-
         asyncio.create_task(
-            _append_event(
+            emit_event(
                 "trade_blocked",
-                {"reason": outcome.get("reason", "blocked"), "outcome": outcome},
+                {
+                    "reason": outcome.get("reason", "blocked"),
+                    "trigger_id": outcome.get("trigger_id"),
+                    "symbol": outcome.get("symbol", "unknown"),
+                    "side": outcome.get("side", "unknown"),
+                    "detail": outcome.get("detail", ""),
+                },
                 source="execution_agent",
                 run_id=run.run_id,
                 correlation_id=outcome.get("trigger_id"),
             )
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to emit trade_blocked event: %s", e)
 
     return False, outcome.get("reason", "blocked")
 
@@ -575,14 +580,61 @@ async def _execute_strategy_specs(
                 signal.reason,
             )
             result = await session.call_tool("place_mock_order", payload)
+            result_data = tool_result_data(result)
             orders_executed.append(
                 {
                     "symbol": symbol,
                     "signal": signal.model_dump(),
                     "order": payload,
-                    "result": tool_result_data(result),
+                    "result": result_data,
                 }
             )
+
+            # Emit order_submitted and fill events
+            try:
+                order_payload = payload["orders"][0]
+                correlation_id = f"{spec.strategy_id}-{symbol}-{ts.isoformat()}"
+
+                # Emit order_submitted event
+                asyncio.create_task(
+                    emit_event(
+                        "order_submitted",
+                        {
+                            "symbol": symbol,
+                            "side": order_payload["side"],
+                            "qty": order_payload["qty"],
+                            "price": order_payload.get("price"),
+                            "type": order_payload["type"],
+                            "strategy_id": spec.strategy_id,
+                            "signal_reason": signal.reason,
+                        },
+                        source="execution_agent",
+                        run_id=run.run_id,
+                        correlation_id=correlation_id,
+                    )
+                )
+
+                # Emit fill event (for mock orders, fill is immediate)
+                if result_data and isinstance(result_data, list) and len(result_data) > 0:
+                    fill_data = result_data[0]
+                    asyncio.create_task(
+                        emit_event(
+                            "fill",
+                            {
+                                "symbol": fill_data.get("symbol", symbol),
+                                "side": fill_data.get("side", order_payload["side"]),
+                                "qty": fill_data.get("qty", order_payload["qty"]),
+                                "fill_price": fill_data.get("fill_price", order_payload.get("price")),
+                                "cost": fill_data.get("cost", 0),
+                                "strategy_id": spec.strategy_id,
+                            },
+                            source="execution_agent",
+                            run_id=run.run_id,
+                            correlation_id=correlation_id,
+                        )
+                    )
+            except Exception as e:
+                logger.warning("Failed to emit order/fill events: %s", e)
     if orders_executed:
         decisions = [
             {

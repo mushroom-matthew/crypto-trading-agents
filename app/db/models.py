@@ -64,6 +64,24 @@ class ReservationState(enum.Enum):
     canceled = "canceled"
 
 
+class BacktestStatus(enum.Enum):
+    """Backtest run status."""
+
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class RiskAllocationStatus(enum.Enum):
+    """Risk allocation lifecycle states."""
+
+    claimed = "claimed"
+    used = "used"
+    released = "released"
+    expired = "expired"
+
+
 PK_BIGINT = BigInteger().with_variant(Integer, "sqlite")
 
 
@@ -237,6 +255,88 @@ class CostEstimate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class BlockEvent(Base):
+    """Individual trade block events with full context for UI visibility."""
+
+    __tablename__ = "block_events"
+    __table_args__ = (
+        Index("ix_block_events_ts_reason", "timestamp", "reason"),
+        Index("ix_block_events_run_id", "run_id"),
+        Index("ix_block_events_correlation_id", "correlation_id"),
+    )
+
+    id: Mapped[int] = mapped_column(PK_BIGINT, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    trigger_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    qty: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    reason: Mapped[str] = mapped_column(String(50), nullable=False)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class RiskAllocation(Base):
+    """Risk budget tracking (claimed → used → released)."""
+
+    __tablename__ = "risk_allocations"
+    __table_args__ = (
+        Index("ix_risk_allocations_run_id", "run_id"),
+        Index("ix_risk_allocations_correlation_id", "correlation_id"),
+        Index("ix_risk_allocations_claim_ts", "claim_timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(PK_BIGINT, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    trigger_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    claim_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claim_amount: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    release_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    release_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
+    status: Mapped[RiskAllocationStatus] = mapped_column(Enum(RiskAllocationStatus, name="risk_allocation_status"), nullable=False)
+
+
+class PositionSnapshot(Base):
+    """Point-in-time position state for live trading."""
+
+    __tablename__ = "position_snapshots"
+    __table_args__ = (
+        Index("ix_position_snapshots_ts_symbol", "timestamp", "symbol"),
+        Index("ix_position_snapshots_run_id", "run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(PK_BIGINT, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    qty: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    avg_entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    mark_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
+    unrealized_pnl: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
+
+
+class BacktestRun(Base):
+    """Backtest metadata and configuration."""
+
+    __tablename__ = "backtest_runs"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_backtest_runs_run_id"),
+        Index("ix_backtest_runs_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(PK_BIGINT, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    config: Mapped[str] = mapped_column(Text, nullable=False)  # JSON config
+    status: Mapped[BacktestStatus] = mapped_column(Enum(BacktestStatus, name="backtest_status"), nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    candles_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    candles_processed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON results summary
+
+
 __all__ = [
     "Base",
     "Wallet",
@@ -247,9 +347,15 @@ __all__ = [
     "Reservation",
     "FeesSnapshot",
     "CostEstimate",
+    "BlockEvent",
+    "RiskAllocation",
+    "PositionSnapshot",
+    "BacktestRun",
     "WalletType",
     "LedgerSide",
     "OrderSide",
     "OrderType",
     "ReservationState",
+    "BacktestStatus",
+    "RiskAllocationStatus",
 ]
