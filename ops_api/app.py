@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+logger = logging.getLogger(__name__)
 
 from agents.runtime_mode import get_runtime_mode
 from ops_api.schemas import (
@@ -20,10 +24,15 @@ from ops_api.schemas import (
     RunSummary,
 )
 from ops_api.materializer import Materializer
+from ops_api.routers import agents, backtests, live, market, wallets
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
-app = FastAPI(title="ops-api", version="0.1.0")
+app = FastAPI(
+    title="Crypto Trading Agents - Unified Ops API",
+    version="0.2.0",
+    description="Unified API for backtest control, live trading monitoring, market data, and agent observability"
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,9 +40,76 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# SAFETY MIDDLEWARE: Block destructive operations in live mode without acknowledgment
+@app.middleware("http")
+async def live_trading_safety_check(request: Request, call_next):
+    """Prevent accidental live trading without explicit LIVE_TRADING_ACK=true."""
+
+    # Define destructive endpoints that modify state or execute trades
+    destructive_endpoints = {
+        "/backtests",  # Starting backtests can trigger real trades if misconfigured
+        "/wallets/reconcile",  # Reconciliation could trigger corrective trades
+    }
+
+    # Check if this is a destructive operation
+    is_destructive = (
+        request.method in ["POST", "PUT", "DELETE"] and
+        any(request.url.path.startswith(endpoint) for endpoint in destructive_endpoints)
+    )
+
+    if is_destructive:
+        runtime = get_runtime_mode()
+
+        if runtime.is_live and not runtime.live_trading_ack:
+            logger.error(
+                "BLOCKED API CALL: %s %s in live mode without LIVE_TRADING_ACK",
+                request.method, request.url.path
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "LIVE_TRADING_NOT_ACKNOWLEDGED",
+                    "message": (
+                        "Cannot execute destructive operations in live mode without explicit "
+                        "LIVE_TRADING_ACK=true environment variable. This endpoint could trigger "
+                        "real trades with real money. Set LIVE_TRADING_ACK=true to acknowledge."
+                    ),
+                    "endpoint": request.url.path,
+                    "method": request.method,
+                    "runtime_mode": runtime.mode,
+                    "live_trading_ack": runtime.live_trading_ack
+                }
+            )
+
+        # Log all destructive operations for audit trail
+        if runtime.is_live:
+            logger.critical(
+                "LIVE MODE DESTRUCTIVE API CALL: %s %s (LIVE_TRADING_ACK=%s)",
+                request.method, request.url.path, runtime.live_trading_ack
+            )
+        else:
+            logger.info(
+                "PAPER MODE DESTRUCTIVE API CALL: %s %s",
+                request.method, request.url.path
+            )
+
+    response = await call_next(request)
+    return response
+
+
 materializer = Materializer()
 
+# Include modular routers
+app.include_router(backtests.router)
+app.include_router(live.router)
+app.include_router(market.router)
+app.include_router(agents.router)
+app.include_router(wallets.router)
 
+
+# Legacy endpoints (for backward compatibility)
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "ts": datetime.utcnow().isoformat()}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any, Iterable, Literal, Optional
 
@@ -9,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.coinbase.client import CoinbaseClient
 from app.core.errors import CoinbaseAPIError
+
+logger = logging.getLogger(__name__)
 
 
 class OrderConfig(BaseModel):
@@ -90,7 +93,42 @@ async def place_order(
     price: Optional[Decimal] = None,
     idempotency_key: Optional[str] = None,
 ) -> OrderResponse:
-    """Submit an order via Coinbase Advanced Trade."""
+    """Submit an order via Coinbase Advanced Trade.
+
+    SAFETY: This function places REAL orders with REAL money on Coinbase.
+    It will be blocked unless LIVE_TRADING_ACK=true is set in the environment.
+    """
+    # SAFETY CHECK: Verify runtime mode before submitting to Coinbase
+    from agents.runtime_mode import get_runtime_mode
+
+    runtime = get_runtime_mode()
+
+    # This function ALWAYS places real orders, so we check runtime mode
+    if runtime.is_live:
+        logger.critical(
+            "COINBASE LIVE ORDER: %s %s %.8f %s at %s, ack=%s",
+            side.upper(), product_id, qty, order_type.upper(),
+            price or "MARKET", runtime.live_trading_ack
+        )
+        if not runtime.live_trading_ack:
+            error_msg = (
+                "COINBASE ORDER BLOCKED: Cannot place real Coinbase order without explicit "
+                "LIVE_TRADING_ACK=true environment variable. This would execute a real trade "
+                "with real money. Set LIVE_TRADING_ACK=true to acknowledge and proceed."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        # Log acknowledgment for audit trail
+        logger.critical(
+            "COINBASE ORDER ACKNOWLEDGED: Proceeding with REAL order (LIVE_TRADING_ACK=true)"
+        )
+    else:
+        # Even in paper mode, warn about Coinbase API calls
+        logger.warning(
+            "COINBASE API CALL IN PAPER MODE: %s %s %.8f %s - "
+            "This should not happen in paper trading!",
+            side.upper(), product_id, qty, order_type.upper()
+        )
 
     config = OrderConfig(
         product_id=product_id,

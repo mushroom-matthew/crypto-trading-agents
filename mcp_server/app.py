@@ -413,21 +413,21 @@ async def evaluate_strategy_momentum(
 )
 async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
     """Execute trading orders with automatic portfolio updates.
-    
+
     SIMPLIFIED CONSISTENT FORMAT:
-    
+
     Single Order - Array with one order:
     {"orders": [{"symbol": "BTC/USD", "side": "BUY", "qty": 0.001, "price": 50000, "type": "market"}]}
-    
+
     Multiple Orders - Array with multiple orders:
     {"orders": [
         {"symbol": "BTC/USD", "side": "BUY", "qty": 0.001, "price": 50000, "type": "market"},
         {"symbol": "ETH/USD", "side": "SELL", "qty": 0.1, "price": 3000, "type": "market"}
     ]}
-    
+
     Validation & Execution:
     - BUY orders: Validates sufficient cash before execution
-    - SELL orders: Validates sufficient holdings before execution  
+    - SELL orders: Validates sufficient holdings before execution
     - All orders: Atomic operation (all succeed or all fail)
     - Orders automatically update portfolio and trigger 20% profit scraping on profitable sells
 
@@ -441,9 +441,37 @@ async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
     Dict[str, Any]
         Always returns: {order_count: int, fills: [list], total_cost: float, total_proceeds: float}
     """
+    # SAFETY CHECK: Verify runtime mode before executing any orders
+    runtime = get_runtime_mode()
+
+    if runtime.is_live:
+        logger.critical(
+            "LIVE TRADING ORDER REQUESTED: %d orders, mode=%s, ack=%s",
+            len(orders), runtime.mode, runtime.live_trading_ack
+        )
+        if not runtime.live_trading_ack:
+            error_msg = (
+                "LIVE TRADING BLOCKED: Cannot execute real trades without explicit "
+                "LIVE_TRADING_ACK=true environment variable. Set LIVE_TRADING_ACK=true "
+                "to acknowledge you understand this will place real orders with real money."
+            )
+            logger.error(error_msg)
+            return {
+                "error": "LIVE_TRADING_NOT_ACKNOWLEDGED",
+                "message": error_msg,
+                "orders_blocked": len(orders),
+                "runtime_mode": runtime.mode,
+                "live_trading_ack": runtime.live_trading_ack
+            }
+        # Log acknowledgment for audit trail
+        logger.critical(
+            "LIVE TRADING ACKNOWLEDGED: Proceeding with %d real orders (LIVE_TRADING_ACK=true)",
+            len(orders)
+        )
+
     client = await get_temporal_client()
-    
-    logger.info("Processing %d order(s)", len(orders))
+
+    logger.info("Processing %d order(s) in %s mode", len(orders), runtime.mode)
     
     # PRE-FLIGHT VALIDATION: Check cash for all BUY orders
     total_buy_cost = 0.0
