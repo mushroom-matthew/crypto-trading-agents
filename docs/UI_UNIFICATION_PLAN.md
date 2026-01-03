@@ -1,8 +1,29 @@
 # UI Unification Plan: Backtest & Live Trading Dashboard
 
-**Status**: Planning Document for Future Implementation
+**Status**: ACTIVE IMPLEMENTATION (Phase 2 in progress)
 **Created**: 2026-01-02
+**Last Updated**: 2026-01-03
 **Priority**: HIGH - Critical for operational visibility
+
+## Current Progress (2026-01-03)
+
+**Completed**:
+- ✅ Frontend framework bootstrap (React + Vite + TailwindCSS v4)
+- ✅ Backtest Control tab (preset configs, custom params, progress, results, equity curve)
+- ✅ Live Trading Monitor tab (positions, fills, blocks, risk budget, portfolio metrics)
+- ✅ Tab navigation between Backtest and Live views
+- ✅ API proxy configuration (Vite → FastAPI backend)
+- ✅ Auto-refresh queries with TanStack Query
+
+**In Progress**:
+- ⏳ Market ticker component (cross-tab, real-time prices)
+- ⏳ Event timeline component (cross-tab, bot events and trade triggers)
+
+**Next**:
+- 📋 Integrate ticker + timeline into both tabs
+- 📋 Market Monitor tab (dedicated chart view)
+- 📋 Agent Inspector tab (event chains, LLM telemetry)
+- 📋 Wallet Reconciliation tab
 
 ## Executive Summary
 
@@ -243,16 +264,18 @@ class LiveWalletProvider(WalletProvider):
 
 #### Tab 1: Backtest Control
 **Features**:
-- [ ] Dropdown for predefined backtest configs (JSON presets)
-- [ ] Custom config builder (symbol, timeframe, date range, strategy)
-- [ ] "Start Backtest" button → triggers `BacktestWorkflow` via Temporal
-- [ ] Progress bar (candles processed / total)
-- [ ] Results panel:
+- [x] Dropdown for predefined backtest configs (JSON presets) - **COMPLETED**
+- [x] Custom config builder (symbol, timeframe, date range, strategy) - **COMPLETED**
+- [x] "Start Backtest" button → triggers `BacktestWorkflow` via Temporal - **COMPLETED**
+- [x] Progress bar (candles processed / total) - **COMPLETED**
+- [x] Results panel: - **COMPLETED**
   - Equity curve chart (line graph)
   - Performance metrics table (sharpe, drawdown, win rate)
   - Daily reports accordion (expand each day)
   - Trade log table (filterable by symbol/side/trigger)
 - [ ] A/B comparison view (select 2 backtests, diff metrics)
+- [ ] **Market ticker (persistent)** - Real-time price feed for active symbols
+- [ ] **Event timeline** - Bot events and trade triggers with timestamps
 
 **API Endpoints Needed**:
 - `POST /backtests` - Start new backtest
@@ -264,13 +287,15 @@ class LiveWalletProvider(WalletProvider):
 
 #### Tab 2: Live Trading Monitor
 **Features**:
-- [ ] Real-time position table (symbol, qty, entry price, current PnL, mark price)
-- [ ] Portfolio metrics (cash, equity, day P&L, total P&L)
-- [ ] Recent fills table (last 50 trades with timestamp, symbol, side, qty, price)
-- [ ] Risk budget gauge (used / available for day)
-- [ ] Block reasons histogram (counts by reason: daily_cap, risk_budget, etc.)
+- [x] Real-time position table (symbol, qty, entry price, current PnL, mark price) - **COMPLETED**
+- [x] Portfolio metrics (cash, equity, day P&L, total P&L) - **COMPLETED**
+- [x] Recent fills table (last 50 trades with timestamp, symbol, side, qty, price) - **COMPLETED**
+- [x] Risk budget gauge (used / available for day) - **COMPLETED**
+- [x] Block reasons summary (counts by reason: daily_cap, risk_budget, etc.) - **COMPLETED**
+- [x] Rejected trades log (blocked with reasons and timestamps) - **COMPLETED**
 - [ ] Planned trades queue (approved triggers awaiting execution)
-- [ ] Rejected trades log (blocked with reasons and timestamps)
+- [ ] **Market ticker (persistent)** - Real-time price feed for active symbols
+- [ ] **Event timeline** - Bot events and trade triggers with timestamps
 
 **API Endpoints Needed**:
 - `GET /live/positions` - Current positions
@@ -651,19 +676,83 @@ async def get_equity_curve(run_id: str):
 
 ### Phase 2: Frontend Development
 
-#### 2.1 Choose Framework and Bootstrap
-**Effort**: 1 day
-**Recommendation**: React + Vite + TailwindCSS + shadcn/ui
+#### 2.0 Shared Components (Cross-Tab)
+**Status**: PLANNED (to be implemented next)
+**Effort**: 2-3 days
 
-**Tasks**:
+These components will be visible in both Backtest Control and Live Trading Monitor tabs.
+
+**Component 1: MarketTicker**
+- **Purpose**: Real-time price ticker showing live market data
+- **Data source**: `/market/ticks` endpoint (polls every 1-2 seconds)
+- **Features**:
+  - Horizontal ticker bar displaying active symbols
+  - Current price, volume, timestamp for each symbol
+  - Color-coded price changes (green for up, red for down)
+  - Compact format (fits at top of page)
+  - Auto-updates via TanStack Query `refetchInterval`
+- **UI position**: Top of both Backtest and Live tabs (persistent)
+- **Implementation**:
+  ```typescript
+  // src/components/MarketTicker.tsx
+  export function MarketTicker() {
+    const { data: ticks } = useQuery({
+      queryKey: ['market-ticks'],
+      queryFn: () => api.get('/market/ticks?limit=10'),
+      refetchInterval: 2000 // 2 seconds
+    })
+    // Render horizontal ticker with price updates
+  }
+  ```
+
+**Component 2: EventTimeline**
+- **Purpose**: Chronological timeline of bot events and trade triggers
+- **Data source**: `/agents/events` endpoint with filtering
+- **Event types displayed**:
+  - `intent` - Broker agent requests
+  - `plan_generated` - Strategy plans created
+  - `plan_judged` - Judge agent decisions with scores
+  - `order_submitted` - Trade orders placed
+  - `fill` - Executed trades with fill prices
+  - `trade_blocked` - Blocked trades with reasons and details
+- **Features**:
+  - Timeline view with timestamps and event details
+  - Color-coded by event type (e.g., green for fills, red for blocks)
+  - Filterable by event type, source, time range
+  - Shows correlation IDs to link related events
+  - Auto-refreshes every 3-5 seconds
+- **UI position**: Side panel or bottom section in both tabs
+- **Implementation**:
+  ```typescript
+  // src/components/EventTimeline.tsx
+  export function EventTimeline() {
+    const { data: events } = useQuery({
+      queryKey: ['agent-events'],
+      queryFn: () => api.get('/agents/events?limit=50'),
+      refetchInterval: 3000 // 3 seconds
+    })
+    // Render timeline with event cards
+  }
+  ```
+
+**Integration**:
+- Both components will be imported into `BacktestControl.tsx` and `LiveTradingMonitor.tsx`
+- Shared positioning/styling for consistency across tabs
+- API client functions added to `src/lib/api.ts`
+
+#### 2.1 Choose Framework and Bootstrap
+**Status**: COMPLETED
+**Effort**: 1 day
+**Framework**: React + Vite + TailwindCSS v4
+
+**Completed Tasks**:
 ```bash
 cd ui
-npm create vite@latest dashboard -- --template react-ts
-cd dashboard
+npm create vite@latest . -- --template react-ts
 npm install
-npm install -D tailwindcss postcss autoprefixer
+npm install -D tailwindcss @tailwindcss/postcss autoprefixer
 npm install @tanstack/react-query axios recharts
-npm install lucide-react class-variance-authority clsx tailwind-merge
+npm install lucide-react clsx tailwind-merge
 ```
 
 **Structure**:
@@ -689,9 +778,22 @@ ui/dashboard/
 ```
 
 #### 2.2 Implement Core Components
+**Status**: PARTIALLY COMPLETED
 **Effort**: 5-7 days
 
-**Example: BacktestControl.tsx**
+**Completed Components**:
+- [x] `BacktestControl.tsx` - Fully functional with preset configs, custom parameters, progress monitoring, and equity curve visualization
+- [x] `LiveTradingMonitor.tsx` - Real-time positions, fills, blocks, risk budget gauge, and portfolio metrics
+- [x] Tab navigation in `App.tsx` - Clean tab switching between Backtest and Live views
+
+**Pending Components**:
+- [ ] `MarketTicker.tsx` - Real-time price ticker (to be added to both tabs)
+- [ ] `EventTimeline.tsx` - Bot event timeline (to be added to both tabs)
+- [ ] `MarketMonitor.tsx` - Dedicated market data tab (future work)
+- [ ] `AgentInspector.tsx` - Dedicated agent monitoring tab (future work)
+- [ ] `WalletReconciliation.tsx` - Wallet reconciliation tab (future work)
+
+**Example: BacktestControl.tsx (COMPLETED)**
 ```typescript
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -1142,11 +1244,17 @@ mv run_stack.sh run_stack.sh.DEPRECATED
 ## Migration Path
 
 ### From Current State
-1. **Week 1**: Phase 1 foundation (event wiring, materializer fix, new tables)
-2. **Week 2**: Phase 1 API endpoints + Phase 2 frontend bootstrap
-3. **Week 3**: Phase 2 core components (backtest control, live monitor)
-4. **Week 4**: Phase 3 integration (backtest orchestration, live reports, reconciliation)
-5. **Week 5**: Testing, polish, cleanup, documentation
+1. **Week 1**: Phase 1 foundation (event wiring, materializer fix, new tables) - **IN PROGRESS**
+2. ~~**Week 2**: Phase 1 API endpoints + Phase 2 frontend bootstrap~~ - **COMPLETED**
+3. ~~**Week 3**: Phase 2 core components (backtest control, live monitor)~~ - **COMPLETED**
+4. **Current Status (2026-01-03)**:
+   - ✅ React + Vite + TailwindCSS frontend bootstrapped
+   - ✅ Backtest Control tab fully functional
+   - ✅ Live Trading Monitor tab fully functional
+   - ✅ Tab navigation implemented
+   - ⏳ **Next up**: Market ticker + Event timeline shared components
+5. **Week 4+**: Phase 3 integration (backtest orchestration, live reports, reconciliation)
+6. **Week 5+**: Testing, polish, cleanup, documentation
 
 ### Deprecation Timeline
 - **Immediate**: Stop using `ticker_ui_service.py` once market monitor tab is ready
