@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List
+
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

@@ -72,6 +72,62 @@ export interface BacktestTrade {
   trigger_id?: string;
 }
 
+export interface MarketTick {
+  symbol: string;
+  price: number;
+  volume?: number;
+  timestamp: string;
+  source: string;
+}
+
+export interface AgentEvent {
+  event_id: string;
+  timestamp: string;
+  source: string;
+  type: string;
+  payload: Record<string, any>;
+  run_id?: string;
+  correlation_id?: string;
+}
+
+// Playback types for interactive time-series navigation
+export interface CandleWithIndicators {
+  timestamp: string;
+  symbol: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  sma_20?: number;
+  sma_50?: number;
+  ema_20?: number;
+  rsi_14?: number;
+  macd?: number;
+  macd_signal?: number;
+  macd_hist?: number;
+  atr_14?: number;
+  bb_upper?: number;
+  bb_middle?: number;
+  bb_lower?: number;
+}
+
+export interface PlaybackEvent {
+  timestamp: string;
+  event_type: string;
+  symbol: string;
+  data: Record<string, any>;
+}
+
+export interface PortfolioStateSnapshot {
+  timestamp: string;
+  cash: number;
+  positions: Record<string, number>;
+  equity: number;
+  pnl: number;
+  return_pct: number;
+}
+
 // ============================================================================
 // API Functions
 // ============================================================================
@@ -114,6 +170,93 @@ export const backtestAPI = {
     const response = await api.get('/backtests', {
       params: { status, limit },
     });
+    return response.data;
+  },
+
+  // Playback endpoints for interactive time-series navigation
+  getPlaybackCandles: async (
+    runId: string,
+    symbol: string,
+    offset = 0,
+    limit = 2000
+  ): Promise<CandleWithIndicators[]> => {
+    const response = await api.get(`/backtests/${runId}/playback/candles`, {
+      params: { symbol, offset, limit },
+    });
+    return response.data;
+  },
+
+  getPlaybackEvents: async (
+    runId: string,
+    eventType?: string,
+    symbol?: string,
+    limit = 1000
+  ): Promise<PlaybackEvent[]> => {
+    const response = await api.get(`/backtests/${runId}/playback/events`, {
+      params: { event_type: eventType, symbol, limit },
+    });
+    return response.data;
+  },
+
+  getStateSnapshot: async (
+    runId: string,
+    timestamp: string
+  ): Promise<PortfolioStateSnapshot> => {
+    const response = await api.get(`/backtests/${runId}/playback/state/${timestamp}`);
+    return response.data;
+  },
+
+  getLLMInsights: async (runId: string) => {
+    const response = await api.get(`/backtests/${runId}/llm-insights`);
+    return response;
+  },
+
+  getProgress: async (runId: string) => {
+    const response = await api.get(`/backtests/${runId}/progress`);
+    return response;
+  },
+
+  listBacktests: async (status?: string, limit = 50) => {
+    const response = await api.get('/backtests', {
+      params: { status, limit },
+    });
+    return response.data;
+  },
+};
+
+export const marketAPI = {
+  // Get recent market ticks
+  getTicks: async (symbol?: string, limit = 100): Promise<MarketTick[]> => {
+    const response = await api.get('/market/ticks', {
+      params: { symbol, limit },
+    });
+    return response.data;
+  },
+
+  // Get active symbols
+  getSymbols: async (): Promise<string[]> => {
+    const response = await api.get('/market/symbols');
+    return response.data;
+  },
+};
+
+export const agentAPI = {
+  // Get agent events with optional filtering
+  getEvents: async (params?: {
+    type?: string;
+    source?: string;
+    run_id?: string;
+    correlation_id?: string;
+    since?: string;
+    limit?: number;
+  }): Promise<AgentEvent[]> => {
+    const response = await api.get('/agents/events', { params });
+    return response.data;
+  },
+
+  // Get event chain by correlation ID
+  getEventChain: async (correlationId: string): Promise<AgentEvent[]> => {
+    const response = await api.get(`/agents/events/correlation/${correlationId}`);
     return response.data;
   },
 };

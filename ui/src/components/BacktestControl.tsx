@@ -1,10 +1,16 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info } from 'lucide-react';
 import { backtestAPI, type BacktestConfig } from '../lib/api';
 import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
 import { BACKTEST_PRESETS } from '../lib/presets';
+import { MarketTicker } from './MarketTicker';
+import { CandlestickChart } from './CandlestickChart';
+import { BacktestPlaybackViewer } from './BacktestPlaybackViewer';
+import { LLMInsights } from './LLMInsights';
+import { LiveProgressMonitor } from './LiveProgressMonitor';
+import { BacktestSelector } from './BacktestSelector';
 
 export function BacktestControl() {
   const [config, setConfig] = useState<BacktestConfig>({
@@ -16,7 +22,10 @@ export function BacktestControl() {
     strategy: 'baseline',
   });
 
-  const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const [selectedRun, setSelectedRun] = useState<string | null>(() => {
+    // Restore from localStorage on mount
+    return localStorage.getItem('selectedBacktestRunId');
+  });
 
   // Load preset configuration
   const loadPreset = (presetId: string) => {
@@ -31,6 +40,7 @@ export function BacktestControl() {
     mutationFn: (config: BacktestConfig) => backtestAPI.create(config),
     onSuccess: (data) => {
       setSelectedRun(data.run_id);
+      localStorage.setItem('selectedBacktestRunId', data.run_id);
     },
   });
 
@@ -59,6 +69,18 @@ export function BacktestControl() {
     enabled: backtest?.status === 'completed',
   });
 
+  const { data: trades = [] } = useQuery({
+    queryKey: ['trades', selectedRun],
+    queryFn: () => backtestAPI.getTrades(selectedRun!, 100),
+    enabled: backtest?.status === 'completed',
+  });
+
+  const { data: candles = [] } = useQuery({
+    queryKey: ['candles', selectedRun, config.symbols[0]],
+    queryFn: () => backtestAPI.getPlaybackCandles(selectedRun!, config.symbols[0], 0, 2000),
+    enabled: backtest?.status === 'completed' && !!config.symbols[0],
+  });
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     startBacktest.mutate(config);
@@ -68,15 +90,19 @@ export function BacktestControl() {
   const isComplete = backtest?.status === 'completed';
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Backtest Control</h1>
-          <p className="text-gray-500 dark:text-gray-400 mt-1">
-            Configure and run backtests to evaluate trading strategies
-          </p>
+    <div className="space-y-6">
+      {/* Market Ticker */}
+      <MarketTicker />
+
+      <div className="p-6 space-y-6 max-w-7xl mx-auto">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold">Backtest Control</h1>
+            <p className="text-gray-500 dark:text-gray-400 mt-1">
+              Configure and run backtests to evaluate trading strategies
+            </p>
+          </div>
         </div>
-      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Configuration Form */}
@@ -106,6 +132,15 @@ export function BacktestControl() {
                 Choose a predefined configuration or customize below
               </p>
             </div>
+
+            {/* Backtest Selector */}
+            <BacktestSelector
+              selectedRunId={selectedRun}
+              onSelect={(runId) => {
+                setSelectedRun(runId);
+                localStorage.setItem('selectedBacktestRunId', runId);
+              }}
+            />
 
             {/* Symbols */}
             <div>
@@ -331,6 +366,11 @@ export function BacktestControl() {
         </div>
       </div>
 
+      {/* Live Progress Monitor (shown while running) */}
+      {selectedRun && backtest && (
+        <LiveProgressMonitor runId={selectedRun} status={backtest.status} />
+      )}
+
       {/* Results Section */}
       {isComplete && results && equity && (
         <div className="space-y-6">
@@ -355,7 +395,7 @@ export function BacktestControl() {
                 />
               )}
 
-              {results.sharpe_ratio !== undefined && (
+              {results.sharpe_ratio !== undefined && results.sharpe_ratio !== null && (
                 <MetricCard
                   label="Sharpe Ratio"
                   value={results.sharpe_ratio.toFixed(2)}
@@ -380,7 +420,7 @@ export function BacktestControl() {
                 />
               )}
 
-              {results.total_trades !== undefined && (
+              {results.total_trades !== undefined && results.total_trades !== null && (
                 <MetricCard label="Total Trades" value={results.total_trades.toString()} />
               )}
 
@@ -428,8 +468,90 @@ export function BacktestControl() {
               </LineChart>
             </ResponsiveContainer>
           </div>
+
+          {/* Price Chart with Market Data */}
+          {candles.length > 0 && (
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+              <h2 className="text-xl font-semibold mb-4">Market Price Action</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                Candlestick chart showing price movements, technical indicators, and trade executions
+              </p>
+              <CandlestickChart
+                candles={candles}
+                trades={trades}
+                currentIndex={candles.length - 1}
+              />
+            </div>
+          )}
         </div>
       )}
+
+        {/* Recent Trades */}
+        {isComplete && trades && trades.length > 0 && (
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+            <h2 className="text-xl font-semibold mb-4">Recent Trades</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                    <th className="pb-3">Time</th>
+                    <th className="pb-3">Symbol</th>
+                    <th className="pb-3">Side</th>
+                    <th className="pb-3 text-right">Qty</th>
+                    <th className="pb-3 text-right">Price</th>
+                    <th className="pb-3 text-right">P&L</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                  {trades.slice(0, 20).map((trade, idx) => (
+                    <tr key={idx}>
+                      <td className="py-2 text-gray-500">{formatDateTime(trade.timestamp)}</td>
+                      <td className="py-2 font-mono">{trade.symbol}</td>
+                      <td className="py-2">
+                        <span className={cn(
+                          'px-2 py-0.5 rounded text-xs font-semibold',
+                          trade.side === 'BUY' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                        )}>
+                          {trade.side}
+                        </span>
+                      </td>
+                      <td className="py-2 text-right">{trade.qty.toFixed(6)}</td>
+                      <td className="py-2 text-right">{formatCurrency(trade.price)}</td>
+                      <td className={cn(
+                        'py-2 text-right font-semibold',
+                        trade.pnl && trade.pnl > 0 ? 'text-green-500' : trade.pnl && trade.pnl < 0 ? 'text-red-500' : 'text-gray-500'
+                      )}>
+                        {trade.pnl ? formatCurrency(trade.pnl) : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* LLM Strategy Insights (only shown for LLM strategist) */}
+        {isComplete && selectedRun && (
+          <div className="mt-6">
+            <LLMInsights runId={selectedRun} />
+          </div>
+        )}
+
+        {/* Interactive Playback Viewer */}
+        {isComplete && selectedRun && (
+          <div className="mt-6">
+            <h2 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100">
+              Interactive Playback
+            </h2>
+            <BacktestPlaybackViewer
+              runId={selectedRun}
+              symbol={config.symbols[0]}
+              initialCash={config.initial_cash}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

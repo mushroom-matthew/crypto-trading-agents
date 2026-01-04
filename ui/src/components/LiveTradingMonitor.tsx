@@ -1,6 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { TrendingUp, TrendingDown, AlertCircle, DollarSign, PieChart, Activity } from 'lucide-react';
 import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
+import { MarketTicker } from './MarketTicker';
+import { EventTimeline } from './EventTimeline';
 
 // API types (matching backend schemas)
 interface Position {
@@ -124,14 +126,18 @@ export function LiveTradingMonitor() {
   });
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Live Trading Monitor</h1>
-          <p className="text-gray-500 dark:text-gray-400 mt-1">
-            Real-time positions, fills, and risk monitoring
-          </p>
+    <div className="space-y-6">
+      {/* Market Ticker */}
+      <MarketTicker />
+
+      <div className="p-6 space-y-6 max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold">Live Trading Monitor</h1>
+            <p className="text-gray-500 dark:text-gray-400 mt-1">
+              Real-time positions, fills, and risk monitoring
+            </p>
         </div>
         <div className="flex items-center gap-2 text-sm text-gray-500">
           <Activity className="w-4 h-4 animate-pulse text-green-500" />
@@ -325,6 +331,10 @@ export function LiveTradingMonitor() {
           </div>
         </div>
       )}
+
+        {/* Event Timeline */}
+        <EventTimeline limit={30} />
+      </div>
     </div>
   );
 }

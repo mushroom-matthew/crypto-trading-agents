@@ -228,6 +228,7 @@ def _compute_metrics_summary(
         "sharpe_ratio": sharpe,
         "max_drawdown_pct": max_drawdown * 100,
         "win_rate": win_rate * 100,
+        "total_trades": len(trades) if not trades.empty else 0,
         "avg_win": avg_win,
         "avg_loss": avg_loss,
         "profit_factor": profit_factor,
