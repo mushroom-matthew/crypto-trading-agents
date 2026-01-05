@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { TrendingUp, TrendingDown, Activity } from 'lucide-react';
 import { marketAPI, type MarketTick } from '../lib/api';
-import { cn, formatCurrency, formatDateTime } from '../lib/utils';
+import { buildWebSocketUrl } from '../lib/websocket';
+import { cn, formatCurrency } from '../lib/utils';
 import { useState, useEffect, useCallback } from 'react';
 import { useWebSocket, type WebSocketMessage } from '../hooks/useWebSocket';
 
@@ -16,8 +17,8 @@ export function MarketTicker() {
     refetchInterval: 5000, // Reduced frequency since WebSocket provides real-time updates
   });
 
-  // WebSocket connection for real-time ticks
-  const wsUrl = `ws://${window.location.hostname}:8081/ws/market`;
+  // WebSocket connection for real-time ticks (wss when served over https)
+  const wsUrl = buildWebSocketUrl('/ws/market');
 
   const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
     // Only process tick events

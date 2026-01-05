@@ -1,7 +1,7 @@
 # Next Agent Handoff - 2026-01-05
 
 **Last Session Completed**: 2026-01-05
-**Phase Status**: Phase 1 & 2 Complete, Phase 3 COMPLETE (100%)
+**Phase Status**: Phase 1 & 2 Complete, Phase 3 COMPLETE (100%), **Phase 4 IN PROGRESS (focus)**
 **System Maturity**: ~85% (up from 80%)
 
 ## 🎯 Quick Context
@@ -9,6 +9,8 @@
 You're working on a **24×7 multi-agent crypto trading system** with three core agents (Broker, Execution, Judge) orchestrated via Temporal workflows. The system supports both **backtesting** and **live trading** with a unified web dashboard.
 
 **Recent Major Accomplishment**: Phase 3 Integration COMPLETE! Implemented WebSocket infrastructure for real-time updates, completing backtest orchestration, live daily reports, wallet reconciliation UI, and WebSocket streaming. System is now production-ready with comprehensive real-time monitoring.
+
+**Current Focus**: Phase 4 polish — testing coverage, documentation updates, and performance/resilience hardening (while finishing Agent Inspector and LiveTradingMonitor WebSocket upgrade).
 
 ---
 
@@ -32,6 +34,7 @@ You're working on a **24×7 multi-agent crypto trading system** with three core 
   - Heartbeat/ping-pong keep-alive
   - TypeScript types for WebSocket messages
 - ✅ **MarketTicker component** updated to use WebSocket
+  - WebSocket URL now environment-aware via `ui/src/lib/websocket.ts` (supports ws/wss + custom hosts)
   - Real-time price updates via WebSocket
   - Fallback to polling if WebSocket disconnected
   - Visual indicator shows connection status
@@ -137,7 +140,7 @@ You're working on a **24×7 multi-agent crypto trading system** with three core 
 - ✅ Wallet reconciliation UI with drift detection
 - ✅ WebSocket streaming for real-time updates (market ticks)
 
-### Known Gaps (What Needs Work)
+### Known Gaps / Phase 4 Focus
 - ⚠️ **LiveTradingMonitor WebSocket** - Still using polling (MarketTicker upgraded, LiveTradingMonitor pending)
 - ⚠️ **Market Monitor tab** - Not yet created (dedicated chart view with candles)
 - ⚠️ **Agent Inspector tab** - Not yet created (LLM telemetry, event chains, costs)
@@ -176,29 +179,27 @@ You're working on a **24×7 multi-agent crypto trading system** with three core 
 - [x] Event emitter broadcasts to WebSocket clients
 - [x] useWebSocket React hook created
 - [x] MarketTicker upgraded to use WebSocket
-- **Implementation**: Full WebSocket infrastructure in `ops_api/websocket_manager.py` and `ui/src/hooks/useWebSocket.ts`
+- [x] WebSocket URL helper handles ws/wss + custom hosts for UI (`ui/src/lib/websocket.ts`)
+- **Implementation**: Full WebSocket infrastructure in `ops_api/websocket_manager.py`, `ui/src/hooks/useWebSocket.ts`, and env-aware URLs in `ui/src/lib/websocket.ts`
 
 ---
 
 ### Priority 1: Agent Inspector Tab (HIGH - 2-3 days)
+**Status**: Initial UI completed (live data) — need tests/polish.
 **Why**: Observability into agent decision chains, LLM costs, and workflow status. Critical for debugging and cost monitoring.
 
-**Tasks**:
-1. Create `ui/src/components/AgentInspector.tsx`
-2. Design features:
-   - Decision chain timeline (broker intent → execution → judge approval)
-   - Event log viewer with filters (type, source, run_id, correlation_id)
-   - LLM telemetry table (model, tokens, cost, duration)
-   - Workflow status cards (broker, execution, judge)
-3. Use existing API endpoints:
-   - GET /agents/events
-   - GET /agents/llm/telemetry (already exists at `/llm/telemetry`)
-   - GET /workflows
-4. Add as new tab in App.tsx
-5. Consider WebSocket for real-time event updates (optional enhancement)
+**Current implementation**:
+- `ui/src/components/AgentInspector.tsx` tab added to App navigation
+- Filters for type/source/run_id/correlation_id + correlation chain tracing
+- Event stream combines polling + `/ws/live` (env-aware URL helper)
+- LLM telemetry table from `/llm/telemetry`
+- Workflow status cards from `/workflows`
 
-**Files to create**:
-- `ui/src/components/AgentInspector.tsx`
+**Remaining tasks**:
+- Add UI tests/storybook for AgentInspector
+- Consider dedicated agent events WebSocket channel vs `/ws/live`
+- Add pagination for events/telemetry if needed
+- Surface errors/loading states in-UI (banners/snackbars)
 
 **Success criteria**:
 - [ ] Can trace full decision chain via correlation_id
@@ -220,6 +221,23 @@ You're working on a **24×7 multi-agent crypto trading system** with three core 
 - [ ] Real-time fill updates without polling
 - [ ] Real-time position updates
 - [ ] Fallback to polling if WebSocket disconnected
+
+---
+
+### Priority 3: Phase 4 Polish (Testing / Docs / Performance) - START NOW
+**Why**: Production readiness requires verification, updated guidance, and resilience.
+
+**Tasks**:
+1. **Testing**: Add unit/integration coverage for WebSocket broadcasting, event emitter routing, wallets API, and backtest progress queries. Add UI smoke/e2e for tabs (Backtest, Live, Wallet Reconciliation, MarketTicker WebSocket indicator).
+2. **Documentation**: Refresh README and API docs with Phase 3 features (wallet reconciliation, daily reports, WebSockets, env-aware WebSocket URL helper `ui/src/lib/websocket.ts`, VITE_WS_URL/VITE_API_URL usage). Add quickstart for UI/ops-api with webs.
+3. **Performance/Resilience**: Profile ops-api endpoints, ensure WebSocket reconnect/backoff defaults are sane, validate DB connection pooling, and add timeouts for heavy queries (live daily reports, reconciliation).
+4. **Scheduling**: Evaluate adding automated reconciliation schedule (cron/Temporal) or document manual cadence.
+5. **Agent Inspector follow-ups**: Tests/storybook; consider dedicated agent-events WebSocket; pagination for event/telemetry queries; guard non-array workflow responses (done in UI).
+
+**Success criteria**:
+- [ ] Tests cover WebSocket routing, event emission, reconciliation endpoints, and backtest progress
+- [ ] Docs updated with Phase 3 features + WebSocket env configuration
+- [ ] Ops API and UI stable under load (basic perf sanity)
 
 ---
 
@@ -394,10 +412,10 @@ grep -n "EventTimeline" ui/src/components/BacktestControl.tsx
 - [x] Wallet reconciliation UI ✅
 - [x] WebSocket streaming ✅
 
-**Phase 4 Polish**: 📋 NOT STARTED (0%)
-- [ ] Testing (unit, integration, e2e)
-- [ ] Documentation updates
-- [ ] Performance optimization
+**Phase 4 Polish**: 🚧 IN PROGRESS (focus)
+- [ ] Testing (unit, integration, e2e) — add coverage for WebSockets, events, reconciliation, backtests
+- [ ] Documentation updates — README/API updated for Phase 3 features + WebSocket env config
+- [ ] Performance optimization — query/worker/WebSocket resilience passes basic load tests
 
 ---
 
@@ -509,6 +527,10 @@ curl -X POST http://localhost:8081/wallets/reconcile \
 # Check WebSocket connection stats
 curl http://localhost:8081/ws/stats
 # Expected: {"live_connections":0,"market_connections":0}
+
+# Optional: override WebSocket host/protocol
+# export VITE_WS_URL=ws://localhost:8081     # explicit WebSocket base
+# export VITE_API_URL=http://api.internal:8081 # auto-converts to ws://api.internal:8081
 
 # Test WebSocket connection (requires wscat or similar)
 # Install wscat: npm install -g wscat

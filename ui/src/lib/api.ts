@@ -93,6 +93,27 @@ export interface AgentEvent {
   correlation_id?: string;
 }
 
+export interface WorkflowSummary {
+  run_id: string;
+  latest_plan_id?: string;
+  latest_judge_id?: string;
+  status: 'running' | 'paused' | 'stopped';
+  last_updated: string;
+  mode: 'paper' | 'live';
+}
+
+export interface LLMTelemetry {
+  run_id?: string;
+  plan_id?: string;
+  prompt_hash?: string;
+  model: string;
+  tokens_in: number;
+  tokens_out: number;
+  cost_estimate: number;
+  duration_ms: number;
+  ts: string;
+}
+
 // Playback types for interactive time-series navigation
 export interface CandleWithIndicators {
   timestamp: string;
@@ -260,6 +281,18 @@ export const agentAPI = {
   // Get event chain by correlation ID
   getEventChain: async (correlationId: string): Promise<AgentEvent[]> => {
     const response = await api.get(`/agents/events/correlation/${correlationId}`);
+    return response.data;
+  },
+
+  // Get LLM telemetry entries
+  getLLMTelemetry: async (): Promise<LLMTelemetry[]> => {
+    const response = await api.get('/llm/telemetry');
+    return response.data;
+  },
+
+  // List workflow/run status for agents
+  listWorkflows: async (): Promise<WorkflowSummary[]> => {
+    const response = await api.get('/workflows');
     return response.data;
   },
 };

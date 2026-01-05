@@ -61,8 +61,8 @@ export function useWebSocket(
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout>();
+  const reconnectTimeoutRef = useRef<number | undefined>(undefined);
+  const heartbeatIntervalRef = useRef<number | undefined>(undefined);
   const shouldConnectRef = useRef(autoConnect);
 
   const cleanup = useCallback(() => {

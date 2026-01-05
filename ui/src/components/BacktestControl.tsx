@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info } from 'lucide-react';
@@ -455,7 +455,7 @@ export function BacktestControl() {
                     borderRadius: '0.5rem',
                   }}
                   labelFormatter={(value) => formatDateTime(value)}
-                  formatter={(value: number) => [formatCurrency(value), 'Equity']}
+                  formatter={(value?: number) => [formatCurrency(value ?? 0), 'Equity']}
                 />
                 <Legend />
                 <Line
@@ -548,7 +548,6 @@ export function BacktestControl() {
             <BacktestPlaybackViewer
               runId={selectedRun}
               symbol={config.symbols[0]}
-              initialCash={config.initial_cash}
             />
           </div>
         )}

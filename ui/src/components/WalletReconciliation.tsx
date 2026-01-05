@@ -168,15 +168,15 @@ export default function WalletReconciliation() {
                       {wallet.currency || 'N/A'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
-                      {wallet.ledger_balance.toFixed(8)}
+                      {Number(wallet.ledger_balance).toFixed(8)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">
-                      {wallet.coinbase_balance !== null ? wallet.coinbase_balance.toFixed(8) : '-'}
+                      {wallet.coinbase_balance !== null ? Number(wallet.coinbase_balance).toFixed(8) : '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
                       {wallet.drift !== null ? (
                         <span className={wallet.drift === 0 ? 'text-green-600' : 'text-yellow-600'}>
-                          {wallet.drift.toFixed(8)}
+                          {Number(wallet.drift).toFixed(8)}
                         </span>
                       ) : (
                         '-'

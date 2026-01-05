@@ -18,7 +18,6 @@ export interface CandlestickChartProps {
   candles: CandleWithIndicators[];
   trades?: BacktestTrade[];
   currentIndex: number;
-  onCandleClick?: (index: number) => void;
 }
 
 type OverlayType = 'sma_20' | 'sma_50' | 'ema_20' | 'bb';
@@ -27,7 +26,6 @@ export function CandlestickChart({
   candles,
   trades = [],
   currentIndex,
-  onCandleClick,
 }: CandlestickChartProps) {
   const [selectedOverlays, setSelectedOverlays] = useState<OverlayType[]>(['sma_20', 'sma_50']);
 

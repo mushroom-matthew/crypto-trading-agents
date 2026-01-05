@@ -9,13 +9,11 @@ import { StateInspector } from './StateInspector';
 export interface BacktestPlaybackViewerProps {
   runId: string;
   symbol: string;
-  initialCash: number;
 }
 
 export function BacktestPlaybackViewer({
   runId,
   symbol,
-  initialCash,
 }: BacktestPlaybackViewerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [mode, setMode] = useState<'candle' | 'event'>('candle');
@@ -50,7 +48,7 @@ export function BacktestPlaybackViewer({
     }
   }, [mode, currentIndex, candles, events]);
 
-  const handleTimestampChange = (newIndex: number, timestamp?: string) => {
+  const handleTimestampChange = (newIndex: number, _timestamp?: string) => {
     setCurrentIndex(newIndex);
   };
 

@@ -1,7 +1,8 @@
 # Repository Slop Audit - January 2026
 
-**Status**: Critical Issues Identified
-**Severity**: HIGH - Blocking effective operations
+**Status**: Critical issues previously identified (audit retained for history); WebSocket streaming now implemented with env-aware URLs.
+**Severity**: HIGH - Blocking effective operations (remaining gaps)
+**Current Focus**: Phase 4 polish — testing coverage, documentation refresh, and performance/resilience.
 
 ## Quick Summary
 
@@ -22,7 +23,7 @@ The repository is **60% mature** and in active refactor. There are **10 major so
 
 ### Week 2: API Layer
 - [ ] Create unified API endpoints (/backtests, /live, /market, /agents, /wallets)
-- [ ] Add WebSocket support for real-time streaming
+- [x] Add WebSocket support for real-time streaming (ops_api WebSocket manager + `ui/src/lib/websocket.ts` helper for ws/wss + custom hosts)
 - [ ] Bootstrap React frontend with core tabs
 
 ### Week 3: Integration
@@ -226,7 +227,7 @@ class LiveWalletProvider(WalletProvider):
 | 🟡 P1 | Bootstrap React frontend | 1 day | UI foundation |
 | 🟡 P1 | Backtest control component | 2 days | Core feature gap |
 | 🟢 P2 | Live monitoring components | 3 days | Operational visibility |
-| 🟢 P2 | WebSocket integration | 2 days | Real-time updates |
+| 🟢 P2 | WebSocket integration (DONE) | 2 days | Real-time updates (ops_api websockets + env-aware UI helper) |
 | 🟢 P2 | Wallet reconciliation UI | 2 days | Reduce manual toil |
 | 🔵 P3 | Clean up repository | 1 day | Quality of life |
 

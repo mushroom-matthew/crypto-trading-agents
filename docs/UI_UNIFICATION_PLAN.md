@@ -1,11 +1,11 @@
 # UI Unification Plan: Backtest & Live Trading Dashboard
 
-**Status**: ACTIVE IMPLEMENTATION (Phase 1 & 2 completed, Phase 3 in progress)
+**Status**: ACTIVE IMPLEMENTATION (Phase 1 & 2 completed, Phase 3 COMPLETE, Phase 4 polish in progress)
 **Created**: 2026-01-02
-**Last Updated**: 2026-01-04
+**Last Updated**: 2026-01-06
 **Priority**: HIGH - Critical for operational visibility
 
-## Current Progress (2026-01-04)
+## Current Progress (2026-01-05)
 
 **Completed**:
 - ✅ Frontend framework bootstrap (React + Vite + TailwindCSS v4)
@@ -18,15 +18,16 @@
 - ✅ Event timeline component (cross-tab, bot events and trade triggers) - integrated into both tabs
 - ✅ Week 1 foundation: DB tables (BlockEvent, RiskAllocation, PositionSnapshot, BacktestRun)
 - ✅ Database migration applied successfully
+- ✅ Backtest orchestration wired (progress events) + live daily reports endpoint/UI
+- ✅ Wallet Reconciliation tab (UI + backend) and drift reporting
+- ✅ WebSocket infrastructure for market ticks (`/ws/market`, event emitter broadcast) with env-aware URL helper for UI (`ui/src/lib/websocket.ts`)
 
 **In Progress**:
-- ⏳ Phase 3 integration tasks (backtest orchestration, live reports)
-
-**Next**:
-- 📋 Market Monitor tab (dedicated chart view)
-- 📋 Agent Inspector tab (event chains, LLM telemetry)
-- 📋 Wallet Reconciliation tab
-- 📋 Live daily reports (matching backtest format)
+- ⏳ Phase 4 polish (testing, documentation refresh, performance/resilience)
+- ⏳ Agent Inspector tab implemented (live data) — needs tests/polish and optional dedicated WebSocket channel
+- ⏳ LiveTradingMonitor WebSocket upgrade (fills/positions/blocks)
+- ⏳ Market Monitor tab (dedicated chart view)
+- ⏳ Testing + docs refresh for Phase 3 features (WebSockets, reconciliation, daily reports)
 
 ## Executive Summary
 
@@ -1003,13 +1004,15 @@ export function BacktestControl() {
 ```
 
 **Similar patterns for**:
-- `LiveTradingMonitor.tsx`: Position table, fills table, risk gauge
+- `LiveTradingMonitor.tsx`: Position table, fills table, risk gauge (WebSocket upgrade pending)
 - `MarketMonitor.tsx`: Candlestick charts, real-time ticks
-- `AgentInspector.tsx`: Event timeline, LLM telemetry
+- `AgentInspector.tsx`: Event timeline, LLM telemetry, workflow status (implemented; streaming via `/ws/live` + REST)
 - `WalletReconciliation.tsx`: Wallet table, drift chart, reconcile button
 
 #### 2.3 WebSocket Integration
 **Effort**: 2-3 days
+
+**Current implementation**: Completed in `ops_api/websocket_manager.py` with `/ws/live`, `/ws/market`, and `/ws/stats`. UI should use `ui/src/lib/websocket.ts` (`buildWebSocketUrl`) to pick ws/wss and hosts from `VITE_WS_URL`/`VITE_API_URL` or the current origin to avoid mixed-content and hardcoded host issues.
 
 **Backend**: Add WebSocket support to ops_api
 ```python
@@ -1066,6 +1069,7 @@ async def record_signal(name: str, payload: dict):
 ```typescript
 // src/hooks/useWebSocket.ts
 import { useEffect, useState } from 'react'
+import { buildWebSocketUrl } from '../lib/websocket'
 
 export function useWebSocket<T>(url: string, topic: string) {
   const [data, setData] = useState<T | null>(null)
@@ -1091,7 +1095,7 @@ export function useWebSocket<T>(url: string, topic: string) {
 }
 
 // Usage in component
-const { data: latestFill } = useWebSocket('ws://localhost:8080/ws/live', 'fill')
+const { data: latestFill } = useWebSocket(buildWebSocketUrl('/ws/live'), 'fill')
 ```
 
 ### Phase 3: Integration & Polish

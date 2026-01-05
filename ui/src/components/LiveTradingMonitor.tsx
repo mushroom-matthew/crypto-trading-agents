@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { TrendingUp, TrendingDown, AlertCircle, DollarSign, PieChart, Activity } from 'lucide-react';
-import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
+import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { MarketTicker } from './MarketTicker';
 import { EventTimeline } from './EventTimeline';
 
