@@ -12,7 +12,7 @@ from typing import List
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,7 @@ from ops_api.schemas import (
 )
 from ops_api.materializer import Materializer
 from ops_api.routers import agents, backtests, live, market, wallets
+from ops_api.websocket_manager import manager as ws_manager
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
@@ -161,6 +162,61 @@ async def list_events() -> List[Event]:
 @app.get("/llm/telemetry", response_model=List[LLMTelemetry])
 async def llm_telemetry() -> List[LLMTelemetry]:
     return materializer.list_llm()
+
+
+# WebSocket endpoints for real-time updates
+@app.websocket("/ws/live")
+async def websocket_live(websocket: WebSocket):
+    """
+    WebSocket endpoint for live trading updates.
+
+    Streams:
+    - New fills
+    - Position changes
+    - Trade blocks
+    - Risk budget updates
+    """
+    await ws_manager.connect_live(websocket)
+    try:
+        while True:
+            # Keep connection alive and listen for client pings
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        await ws_manager.disconnect_live(websocket)
+    except Exception as e:
+        logger.error(f"Live WebSocket error: {e}")
+        await ws_manager.disconnect_live(websocket)
+
+
+@app.websocket("/ws/market")
+async def websocket_market(websocket: WebSocket):
+    """
+    WebSocket endpoint for market data updates.
+
+    Streams:
+    - Market ticks (price updates)
+    - Symbol changes
+    """
+    await ws_manager.connect_market(websocket)
+    try:
+        while True:
+            # Keep connection alive and listen for client pings
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        await ws_manager.disconnect_market(websocket)
+    except Exception as e:
+        logger.error(f"Market WebSocket error: {e}")
+        await ws_manager.disconnect_market(websocket)
+
+
+@app.get("/ws/stats")
+async def websocket_stats():
+    """Get WebSocket connection statistics."""
+    return ws_manager.get_stats()
 
 
 if UI_DIR.exists():

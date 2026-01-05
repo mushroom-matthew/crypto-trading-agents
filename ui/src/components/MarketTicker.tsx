@@ -2,17 +2,46 @@ import { useQuery } from '@tanstack/react-query';
 import { TrendingUp, TrendingDown, Activity } from 'lucide-react';
 import { marketAPI, type MarketTick } from '../lib/api';
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useWebSocket, type WebSocketMessage } from '../hooks/useWebSocket';
 
 export function MarketTicker() {
   const [priceChanges, setPriceChanges] = useState<Record<string, number>>({});
+  const [wsTicks, setWsTicks] = useState<MarketTick[]>([]);
 
-  // Query market ticks with auto-refresh every 2 seconds
-  const { data: ticks = [], isLoading } = useQuery({
+  // Initial data load with query (fallback)
+  const { data: initialTicks = [], isLoading } = useQuery({
     queryKey: ['market-ticks'],
     queryFn: () => marketAPI.getTicks(undefined, 20),
-    refetchInterval: 2000,
+    refetchInterval: 5000, // Reduced frequency since WebSocket provides real-time updates
   });
+
+  // WebSocket connection for real-time ticks
+  const wsUrl = `ws://${window.location.hostname}:8081/ws/market`;
+
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    // Only process tick events
+    if (message.type === 'tick' || message.type === 'market_tick') {
+      const tick: MarketTick = {
+        symbol: message.payload.symbol,
+        price: message.payload.price,
+        volume: message.payload.volume,
+        timestamp: message.timestamp,
+        source: message.source,
+      };
+
+      setWsTicks((prev) => {
+        // Add new tick and keep last 20 ticks
+        const updated = [tick, ...prev].slice(0, 20);
+        return updated;
+      });
+    }
+  }, []);
+
+  const { isConnected } = useWebSocket(wsUrl, {}, handleWebSocketMessage);
+
+  // Merge WebSocket ticks with initial query data
+  const ticks = wsTicks.length > 0 ? wsTicks : initialTicks;
 
   // Track price changes for color coding
   useEffect(() => {
@@ -73,9 +102,14 @@ export function MarketTicker() {
         <div className="flex items-center gap-6 overflow-x-auto">
           {/* Live indicator */}
           <div className="flex items-center gap-2 flex-shrink-0">
-            <Activity className="w-4 h-4 animate-pulse text-green-500" />
+            <Activity
+              className={cn(
+                'w-4 h-4',
+                isConnected ? 'animate-pulse text-green-500' : 'text-yellow-500'
+              )}
+            />
             <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-              Live Market
+              {isConnected ? 'Live Market (WebSocket)' : 'Market Data (Polling)'}
             </span>
           </div>
 
