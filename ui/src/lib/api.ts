@@ -1,6 +1,9 @@
 import axios from 'axios';
 
-// API Base URL - in development, use proxy; in production, use same host
+// API Base URL Configuration
+// - Development: Empty string uses Vite proxy (configure in vite.config.ts)
+// - Production: Port 8081 for Ops API (backtesting, monitoring, analytics)
+// - Port 8080 is MCP Server (agent tools - NOT used by this UI)
 const API_BASE_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.DEV ? '' : 'http://localhost:8081'
 );
@@ -257,6 +260,28 @@ export const agentAPI = {
   // Get event chain by correlation ID
   getEventChain: async (correlationId: string): Promise<AgentEvent[]> => {
     const response = await api.get(`/agents/events/correlation/${correlationId}`);
+    return response.data;
+  },
+};
+
+export const walletsAPI = {
+  // List all wallets
+  list: async () => {
+    const response = await api.get('/wallets');
+    return response.data;
+  },
+
+  // Trigger reconciliation
+  reconcile: async (params: { threshold?: number }) => {
+    const response = await api.post('/wallets/reconcile', params);
+    return response.data;
+  },
+
+  // Get reconciliation history
+  getHistory: async (limit = 50) => {
+    const response = await api.get('/wallets/reconcile/history', {
+      params: { limit },
+    });
     return response.data;
   },
 };

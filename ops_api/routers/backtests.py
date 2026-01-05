@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import pandas as pd
@@ -80,13 +81,23 @@ def clean_nan(value):
         return None
     return value
 
+
+# NOTE: Thread-based backtest execution has been removed.
+# Backtests now run via Temporal workflows - see BacktestWorkflow in tools/backtest_execution.py
+# This provides:
+# - Deterministic replay for audit trails
+# - Automatic retries on failure
+# - Continue-as-new for long-running backtests
+# - Real-time progress tracking via workflow queries
+
+
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 
-# In-memory cache for backtest results
+# In-memory cache for computed indicators (used by playback endpoints)
+# NOTE: Backtest results are now stored in Temporal workflows, not this cache
 BACKTEST_CACHE: Dict[str, Dict[str, Any]] = {}
-BACKTEST_PROGRESS: Dict[str, Dict[str, Any]] = {}  # Track live progress
 CACHE_LOCK = Lock()
-MAX_CACHED_BACKTESTS = 10
+MAX_CACHED_BACKTESTS = 10  # For indicator caching only
 
 
 # Request/Response Schemas
@@ -208,202 +219,104 @@ class PortfolioStateSnapshot(BaseModel):
 @router.post("", response_model=BacktestCreateResponse)
 async def start_backtest(config: BacktestConfig):
     """
-    Start a new backtest run.
+    Start a new backtest run via Temporal workflow.
 
-    Executes backtest synchronously and caches results in memory.
-    Use GET /backtests/{run_id}/results to retrieve performance metrics.
+    Returns immediately with run_id. Backtest executes in workflow.
+    Use GET /backtests/{run_id} to poll status and progress.
+    Use GET /backtests/{run_id}/results to retrieve performance metrics when completed.
     """
     try:
+        from ops_api.temporal_client import get_temporal_client
+        from tools.backtest_execution import BacktestWorkflow
+
         # Generate unique run ID
         run_id = f"backtest-{uuid4()}"
 
-        # Initialize progress tracking
-        with CACHE_LOCK:
-            BACKTEST_PROGRESS[run_id] = {
-                "progress_pct": 0.0,
-                "current_phase": "Initializing",
-                "logs": [],
-                "plans_generated": 0,
-                "llm_calls_made": 0,
-            }
-            # Add to cache immediately with "running" status
-            BACKTEST_CACHE[run_id] = {
-                "config": config.model_dump(),
-                "status": "running",
-                "strategy": config.strategy,
-            }
+        logger.info("Starting backtest workflow: %s", config.model_dump())
 
-        logger.info("Starting backtest: %s", config.model_dump())
-
-        # Parse dates
-        start_date = datetime.fromisoformat(config.start_date)
-        end_date = datetime.fromisoformat(config.end_date)
-
-        # Handle strategy selection
-        if config.strategy == "llm_strategist":
-            # Use LLM strategist for AI-driven backtesting
-            logger.info("Using LLM strategist for backtest")
-
-            # Update progress
-            with CACHE_LOCK:
-                BACKTEST_PROGRESS[run_id]["current_phase"] = "Initializing LLM Strategist"
-                BACKTEST_PROGRESS[run_id]["progress_pct"] = 5.0
-                BACKTEST_PROGRESS[run_id]["logs"].append({
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "message": "Initializing LLM client and strategist backtester"
-                })
-
-            # Initialize LLM client
-            llm_client = LLMClient()
-
-            # Set up cache directory for LLM strategist
-            cache_dir = Path(".cache/strategy_plans")
-            cache_dir.mkdir(parents=True, exist_ok=True)
-
-            # Update progress
-            with CACHE_LOCK:
-                BACKTEST_PROGRESS[run_id]["current_phase"] = "Loading Market Data"
-                BACKTEST_PROGRESS[run_id]["progress_pct"] = 10.0
-                BACKTEST_PROGRESS[run_id]["logs"].append({
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "message": f"Loading OHLCV data for {len(config.symbols)} symbols from {config.start_date} to {config.end_date}"
-                })
-
-            # Create LLM strategist backtester
-            backtester = LLMStrategistBacktester(
-                pairs=config.symbols,
-                start=start_date,
-                end=end_date,
-                initial_cash=config.initial_cash,
-                fee_rate=0.001,  # 0.1% fee
-                llm_client=llm_client,
-                cache_dir=cache_dir,
-                llm_calls_per_day=4,  # Generate plans 4 times per day (every 6 hours)
-            )
-
-            # Update progress
-            with CACHE_LOCK:
-                BACKTEST_PROGRESS[run_id]["current_phase"] = "Running Backtest Simulation"
-                BACKTEST_PROGRESS[run_id]["progress_pct"] = 20.0
-                BACKTEST_PROGRESS[run_id]["logs"].append({
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "message": "Starting backtest simulation with LLM strategy generation (4 plans per day)"
-                })
-
-            logger.info("Starting LLM strategist backtest run_id=%s", run_id)
-
-            # Run the backtest
-            llm_result = backtester.run(run_id)
-
-            # Update progress
-            with CACHE_LOCK:
-                BACKTEST_PROGRESS[run_id]["current_phase"] = "Processing Results"
-                BACKTEST_PROGRESS[run_id]["progress_pct"] = 90.0
-                BACKTEST_PROGRESS[run_id]["plans_generated"] = len(llm_result.plan_log)
-                BACKTEST_PROGRESS[run_id]["logs"].append({
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "message": f"Backtest completed. Generated {len(llm_result.plan_log)} AI strategy plans"
-                })
-
-            # Convert StrategistBacktestResult to PortfolioBacktestResult format
-            result = PortfolioBacktestResult(
-                equity_curve=llm_result.equity_curve,
-                trades=llm_result.fills,  # fills DataFrame already has the right structure
-                summary=llm_result.summary,
-                per_pair={},  # LLM strategist doesn't provide per-pair breakdown
-            )
-
-            # Store LLM-specific data for later retrieval
-            llm_specific_data = {
-                "plan_log": llm_result.plan_log,
-                "llm_costs": llm_result.llm_costs,
-                "daily_reports": llm_result.daily_reports,
-                "final_cash": llm_result.final_cash,
-                "final_positions": llm_result.final_positions,
-            }
-        else:
-            # Use baseline strategy (execution agent)
-            logger.info("Using baseline strategy for backtest")
-
-            # Create strategy config (using defaults for now)
-            strategy_config = StrategyWrapperConfig()
-
-            # Execute actual backtest
-            result = run_portfolio_backtest(
-                pairs=config.symbols,
-                start=start_date,
-                end=end_date,
-                initial_cash=config.initial_cash,
-                fee_rate=0.001,  # 0.1% fee
-                strategy_config=strategy_config,
-                weights=None,  # Equal weights
-                flatten_positions_daily=False,
-                risk_limits=None,
-            )
-
-            # Baseline strategy doesn't have LLM-specific data
-            llm_specific_data = None
-
-        # Cache results with LRU eviction and disk persistence
-        cache_data = {
-            "config": config.model_dump(),
-            "result": result,
-            "status": "completed",
-            "completed_at": datetime.utcnow(),
-            "strategy": config.strategy,
-            "llm_data": llm_specific_data,
-        }
-
-        with CACHE_LOCK:
-            # Evict oldest entry if cache is full
-            if len(BACKTEST_CACHE) >= MAX_CACHED_BACKTESTS:
-                oldest_key = next(iter(BACKTEST_CACHE))
-                BACKTEST_CACHE.pop(oldest_key)
-                logger.info("Evicted oldest backtest from cache: %s", oldest_key)
-
-            BACKTEST_CACHE[run_id] = cache_data
-
-        # Persist to disk
-        save_backtest_to_disk(run_id, cache_data)
-
-        logger.info("Backtest completed: %s (final_equity=%.2f)", run_id, result.summary.get("final_equity", 0))
+        # Start Temporal workflow (non-blocking)
+        client = await get_temporal_client()
+        await client.start_workflow(
+            BacktestWorkflow.run,
+            args=[{
+                "run_id": run_id,
+                "symbols": config.symbols,
+                "timeframe": config.timeframe,
+                "start_date": config.start_date,
+                "end_date": config.end_date,
+                "initial_cash": config.initial_cash,
+                "strategy": config.strategy or "baseline",
+            }],
+            id=run_id,
+            task_queue="mcp-tools",
+        )
 
         return BacktestCreateResponse(
             run_id=run_id,
-            status="completed",
-            message=f"Backtest completed successfully. Final equity: ${result.summary.get('final_equity', 0):,.2f}"
+            status="running",
+            message=f"Backtest started. Use GET /backtests/{run_id} to monitor progress."
         )
 
     except Exception as e:
-        logger.error("Failed to execute backtest: %s", e, exc_info=True)
+        logger.error("Failed to start backtest: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{run_id}", response_model=BacktestStatus)
 async def get_backtest_status(run_id: str):
     """
-    Get backtest status and progress.
+    Get backtest status and progress by querying Temporal workflow.
 
     Returns current status (queued/running/completed/failed) and progress percentage.
     """
     try:
-        cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
-            progress_data = BACKTEST_PROGRESS.get(run_id, {})
+        from ops_api.temporal_client import get_temporal_client
+        from temporalio.client import WorkflowHandle
+        from temporalio.service import RPCError
 
-        if not cached:
+        client = await get_temporal_client()
+
+        try:
+            # Get workflow handle
+            handle: WorkflowHandle = client.get_workflow_handle(run_id)
+
+            # Query workflow for status
+            status_data = await handle.query("get_status")
+
+            # Parse datetime strings
+            started_at = datetime.fromisoformat(status_data["started_at"]) if status_data.get("started_at") else None
+            completed_at = datetime.fromisoformat(status_data["completed_at"]) if status_data.get("completed_at") else None
+
+            return BacktestStatus(
+                run_id=status_data["run_id"],
+                status=status_data["status"],
+                progress=status_data["progress"],
+                started_at=started_at,
+                completed_at=completed_at,
+                candles_total=status_data.get("candles_total"),
+                candles_processed=status_data.get("candles_processed"),
+                error=status_data.get("error"),
+            )
+
+        except RPCError as e:
+            # Workflow not found, try disk cache fallback
+            logger.warning(f"Workflow {run_id} not found in Temporal, checking disk cache")
+            cached = load_backtest_from_disk(run_id)
+
+            if cached:
+                # Return cached status
+                return BacktestStatus(
+                    run_id=run_id,
+                    status=cached.get("status", "completed"),
+                    progress=100.0,
+                    started_at=cached.get("started_at"),
+                    completed_at=cached.get("completed_at"),
+                    candles_total=cached.get("candles_total"),
+                    candles_processed=cached.get("candles_processed"),
+                    error=cached.get("error"),
+                )
+
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
-
-        return BacktestStatus(
-            run_id=run_id,
-            status=cached["status"],
-            progress=progress_data.get("progress_pct", 100.0 if cached["status"] == "completed" else 0.0),
-            started_at=None,  # Not tracked yet
-            completed_at=cached.get("completed_at"),
-            candles_total=progress_data.get("total_candles"),
-            candles_processed=progress_data.get("processed_candles"),
-            error=None,
-        )
 
     except HTTPException:
         raise
@@ -415,37 +328,67 @@ async def get_backtest_status(run_id: str):
 @router.get("/{run_id}/results", response_model=BacktestResults)
 async def get_backtest_results(run_id: str):
     """
-    Get backtest results summary.
+    Get backtest results summary by querying Temporal workflow.
 
     Returns performance metrics, equity stats, and trade statistics.
     Only available when backtest status is 'completed'.
     """
     try:
-        cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
+        from ops_api.temporal_client import get_temporal_client
+        from temporalio.service import RPCError
 
-        if not cached:
+        client = await get_temporal_client()
+
+        try:
+            # Get workflow handle
+            handle = client.get_workflow_handle(run_id)
+
+            # Query workflow for results
+            results_data = await handle.query("get_results")
+
+            # Check if completed
+            if "error" in results_data:
+                raise HTTPException(status_code=400, detail=results_data["error"])
+
+            return BacktestResults(
+                run_id=results_data["run_id"],
+                status=results_data["status"],
+                final_equity=clean_nan(results_data.get("final_equity")),
+                equity_return_pct=clean_nan(results_data.get("equity_return_pct")),
+                sharpe_ratio=clean_nan(results_data.get("sharpe_ratio")),
+                max_drawdown_pct=clean_nan(results_data.get("max_drawdown_pct")),
+                win_rate=clean_nan(results_data.get("win_rate")),
+                total_trades=results_data.get("total_trades"),
+                avg_win=clean_nan(results_data.get("avg_win")),
+                avg_loss=clean_nan(results_data.get("avg_loss")),
+                profit_factor=clean_nan(results_data.get("profit_factor")),
+            )
+
+        except RPCError as e:
+            # Workflow not found, try disk cache fallback
+            logger.warning(f"Workflow {run_id} not found in Temporal, checking disk cache")
+            cached = load_backtest_from_disk(run_id)
+
+            if cached:
+                # Return results from disk cache
+                result: PortfolioBacktestResult = cached.get("result")
+                if result:
+                    summary = result.summary
+                    return BacktestResults(
+                        run_id=run_id,
+                        status="completed",
+                        final_equity=clean_nan(summary.get("final_equity")),
+                        equity_return_pct=clean_nan(summary.get("return_pct")),
+                        sharpe_ratio=clean_nan(summary.get("sharpe_ratio")),
+                        max_drawdown_pct=clean_nan(summary.get("max_drawdown_pct")),
+                        win_rate=clean_nan(summary.get("win_rate")),
+                        total_trades=summary.get("total_trades"),
+                        avg_win=clean_nan(summary.get("avg_win")),
+                        avg_loss=clean_nan(summary.get("avg_loss")),
+                        profit_factor=clean_nan(summary.get("profit_factor")),
+                    )
+
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
-
-        if cached["status"] != "completed":
-            raise HTTPException(status_code=400, detail=f"Backtest {run_id} is not completed")
-
-        result: PortfolioBacktestResult = cached["result"]
-        summary = result.summary
-
-        return BacktestResults(
-            run_id=run_id,
-            status="completed",
-            final_equity=clean_nan(summary.get("final_equity")),
-            equity_return_pct=clean_nan(summary.get("return_pct")),
-            sharpe_ratio=clean_nan(summary.get("sharpe_ratio")),
-            max_drawdown_pct=clean_nan(summary.get("max_drawdown_pct")),
-            win_rate=clean_nan(summary.get("win_rate")),
-            total_trades=summary.get("total_trades"),  # Integer, won't be NaN
-            avg_win=clean_nan(summary.get("avg_win")),
-            avg_loss=clean_nan(summary.get("avg_loss")),
-            profit_factor=clean_nan(summary.get("profit_factor")),
-        )
 
     except HTTPException:
         raise
@@ -463,7 +406,6 @@ async def get_equity_curve(run_id: str):
     """
     try:
         cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -502,7 +444,6 @@ async def get_backtest_trades(
     """
     try:
         cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -557,7 +498,6 @@ async def get_playback_candles(
     """
     try:
         cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -661,7 +601,6 @@ async def get_playback_events(
     """
     try:
         cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -724,7 +663,6 @@ async def get_portfolio_state_snapshot(run_id: str, timestamp: str):
     """
     try:
         cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -842,7 +780,6 @@ async def get_llm_insights(run_id: str):
     """
     try:
         cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -890,6 +827,11 @@ async def list_backtests(
 
         backtest_list = []
         for run_id, cached in cached_items[:limit]:
+            # Skip entries without proper structure
+            if not isinstance(cached, dict) or "status" not in cached:
+                logger.warning(f"Skipping malformed cache entry: {run_id}")
+                continue
+
             # Filter by status if specified
             if status and cached["status"] != status:
                 continue
@@ -897,13 +839,13 @@ async def list_backtests(
             backtest_list.append(
                 BacktestStatus(
                     run_id=run_id,
-                    status=cached["status"],
-                    progress=100.0 if cached["status"] == "completed" else 0.0,
-                    started_at=None,
+                    status=cached.get("status", "unknown"),
+                    progress=100.0 if cached.get("status") == "completed" else 0.0,
+                    started_at=cached.get("started_at"),
                     completed_at=cached.get("completed_at"),
                     candles_total=None,
                     candles_processed=None,
-                    error=None,
+                    error=cached.get("error"),
                 )
             )
 

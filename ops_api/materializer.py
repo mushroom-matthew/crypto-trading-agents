@@ -18,7 +18,8 @@ from ops_api.schemas import (
     PositionSnapshot,
     RunSummary,
 )
-from ops_api.temporal_client import get_runtime_mode
+from ops_api.temporal_client import get_runtime_mode, get_temporal_client
+from temporalio.client import WorkflowExecutionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,40 @@ class Materializer:
             )
         return telemetry
 
-    def list_runs(self) -> List[RunSummary]:
-        """
-        Synthesize run summaries from events.
+    async def _get_workflow_status(self, workflow_id: str) -> str:
+        """Query Temporal for actual workflow status.
 
-        Note: Status is determined by recent activity (events within last 5 minutes = running).
+        Returns: "running", "completed", "failed", "stopped", or "unknown"
+        """
+        try:
+            client = await get_temporal_client()
+            handle = client.get_workflow_handle(workflow_id)
+            desc = await handle.describe()
+
+            # Map Temporal status to our status enum
+            status_map = {
+                WorkflowExecutionStatus.RUNNING: "running",
+                WorkflowExecutionStatus.COMPLETED: "completed",
+                WorkflowExecutionStatus.FAILED: "failed",
+                WorkflowExecutionStatus.CANCELED: "stopped",
+                WorkflowExecutionStatus.TERMINATED: "stopped",
+                WorkflowExecutionStatus.CONTINUED_AS_NEW: "running",
+                WorkflowExecutionStatus.TIMED_OUT: "failed",
+            }
+            return status_map.get(desc.status, "unknown")
+        except Exception as e:
+            logger.debug(f"Could not get Temporal status for {workflow_id}: {e}")
+            return "unknown"
+
+    async def list_runs_async(self) -> List[RunSummary]:
+        """
+        Synthesize run summaries from events and Temporal workflows.
+
+        Status is determined by:
+        1. Query Temporal for known workflows (execution-ledger, broker-agent, etc.)
+        2. Fall back to event-based heuristic (events within 5 min = running)
+
         Mode is read from actual runtime configuration.
-        TODO: Integrate with Temporal visibility API for true workflow status.
         """
         events = self.store.list_events(limit=500)
         summaries: dict[str, RunSummary] = {}
@@ -125,11 +153,13 @@ class Materializer:
             logger.warning("Failed to get runtime mode, defaulting to 'paper': %s", e)
             actual_mode = "paper"
 
+        # Track which workflows to query Temporal for
+        known_workflows = set()
+
         for event in events:
             rid = event.run_id or "default"
             if rid not in summaries:
-                # Determine status based on recent activity
-                # If last event is within 5 minutes, consider it running, otherwise stopped
+                # Initialize with event-based heuristic
                 time_since_update = (now - event.ts.replace(tzinfo=None)).total_seconds()
                 status = "running" if time_since_update < 300 else "stopped"
 
@@ -139,11 +169,16 @@ class Materializer:
                     latest_judge_id=None,
                     status=status,  # type: ignore[arg-type]
                     last_updated=event.ts,
-                    mode=actual_mode,  # Use actual mode from config
+                    mode=actual_mode,
                 )
+
+                # Track known workflow IDs for Temporal queries
+                if rid.startswith(("execution-ledger", "broker-agent", "judge-agent", "backtest-")):
+                    known_workflows.add(rid)
+
             summaries[rid].last_updated = max(summaries[rid].last_updated, event.ts)
 
-            # Update status based on most recent event
+            # Update event-based status
             time_since_update = (now - summaries[rid].last_updated.replace(tzinfo=None)).total_seconds()
             summaries[rid].status = "running" if time_since_update < 300 else "stopped"  # type: ignore[assignment]
 
@@ -152,6 +187,12 @@ class Materializer:
             if event.type == "plan_judged":
                 summaries[rid].latest_judge_id = event.payload.get("judge_id")
 
+        # Query Temporal for actual status of known workflows
+        for workflow_id in known_workflows:
+            temporal_status = await self._get_workflow_status(workflow_id)
+            if temporal_status != "unknown" and workflow_id in summaries:
+                summaries[workflow_id].status = temporal_status  # type: ignore[assignment]
+
         # Only fall back to default if no events exist at all
         if not summaries:
             return [
@@ -159,7 +200,75 @@ class Materializer:
                     run_id="no_events",
                     latest_plan_id=None,
                     latest_judge_id=None,
-                    status="stopped",  # No activity = stopped
+                    status="stopped",
+                    last_updated=now,
+                    mode=actual_mode,
+                )
+            ]
+
+        return list(summaries.values())
+
+    def list_runs(self) -> List[RunSummary]:
+        """Synchronous wrapper for list_runs_async.
+
+        Note: This runs the async version in a new event loop.
+        Prefer calling list_runs_async directly from async contexts.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in an async context, create a task
+                logger.warning("list_runs() called from async context, use list_runs_async() instead")
+                # Fall back to event-based heuristic only
+                return self._list_runs_event_based()
+            return loop.run_until_complete(self.list_runs_async())
+        except RuntimeError:
+            # No event loop, create one
+            return asyncio.run(self.list_runs_async())
+
+    def _list_runs_event_based(self) -> List[RunSummary]:
+        """Event-based heuristic fallback (original implementation)."""
+        events = self.store.list_events(limit=500)
+        summaries: dict[str, RunSummary] = {}
+        now = datetime.utcnow()
+
+        try:
+            actual_mode = get_runtime_mode()
+        except Exception as e:
+            logger.warning("Failed to get runtime mode, defaulting to 'paper': %s", e)
+            actual_mode = "paper"
+
+        for event in events:
+            rid = event.run_id or "default"
+            if rid not in summaries:
+                time_since_update = (now - event.ts.replace(tzinfo=None)).total_seconds()
+                status = "running" if time_since_update < 300 else "stopped"
+
+                summaries[rid] = RunSummary(
+                    run_id=rid,
+                    latest_plan_id=None,
+                    latest_judge_id=None,
+                    status=status,  # type: ignore[arg-type]
+                    last_updated=event.ts,
+                    mode=actual_mode,
+                )
+            summaries[rid].last_updated = max(summaries[rid].last_updated, event.ts)
+
+            time_since_update = (now - summaries[rid].last_updated.replace(tzinfo=None)).total_seconds()
+            summaries[rid].status = "running" if time_since_update < 300 else "stopped"  # type: ignore[assignment]
+
+            if event.type == "plan_generated":
+                summaries[rid].latest_plan_id = event.payload.get("plan_id")
+            if event.type == "plan_judged":
+                summaries[rid].latest_judge_id = event.payload.get("judge_id")
+
+        if not summaries:
+            return [
+                RunSummary(
+                    run_id="no_events",
+                    latest_plan_id=None,
+                    latest_judge_id=None,
+                    status="stopped",
                     last_updated=now,
                     mode=actual_mode,
                 )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import pandas as pd
 
@@ -14,6 +14,9 @@ from tools.performance_analysis import PerformanceAnalyzer
 
 from .dataset import load_ohlcv
 from .strategies import ExecutionAgentStrategy, StrategyWrapperConfig
+
+# Type for progress callback: (current, total, timestamp) -> None
+ProgressCallback = Optional[Callable[[int, int, Optional[str]], None]]
 
 
 @dataclass
@@ -244,6 +247,7 @@ def run_backtest(
     strategy_config: StrategyWrapperConfig,
     flatten_positions_daily: bool = False,
     risk_limits: "RiskLimitSettings | None" = None,
+    progress_callback: ProgressCallback = None,
 ) -> BacktestResult:
     raw_data = load_ohlcv(pair, start, end, timeframe='1h')
     features = _compute_features(raw_data)
@@ -258,7 +262,11 @@ def run_backtest(
     last_timestamp: pd.Timestamp | None = None
     last_prices: Dict[str, float] = {}
 
-    for ts, row in features.iterrows():
+    total_rows = len(features)
+    for idx, (ts, row) in enumerate(features.iterrows()):
+        # Call progress callback every 100 candles
+        if progress_callback and idx % 100 == 0:
+            progress_callback(idx, total_rows, ts.isoformat())
         day = ts.date()
         if flatten_positions_daily and last_day and day != last_day:
             _flatten_positions(portfolio, cost_basis, last_prices, last_timestamp, fee_rate, trades, risk_limits=risk_limits)
@@ -307,6 +315,7 @@ def run_portfolio_backtest(
     weights: Optional[Sequence[float]] = None,
     flatten_positions_daily: bool = False,
     risk_limits: "RiskLimitSettings | None" = None,
+    progress_callback: ProgressCallback = None,
 ) -> PortfolioBacktestResult:
     if not pairs:
         raise ValueError("pairs must not be empty")
@@ -319,7 +328,15 @@ def run_portfolio_backtest(
     aggregated_trades: List[pd.DataFrame] = []
     per_pair: Dict[str, BacktestResult] = {}
 
-    for pair, weight in zip(pairs, weights):
+    total_pairs = len(pairs)
+    for pair_idx, (pair, weight) in enumerate(zip(pairs, weights)):
+        # Create progress wrapper for this pair
+        def pair_progress_callback(current: int, total: int, timestamp: str = None):
+            if progress_callback:
+                # Scale progress across all pairs
+                overall_current = (pair_idx * total) + current
+                overall_total = total_pairs * total
+                progress_callback(overall_current, overall_total, timestamp)
         cash_allocation = initial_cash * weight
         result = run_backtest(
             pair=pair,
@@ -330,6 +347,7 @@ def run_portfolio_backtest(
             strategy_config=strategy_config,
             flatten_positions_daily=flatten_positions_daily,
             risk_limits=risk_limits,
+            progress_callback=pair_progress_callback,
         )
         per_pair[pair] = result
 

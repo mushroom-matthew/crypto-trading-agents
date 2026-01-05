@@ -75,6 +75,25 @@ services:
       retries: 20
 
 
+  ops-api: # Ops API for backtesting and monitoring
+    build: .
+    depends_on:
+      temporal:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - DB_DSN=postgresql+psycopg://botuser:botpass@db:5432/botdb
+    command: sh -lc "uv run uvicorn ops_api.app:app --host 0.0.0.0 --port 8081"
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
   worker: # Temporal worker that loads workflows
     build: .
     depends_on:

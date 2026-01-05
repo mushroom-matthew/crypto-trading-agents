@@ -135,7 +135,7 @@ async def status() -> dict:
 
 @app.get("/workflows", response_model=List[RunSummary])
 async def list_runs() -> List[RunSummary]:
-    return materializer.list_runs()
+    return await materializer.list_runs_async()
 
 
 @app.get("/block_reasons", response_model=BlockReasonsAggregate)
@@ -170,4 +170,11 @@ if UI_DIR.exists():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8081)
+    # Use reload=False to avoid asyncio.run() issues with Python 3.13
+    uvicorn.run(
+        "ops_api.app:app",
+        host="0.0.0.0",
+        port=8081,
+        reload=False,
+        log_level="info"
+    )

@@ -430,6 +430,25 @@ def _should_execute_signal(run: StrategyRun, spec: StrategySpec, ts: int) -> Tup
         return True, ""
     outcome = event_list[-1]
     if outcome.get("action") == "executed":
+        # Emit trigger_fired event for successful signal execution
+        try:
+            asyncio.create_task(
+                emit_event(
+                    "trigger_fired",
+                    {
+                        "trigger_id": outcome.get("trigger_id"),
+                        "symbol": outcome.get("symbol", "unknown"),
+                        "side": outcome.get("side", "unknown"),
+                        "strategy_id": spec.strategy_id if spec.strategy_id else "default",
+                        "timestamp": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                    },
+                    source="execution_agent",
+                    run_id=run.run_id,
+                    correlation_id=outcome.get("trigger_id"),
+                )
+            )
+        except Exception as e:
+            logger.warning("Failed to emit trigger_fired event: %s", e)
         return True, ""
 
     # Emit a durable block reason event for Ops visibility

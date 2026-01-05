@@ -135,7 +135,7 @@ async def get_workflows():
     Returns status and metadata for all active workflows.
     """
     try:
-        runs = _materializer.list_runs()
+        runs = await _materializer.list_runs_async()
 
         return [
             WorkflowSummary(

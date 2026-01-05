@@ -7,12 +7,24 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import select, func
+
+from app.db.repo import Database
+from app.db.models import Wallet as WalletModel, Balance, LedgerEntry
+from app.ledger.reconciliation import Reconciler, DriftRecord as ReconDriftRecord
+from app.ledger.engine import LedgerEngine
+from app.coinbase.client import CoinbaseClient
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/wallets", tags=["wallets"])
+
+# Initialize database
+_db = Database()
+_settings = get_settings()
 
 
 # Response Schemas
@@ -66,39 +78,47 @@ async def list_wallets():
     Returns wallet information including balances and drift status.
     """
     try:
-        # TODO: Query Wallet and Balance tables from database
-        # For now, return placeholder
-
         logger.info("List wallets requested")
 
-        # In the future:
-        # from app.db.repo import Database
-        # from app.core.config import get_settings
-        # from sqlalchemy import select
-        # from app.db.models import Wallet, Balance
-        #
-        # settings = get_settings()
-        # db = Database(settings)
-        # async with db.session() as session:
-        #     result = await session.execute(select(Wallet))
-        #     wallets = result.scalars().all()
-        #     return [
-        #         Wallet(
-        #             wallet_id=w.wallet_id,
-        #             name=w.name,
-        #             ledger_balance=get_ledger_balance(w),
-        #             coinbase_balance=get_coinbase_balance(w),
-        #             drift=calculate_drift(w),
-        #             tradeable_fraction=w.tradeable_fraction,
-        #             type=w.type.value
-        #         )
-        #         for w in wallets
-        #     ]
+        async with _db.session() as session:
+            # Query all wallets
+            result = await session.execute(select(WalletModel))
+            wallets = result.scalars().all()
 
-        return []
+            wallet_list = []
+            for w in wallets:
+                # Query balances for this wallet
+                balance_result = await session.execute(
+                    select(Balance).where(Balance.wallet_id == w.wallet_id)
+                )
+                balances = balance_result.scalars().all()
+
+                # Get primary currency balance (USD or first available)
+                primary_balance = Decimal("0")
+                currency = None
+                for b in balances:
+                    if b.currency == "USD" or currency is None:
+                        primary_balance = b.available
+                        currency = b.currency
+
+                wallet_list.append(
+                    Wallet(
+                        wallet_id=w.wallet_id,
+                        name=w.name,
+                        currency=currency,
+                        ledger_balance=primary_balance,
+                        coinbase_balance=None,  # Filled during reconciliation
+                        drift=None,  # Calculated during reconciliation
+                        tradeable_fraction=w.tradeable_fraction,
+                        type=w.type.value
+                    )
+                )
+
+        logger.info(f"Retrieved {len(wallet_list)} wallets")
+        return wallet_list
 
     except Exception as e:
-        logger.error("Failed to list wallets: %s", e)
+        logger.error("Failed to list wallets: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -172,53 +192,54 @@ async def trigger_reconciliation(request: ReconcileRequest):
     Compares ledger balances with Coinbase balances and reports drift.
     """
     try:
-        # TODO: Run reconciliation via app.ledger.reconciliation.Reconciler
         logger.info("Reconciliation requested with threshold: %s", request.threshold)
 
-        # In the future:
-        # from app.ledger.reconciliation import Reconciler
-        # from app.coinbase.client import CoinbaseClient
-        #
-        # settings = get_settings()
-        # db = Database(settings)
-        # ledger = LedgerEngine(db)
-        # reconciler = Reconciler(db, ledger)
-        #
-        # async with CoinbaseClient(settings) as client:
-        #     report = await reconciler.reconcile(client, threshold=request.threshold)
-        #
-        # return ReconciliationReport(
-        #     timestamp=datetime.utcnow(),
-        #     total_wallets=len(report.drifts),
-        #     drifts_detected=sum(1 for d in report.drifts if abs(d.drift) > 0),
-        #     drifts_within_threshold=sum(1 for d in report.drifts if d.within_threshold),
-        #     drifts_exceeding_threshold=sum(1 for d in report.drifts if not d.within_threshold),
-        #     records=[
-        #         DriftRecord(
-        #             wallet_id=d.wallet_id,
-        #             wallet_name=d.wallet_name,
-        #             currency=d.currency,
-        #             ledger_balance=d.ledger_balance,
-        #             coinbase_balance=d.coinbase_balance,
-        #             drift=d.drift,
-        #             within_threshold=d.within_threshold
-        #         )
-        #         for d in report.drifts
-        #     ]
-        # )
+        # Initialize ledger engine and reconciler
+        ledger = LedgerEngine(_db)
+        reconciler = Reconciler(_db, ledger)
 
-        # Placeholder response
-        return ReconciliationReport(
+        # Run reconciliation
+        async with CoinbaseClient(_settings) as client:
+            recon_report = await reconciler.reconcile(client, threshold=request.threshold)
+
+        # Convert to API response format
+        records = [
+            DriftRecord(
+                wallet_id=d.wallet_id,
+                wallet_name=d.wallet_name,
+                currency=d.currency,
+                ledger_balance=d.ledger_balance,
+                coinbase_balance=d.coinbase_balance,
+                drift=d.drift,
+                within_threshold=d.within_threshold
+            )
+            for d in recon_report.entries
+        ]
+
+        # Calculate summary statistics
+        total_wallets = len(set(d.wallet_id for d in recon_report.entries))
+        drifts_detected = sum(1 for d in recon_report.entries if abs(d.drift) > 0)
+        drifts_within = sum(1 for d in recon_report.entries if d.within_threshold)
+        drifts_exceeding = sum(1 for d in recon_report.entries if not d.within_threshold)
+
+        response = ReconciliationReport(
             timestamp=datetime.utcnow(),
-            total_wallets=0,
-            drifts_detected=0,
-            drifts_within_threshold=0,
-            drifts_exceeding_threshold=0,
-            records=[]
+            total_wallets=total_wallets,
+            drifts_detected=drifts_detected,
+            drifts_within_threshold=drifts_within,
+            drifts_exceeding_threshold=drifts_exceeding,
+            records=records
         )
 
+        logger.info(
+            f"Reconciliation complete: {total_wallets} wallets, "
+            f"{drifts_detected} drifts detected, {drifts_exceeding} exceeding threshold"
+        )
+
+        return response
+
     except Exception as e:
-        logger.error("Failed to trigger reconciliation: %s", e)
+        logger.error("Failed to trigger reconciliation: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

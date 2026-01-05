@@ -1,11 +1,11 @@
 # UI Unification Plan: Backtest & Live Trading Dashboard
 
-**Status**: ACTIVE IMPLEMENTATION (Phase 2 in progress)
+**Status**: ACTIVE IMPLEMENTATION (Phase 1 & 2 completed, Phase 3 in progress)
 **Created**: 2026-01-02
-**Last Updated**: 2026-01-03
+**Last Updated**: 2026-01-04
 **Priority**: HIGH - Critical for operational visibility
 
-## Current Progress (2026-01-03)
+## Current Progress (2026-01-04)
 
 **Completed**:
 - ✅ Frontend framework bootstrap (React + Vite + TailwindCSS v4)
@@ -14,16 +14,19 @@
 - ✅ Tab navigation between Backtest and Live views
 - ✅ API proxy configuration (Vite → FastAPI backend)
 - ✅ Auto-refresh queries with TanStack Query
+- ✅ Market ticker component (cross-tab, real-time prices) - integrated into both tabs
+- ✅ Event timeline component (cross-tab, bot events and trade triggers) - integrated into both tabs
+- ✅ Week 1 foundation: DB tables (BlockEvent, RiskAllocation, PositionSnapshot, BacktestRun)
+- ✅ Database migration applied successfully
 
 **In Progress**:
-- ⏳ Market ticker component (cross-tab, real-time prices)
-- ⏳ Event timeline component (cross-tab, bot events and trade triggers)
+- ⏳ Phase 3 integration tasks (backtest orchestration, live reports)
 
 **Next**:
-- 📋 Integrate ticker + timeline into both tabs
 - 📋 Market Monitor tab (dedicated chart view)
 - 📋 Agent Inspector tab (event chains, LLM telemetry)
 - 📋 Wallet Reconciliation tab
+- 📋 Live daily reports (matching backtest format)
 
 ## Executive Summary
 
@@ -273,9 +276,9 @@ class LiveWalletProvider(WalletProvider):
   - Performance metrics table (sharpe, drawdown, win rate)
   - Daily reports accordion (expand each day)
   - Trade log table (filterable by symbol/side/trigger)
+- [x] **Market ticker (persistent)** - Real-time price feed for active symbols - **COMPLETED**
+- [x] **Event timeline** - Bot events and trade triggers with timestamps - **COMPLETED**
 - [ ] A/B comparison view (select 2 backtests, diff metrics)
-- [ ] **Market ticker (persistent)** - Real-time price feed for active symbols
-- [ ] **Event timeline** - Bot events and trade triggers with timestamps
 
 **API Endpoints Needed**:
 - `POST /backtests` - Start new backtest
@@ -293,9 +296,9 @@ class LiveWalletProvider(WalletProvider):
 - [x] Risk budget gauge (used / available for day) - **COMPLETED**
 - [x] Block reasons summary (counts by reason: daily_cap, risk_budget, etc.) - **COMPLETED**
 - [x] Rejected trades log (blocked with reasons and timestamps) - **COMPLETED**
+- [x] **Market ticker (persistent)** - Real-time price feed for active symbols - **COMPLETED**
+- [x] **Event timeline** - Bot events and trade triggers with timestamps - **COMPLETED**
 - [ ] Planned trades queue (approved triggers awaiting execution)
-- [ ] **Market ticker (persistent)** - Real-time price feed for active symbols
-- [ ] **Event timeline** - Bot events and trade triggers with timestamps
 
 **API Endpoints Needed**:
 - `GET /live/positions` - Current positions
@@ -482,13 +485,14 @@ async def list_runs(self) -> List[RunSummary]:
 - [ ] Set `RUN_MODE=live` and `LIVE_TRADING_ACK=true`, verify mode shows "live"
 - [ ] Check that default fallback only triggers when event store is empty
 
-#### 1.3 Add Missing Database Tables (HIGH PRIORITY)
+#### 1.3 Add Missing Database Tables (✅ COMPLETED 2026-01-04)
 **Effort**: 1 day
-**Files to modify**:
-- `app/db/models.py`
-- Create migration: `make migrate name="add_unified_tracking_tables"`
+**Files modified**:
+- `app/db/models.py` - Tables already existed
+- Created migration: `app/db/migrations/versions/0002_add_week1_tables.py`
+- Applied migration successfully
 
-**New Tables**:
+**New Tables** (all created and verified):
 ```python
 # app/db/models.py
 
@@ -677,10 +681,10 @@ async def get_equity_curve(run_id: str):
 ### Phase 2: Frontend Development
 
 #### 2.0 Shared Components (Cross-Tab)
-**Status**: PLANNED (to be implemented next)
+**Status**: ✅ COMPLETED (2026-01-04)
 **Effort**: 2-3 days
 
-These components will be visible in both Backtest Control and Live Trading Monitor tabs.
+These components are now visible in both Backtest Control and Live Trading Monitor tabs.
 
 **Component 1: MarketTicker**
 - **Purpose**: Real-time price ticker showing live market data
@@ -786,9 +790,11 @@ ui/dashboard/
 - [x] `LiveTradingMonitor.tsx` - Real-time positions, fills, blocks, risk budget gauge, and portfolio metrics
 - [x] Tab navigation in `App.tsx` - Clean tab switching between Backtest and Live views
 
+**Completed Shared Components**:
+- [x] `MarketTicker.tsx` - Real-time price ticker (integrated into both tabs) - **COMPLETED**
+- [x] `EventTimeline.tsx` - Bot event timeline (integrated into both tabs) - **COMPLETED**
+
 **Pending Components**:
-- [ ] `MarketTicker.tsx` - Real-time price ticker (to be added to both tabs)
-- [ ] `EventTimeline.tsx` - Bot event timeline (to be added to both tabs)
 - [ ] `MarketMonitor.tsx` - Dedicated market data tab (future work)
 - [ ] `AgentInspector.tsx` - Dedicated agent monitoring tab (future work)
 - [ ] `WalletReconciliation.tsx` - Wallet reconciliation tab (future work)
@@ -1244,15 +1250,17 @@ mv run_stack.sh run_stack.sh.DEPRECATED
 ## Migration Path
 
 ### From Current State
-1. **Week 1**: Phase 1 foundation (event wiring, materializer fix, new tables) - **IN PROGRESS**
+1. ~~**Week 1**: Phase 1 foundation (event wiring, materializer fix, new tables)~~ - **COMPLETED 2026-01-04**
 2. ~~**Week 2**: Phase 1 API endpoints + Phase 2 frontend bootstrap~~ - **COMPLETED**
 3. ~~**Week 3**: Phase 2 core components (backtest control, live monitor)~~ - **COMPLETED**
-4. **Current Status (2026-01-03)**:
+4. **Current Status (2026-01-04)**:
    - ✅ React + Vite + TailwindCSS frontend bootstrapped
    - ✅ Backtest Control tab fully functional
    - ✅ Live Trading Monitor tab fully functional
    - ✅ Tab navigation implemented
-   - ⏳ **Next up**: Market ticker + Event timeline shared components
+   - ✅ Market ticker + Event timeline shared components **COMPLETED**
+   - ✅ Week 1 DB tables (BlockEvent, RiskAllocation, PositionSnapshot, BacktestRun) **COMPLETED**
+   - ⏳ **Next up**: Phase 3 integration tasks
 5. **Week 4+**: Phase 3 integration (backtest orchestration, live reports, reconciliation)
 6. **Week 5+**: Testing, polish, cleanup, documentation
 

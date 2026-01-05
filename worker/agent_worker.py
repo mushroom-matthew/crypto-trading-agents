@@ -16,6 +16,7 @@ from agents.runtime_mode import RuntimeMode
 ALLOWED_MODULES = [
     # Activities
     "agents.activities.ledger",
+    "backtesting.activities",  # Backtest execution activities
     # Agent workflows
     "agents.workflows.backtest_workflow",
     "agents.workflows.broker_agent_workflow",
@@ -25,6 +26,7 @@ ALLOWED_MODULES = [
     "agents.workflows.judge_agent_workflow",
     "agents.workflows.strategy_spec_workflow",
     # Durable tools
+    "tools.backtest_execution",  # Backtest workflow
     "tools.ensemble_nudge",
     "tools.execution",
     "tools.feature_engineering",

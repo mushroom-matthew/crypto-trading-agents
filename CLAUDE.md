@@ -216,10 +216,39 @@ All agents use token-based conversation management (`agents/context_manager.py`)
 - Captures prompts, responses, token usage
 - Required for audit trails - don't add OpenAI clients without Langfuse wrapping
 
-**Ops API** (`ops_api/`):
-- FastAPI server at `http://localhost:8081` (when running via compose)
-- Exposes status, events, telemetry for UI consumption
-- Event store pattern with materialized views
+**Dual Server Architecture:**
+
+The system runs TWO separate HTTP servers with distinct purposes:
+
+1. **MCP Server** (`mcp_server/app.py`) - Port 8080 - Agent/Programmatic Interface
+   - FastMCP wrapper around FastAPI for Claude Desktop integration
+   - Exposes trading operations as `@mcp.tool()` decorators
+   - Used by: Agents, Claude Desktop, programmatic API clients
+   - **When to add endpoints here:**
+     - Trading operations (place_mock_order, start_market_stream)
+     - Agent interactions (set_user_preferences, send_user_feedback)
+     - Workflow queries (get_portfolio_status, get_transaction_history)
+     - Real-time signals (POST /signal/{name})
+   - **Pattern:** `@app.tool()` for MCP tools, `@app.custom_route()` for HTTP endpoints
+
+2. **Ops API** (`ops_api/app.py`) - Port 8081 - Human Operator Interface
+   - Pure FastAPI for web dashboards and monitoring
+   - Exposes status, events, telemetry for UI consumption
+   - Used by: React UI, monitoring dashboards, human operators
+   - **When to add endpoints here:**
+     - Backtesting (POST /backtests, GET /backtests/{id}/results)
+     - Live trading monitoring (GET /live/fills, GET /live/positions)
+     - Market data visualization (GET /market/candles, GET /market/tickers)
+     - Analytics and reports (GET /wallets/reconciliation)
+   - **Pattern:** Standard FastAPI `@router.get()`, `@router.post()` with APIRouter
+   - Event store pattern with materialized views
+
+**Port Assignment:**
+- `8080`: MCP Server (agent tools)
+- `8081`: Ops API (operator dashboards)
+- `8088`: Temporal UI
+- `5432`: PostgreSQL
+- `7233`: Temporal gRPC
 
 ## Environment Variables
 
@@ -275,6 +304,26 @@ Critical variables (see `.env.example` for full list):
 - Workflow logs via `tools/agent_logger.py` for distributed logging
 
 ## Common Patterns
+
+### Choosing Between MCP Server vs Ops API
+
+**Use MCP Server (port 8080) when:**
+- Exposing functionality to agents or Claude Desktop
+- Building tools that modify system state (place orders, set preferences)
+- Creating real-time signal endpoints
+- Implementing workflow triggers
+
+**Use Ops API (port 8081) when:**
+- Building UI dashboards for human operators
+- Creating read-only analytics endpoints
+- Implementing backtest orchestration
+- Adding monitoring/observability features
+
+**Example Decision Tree:**
+- "Add backtest control" → Ops API (operator feature)
+- "Add place_order tool" → MCP Server (agent tool)
+- "Add live trade monitoring" → Ops API (operator dashboard)
+- "Add set_risk_limits" → MCP Server (agent configuration)
 
 ### Adding a New MCP Tool
 
@@ -333,6 +382,29 @@ status = await handle.query(ExecutionLedgerWorkflow.get_portfolio_status)
 print(status["cash"], status["positions"])
 ```
 
+### Adding a New Ops API Endpoint
+
+1. Define endpoint in `ops_api/routers/<category>.py`:
+```python
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/backtests", tags=["backtests"])
+
+@router.get("/{run_id}/results")
+async def get_backtest_results(run_id: str):
+    # Implementation
+    return {"run_id": run_id, "results": ...}
+```
+
+2. Include router in `ops_api/app.py`:
+```python
+from ops_api.routers import backtests
+
+app.include_router(backtests.router)
+```
+
+3. Update UI to consume endpoint at `http://localhost:8081/backtests/{id}/results`
+
 ## Important Notes
 
 - **Real Trading Risk**: The `app.cli.main trade place` command makes REAL Coinbase API calls with no dry-run mode. Cost gates and wallet fractions are the only guards.
@@ -340,7 +412,11 @@ print(status["cash"], status["positions"])
 - **Ledger Separation**: Mock ledger (workflows) vs production ledger (app/) are separate systems. Agents use mock by default.
 - **Workflow History**: Long-running workflows must implement continue-as-new to avoid hitting Temporal's history size limits.
 - **Determinism**: Workflows cannot make HTTP calls, use random(), or read system time directly - use activities for non-deterministic operations.
-- **API Compatibility**: MCP tools exposed via FastAPI at port 8080. Temporal UI at port 8088 when running via compose.
+- **API Compatibility**:
+  - MCP tools at port 8080 (agent interface)
+  - Ops API at port 8081 (operator interface)
+  - Temporal UI at port 8088
+  - NEVER mix MCP tools into Ops API or vice versa
 
 ## Repository Reference
 

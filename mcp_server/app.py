@@ -1546,6 +1546,103 @@ async def healthz(_request):
     return PlainTextResponse("ok", status_code=200)
 
 
+# ---- Backtest Control Endpoints ----
+from ops_api.routers.backtests import (
+    BacktestConfig,
+    start_backtest,
+    get_backtest_status,
+    get_backtest_results,
+    get_equity_curve,
+    get_backtest_trades,
+    get_playback_candles,
+    get_playback_events,
+    get_portfolio_state_snapshot,
+    get_backtest_progress,
+    get_llm_insights,
+    list_backtests,
+)
+
+@app.custom_route("/backtests", methods=["POST"])
+async def http_start_backtest(request: Request) -> Response:
+    """Start a new backtest run."""
+    body = await request.json()
+    config = BacktestConfig(**body)
+    result = await start_backtest(config)
+    return JSONResponse(result.model_dump())
+
+@app.custom_route("/backtests", methods=["GET"])
+async def http_list_backtests(request: Request) -> Response:
+    """List all backtests."""
+    status = request.query_params.get("status")
+    limit = int(request.query_params.get("limit", "50"))
+    result = await list_backtests(status, limit)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}", methods=["GET"])
+async def http_get_backtest_status(request: Request) -> Response:
+    """Get backtest status."""
+    run_id = request.path_params["run_id"]
+    result = await get_backtest_status(run_id)
+    return JSONResponse(result.model_dump())
+
+@app.custom_route("/backtests/{run_id}/results", methods=["GET"])
+async def http_get_backtest_results(request: Request) -> Response:
+    """Get backtest results."""
+    run_id = request.path_params["run_id"]
+    result = await get_backtest_results(run_id)
+    return JSONResponse(result.model_dump())
+
+@app.custom_route("/backtests/{run_id}/equity", methods=["GET"])
+async def http_get_equity_curve(request: Request) -> Response:
+    """Get equity curve."""
+    run_id = request.path_params["run_id"]
+    result = await get_equity_curve(run_id)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/trades", methods=["GET"])
+async def http_get_backtest_trades(request: Request) -> Response:
+    """Get backtest trades."""
+    run_id = request.path_params["run_id"]
+    limit = int(request.query_params.get("limit", "100"))
+    offset = int(request.query_params.get("offset", "0"))
+    result = await get_backtest_trades(run_id, limit, offset)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/playback/candles", methods=["GET"])
+async def http_get_playback_candles(request: Request) -> Response:
+    """Get playback candles."""
+    run_id = request.path_params["run_id"]
+    symbol = request.query_params["symbol"]
+    offset = int(request.query_params.get("offset", "0"))
+    limit = int(request.query_params.get("limit", "2000"))
+    result = await get_playback_candles(run_id, symbol, offset, limit)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/playback/events", methods=["GET"])
+async def http_get_playback_events(request: Request) -> Response:
+    """Get playback events."""
+    run_id = request.path_params["run_id"]
+    event_type = request.query_params.get("event_type")
+    symbol = request.query_params.get("symbol")
+    limit = int(request.query_params.get("limit", "1000"))
+    result = await get_playback_events(run_id, event_type, symbol, limit)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/progress", methods=["GET"])
+async def http_get_backtest_progress(request: Request) -> Response:
+    """Get backtest progress."""
+    run_id = request.path_params["run_id"]
+    result = await get_backtest_progress(run_id)
+    return JSONResponse(result)
+
+@app.custom_route("/backtests/{run_id}/llm-insights", methods=["GET"])
+async def http_get_llm_insights(request: Request) -> Response:
+    """Get LLM insights."""
+    run_id = request.path_params["run_id"]
+    result = await get_llm_insights(run_id)
+    return JSONResponse(result)
+
+
 # ---- Simple HTTP shims to invoke selected MCP tools ----
 @app.custom_route("/tools/start_market_stream", methods=["POST"])
 async def http_start_market_stream(request: Request) -> Response:

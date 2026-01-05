@@ -6,6 +6,7 @@ import { backtestAPI, type BacktestConfig } from '../lib/api';
 import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
 import { BACKTEST_PRESETS } from '../lib/presets';
 import { MarketTicker } from './MarketTicker';
+import { EventTimeline } from './EventTimeline';
 import { CandlestickChart } from './CandlestickChart';
 import { BacktestPlaybackViewer } from './BacktestPlaybackViewer';
 import { LLMInsights } from './LLMInsights';
@@ -551,6 +552,9 @@ export function BacktestControl() {
             />
           </div>
         )}
+
+        {/* Event Timeline */}
+        <EventTimeline limit={30} />
       </div>
     </div>
   );

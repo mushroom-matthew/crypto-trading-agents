@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ops_api.materializer import Materializer
 from ops_api.event_store import EventStore
+from app.db.repo import Database
+from ops_api.utils.live_daily_reporter import generate_live_daily_report
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live", tags=["live"])
 
-# Initialize materializer
+# Initialize materializer and database
 _materializer = Materializer()
+_db = Database()
 
 
 # Response Schemas
@@ -275,4 +278,52 @@ async def get_block_reasons_aggregate(run_id: Optional[str] = Query(default=None
 
     except Exception as e:
         logger.error("Failed to get block reasons: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/daily-report/{date}")
+async def get_daily_report(
+    date: str,
+    run_id: Optional[str] = Query(default=None)
+) -> Dict[str, Any]:
+    """
+    Get daily trading report for a specific date.
+
+    Returns backtest-style daily report with:
+    - Trade count and P&L metrics
+    - Block events by reason
+    - Risk budget utilization
+    - Win rate and performance stats
+
+    Args:
+        date: Date in YYYY-MM-DD format
+        run_id: Optional run ID to filter by
+
+    Example:
+        GET /live/daily-report/2026-01-05
+    """
+    try:
+        # Validate date format
+        try:
+            datetime.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid date format: {date}. Use YYYY-MM-DD format."
+            )
+
+        # Generate report using database session
+        async with _db.session() as session:
+            report = await generate_live_daily_report(
+                db=session,
+                date=date,
+                run_id=run_id
+            )
+
+        return report
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to generate daily report for %s: %s", date, e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

@@ -115,14 +115,39 @@ async def fetch_historical_ohlcv(symbol: str, timeframe: str = '1m', limit: int 
 
 @activity.defn
 async def record_tick(tick: dict) -> None:
-    """Send tick payload to the MCP server signal log."""
+    """Send tick payload to the MCP server signal log and emit to event store."""
+    # Send to MCP server signal log
     url = f"http://{MCP_HOST}:{MCP_PORT}/signal/market_tick"
     timeout = aiohttp.ClientTimeout(total=5)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             await session.post(url, json=tick)
         except Exception as exc:
-            logger.error("Failed to record tick: %s", exc)
+            logger.error("Failed to record tick to MCP: %s", exc)
+
+    # Emit to event store for ops visibility
+    try:
+        from agents.event_emitter import emit_event
+
+        data = tick.get("data", {})
+        await emit_event(
+            "tick",
+            {
+                "symbol": tick.get("symbol"),
+                "exchange": tick.get("exchange"),
+                "price": data.get("last"),
+                "bid": data.get("bid"),
+                "ask": data.get("ask"),
+                "volume": data.get("baseVolume"),
+                "timestamp": data.get("timestamp"),
+            },
+            source="market_stream",
+            run_id="market-data",
+            # Use symbol as dedupe key to avoid overwhelming event store
+            dedupe_key=f"tick-{tick.get('symbol')}-{data.get('timestamp')}",
+        )
+    except Exception as exc:
+        logger.error("Failed to emit tick event: %s", exc)
 
 
 @workflow.defn
