@@ -1,8 +1,11 @@
+import { useState, useCallback, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { TrendingUp, TrendingDown, AlertCircle, DollarSign, PieChart, Activity } from 'lucide-react';
+import { TrendingUp, TrendingDown, AlertCircle, DollarSign, PieChart, Activity, Radio } from 'lucide-react';
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { MarketTicker } from './MarketTicker';
 import { EventTimeline } from './EventTimeline';
+import { useWebSocket, type WebSocketMessage } from '../hooks/useWebSocket';
+import { buildWebSocketUrl } from '../lib/websocket';
 
 // API types (matching backend schemas)
 interface Position {
@@ -88,29 +91,99 @@ const liveAPI = {
 };
 
 export function LiveTradingMonitor() {
-  // Query all live data with auto-refresh
+  // WebSocket state for real-time updates
+  const [liveFills, setLiveFills] = useState<Fill[]>([]);
+  const [livePositions, setLivePositions] = useState<Position[]>([]);
+  const [liveBlocks, setLiveBlocks] = useState<BlockEvent[]>([]);
+  const [livePortfolio, setLivePortfolio] = useState<PortfolioSummary | null>(null);
+
+  // WebSocket connection
+  const wsUrl = buildWebSocketUrl('/ws/live');
+
+  // Handle WebSocket messages
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    switch (message.type) {
+      case 'fill':
+        const fill: Fill = {
+          order_id: message.payload.order_id,
+          symbol: message.payload.symbol,
+          side: message.payload.side,
+          qty: message.payload.qty,
+          price: message.payload.price,
+          timestamp: message.payload.timestamp || new Date().toISOString(),
+          run_id: message.payload.run_id,
+          correlation_id: message.payload.correlation_id,
+        };
+        setLiveFills((prev) => [fill, ...prev].slice(0, 50));
+        break;
+
+      case 'position_update':
+        const position: Position = {
+          symbol: message.payload.symbol,
+          qty: message.payload.qty,
+          avg_entry_price: message.payload.avg_entry_price,
+          mark_price: message.payload.mark_price,
+          unrealized_pnl: message.payload.unrealized_pnl,
+          timestamp: message.payload.timestamp || new Date().toISOString(),
+        };
+        setLivePositions((prev) => {
+          const filtered = prev.filter(p => p.symbol !== position.symbol);
+          return position.qty === 0 ? filtered : [position, ...filtered];
+        });
+        break;
+
+      case 'trade_blocked':
+        const block: BlockEvent = {
+          timestamp: message.payload.timestamp || new Date().toISOString(),
+          symbol: message.payload.symbol,
+          side: message.payload.side,
+          qty: message.payload.qty,
+          reason: message.payload.reason,
+          detail: message.payload.detail,
+          trigger_id: message.payload.trigger_id,
+          correlation_id: message.payload.correlation_id,
+        };
+        setLiveBlocks((prev) => [block, ...prev].slice(0, 100));
+        break;
+
+      case 'portfolio_update':
+        setLivePortfolio({
+          cash: message.payload.cash,
+          equity: message.payload.equity,
+          day_pnl: message.payload.day_pnl,
+          total_pnl: message.payload.total_pnl,
+          positions_count: message.payload.positions_count,
+          updated_at: message.payload.updated_at || new Date().toISOString(),
+        });
+        break;
+    }
+  }, []);
+
+  const { isConnected } = useWebSocket(wsUrl, {}, handleWebSocketMessage);
+
+  // Query all live data with auto-refresh (reduced intervals since WebSocket provides real-time)
   const { data: portfolio } = useQuery({
     queryKey: ['portfolio'],
     queryFn: liveAPI.getPortfolio,
-    refetchInterval: 5000, // Refresh every 5 seconds
+    refetchInterval: isConnected ? 30000 : 5000, // 30s with WS, 5s without
   });
 
   const { data: positions = [] } = useQuery({
     queryKey: ['positions'],
     queryFn: liveAPI.getPositions,
-    refetchInterval: 3000, // Refresh every 3 seconds
+    refetchInterval: isConnected ? 30000 : 3000, // 30s with WS, 3s without
   });
 
   const { data: fills = [] } = useQuery({
     queryKey: ['fills'],
     queryFn: () => liveAPI.getFills(50),
-    refetchInterval: 2000, // Refresh every 2 seconds
+    refetchInterval: isConnected ? 30000 : 2000, // 30s with WS, 2s without
   });
 
   const { data: blocks = [] } = useQuery({
     queryKey: ['blocks'],
     queryFn: () => liveAPI.getBlocks(100),
-    refetchInterval: 5000,
+    refetchInterval: isConnected ? 30000 : 5000, // 30s with WS, 5s without
   });
 
   const { data: riskBudget } = useQuery({
@@ -124,6 +197,47 @@ export function LiveTradingMonitor() {
     queryFn: liveAPI.getBlockReasons,
     refetchInterval: 10000,
   });
+
+  // Merge WebSocket data with polling data
+  const displayPortfolio = livePortfolio || portfolio;
+  const displayPositions = useMemo(() => {
+    if (livePositions.length > 0) {
+      const merged = [...livePositions];
+      positions.forEach(pos => {
+        if (!merged.some(p => p.symbol === pos.symbol)) {
+          merged.push(pos);
+        }
+      });
+      return merged;
+    }
+    return positions;
+  }, [livePositions, positions]);
+
+  const displayFills = useMemo(() => {
+    if (liveFills.length > 0) {
+      const merged = [...liveFills];
+      fills.forEach(fill => {
+        if (!merged.some(f => f.order_id === fill.order_id)) {
+          merged.push(fill);
+        }
+      });
+      return merged.slice(0, 50);
+    }
+    return fills;
+  }, [liveFills, fills]);
+
+  const displayBlocks = useMemo(() => {
+    if (liveBlocks.length > 0) {
+      const merged = [...liveBlocks];
+      blocks.forEach(block => {
+        if (!merged.some(b => b.trigger_id === block.trigger_id)) {
+          merged.push(block);
+        }
+      });
+      return merged.slice(0, 100);
+    }
+    return blocks;
+  }, [liveBlocks, blocks]);
 
   return (
     <div className="space-y-6">
@@ -139,37 +253,46 @@ export function LiveTradingMonitor() {
               Real-time positions, fills, and risk monitoring
             </p>
         </div>
-        <div className="flex items-center gap-2 text-sm text-gray-500">
-          <Activity className="w-4 h-4 animate-pulse text-green-500" />
-          <span>Live Updates</span>
+        <div className="flex items-center gap-2 text-sm">
+          {isConnected ? (
+            <>
+              <Radio className="w-4 h-4 animate-pulse text-green-500" />
+              <span className="text-green-600 dark:text-green-400 font-medium">Live (WebSocket)</span>
+            </>
+          ) : (
+            <>
+              <Activity className="w-4 h-4 text-yellow-500" />
+              <span className="text-yellow-600 dark:text-yellow-400">Live (Polling)</span>
+            </>
+          )}
         </div>
       </div>
 
       {/* Portfolio Summary Cards */}
-      {portfolio && (
+      {displayPortfolio && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <SummaryCard
             icon={<DollarSign className="w-5 h-5" />}
             label="Cash"
-            value={formatCurrency(portfolio.cash)}
+            value={formatCurrency(displayPortfolio.cash)}
             iconColor="text-blue-500"
           />
           <SummaryCard
             icon={<PieChart className="w-5 h-5" />}
             label="Equity"
-            value={formatCurrency(portfolio.equity)}
+            value={formatCurrency(displayPortfolio.equity)}
             iconColor="text-purple-500"
           />
           <SummaryCard
-            icon={portfolio.day_pnl && portfolio.day_pnl >= 0 ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
+            icon={displayPortfolio.day_pnl && displayPortfolio.day_pnl >= 0 ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
             label="Day P&L"
-            value={portfolio.day_pnl !== undefined ? formatCurrency(portfolio.day_pnl) : 'N/A'}
-            iconColor={portfolio.day_pnl && portfolio.day_pnl >= 0 ? 'text-green-500' : 'text-red-500'}
+            value={displayPortfolio.day_pnl !== undefined ? formatCurrency(displayPortfolio.day_pnl) : 'N/A'}
+            iconColor={displayPortfolio.day_pnl && displayPortfolio.day_pnl >= 0 ? 'text-green-500' : 'text-red-500'}
           />
           <SummaryCard
             icon={<Activity className="w-5 h-5" />}
             label="Positions"
-            value={portfolio.positions_count.toString()}
+            value={displayPortfolio.positions_count.toString()}
             iconColor="text-orange-500"
           />
         </div>
@@ -218,7 +341,7 @@ export function LiveTradingMonitor() {
       {/* Positions Table */}
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
         <h2 className="text-xl font-semibold mb-4">Current Positions</h2>
-        {positions.length === 0 ? (
+        {displayPositions.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
             <Activity className="w-12 h-12 mx-auto mb-2 opacity-50" />
             <p>No open positions</p>
@@ -237,7 +360,7 @@ export function LiveTradingMonitor() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                {positions.map((pos, idx) => (
+                {displayPositions.map((pos, idx) => (
                   <tr key={idx} className="text-sm">
                     <td className="py-3 font-mono font-semibold">{pos.symbol}</td>
                     <td className="py-3 text-right">{pos.qty.toFixed(8)}</td>
@@ -259,13 +382,13 @@ export function LiveTradingMonitor() {
         {/* Recent Fills */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
           <h2 className="text-xl font-semibold mb-4">Recent Fills</h2>
-          {fills.length === 0 ? (
+          {displayFills.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               <p>No recent fills</p>
             </div>
           ) : (
             <div className="space-y-2 max-h-96 overflow-y-auto">
-              {fills.slice(0, 10).map((fill, idx) => (
+              {displayFills.slice(0, 10).map((fill, idx) => (
                 <div key={idx} className="flex justify-between items-center p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg text-sm">
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
@@ -289,13 +412,13 @@ export function LiveTradingMonitor() {
         {/* Block Events */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
           <h2 className="text-xl font-semibold mb-4">Block Events</h2>
-          {blocks.length === 0 ? (
+          {displayBlocks.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               <p>No blocked trades</p>
             </div>
           ) : (
             <div className="space-y-2 max-h-96 overflow-y-auto">
-              {blocks.slice(0, 10).map((block, idx) => (
+              {displayBlocks.slice(0, 10).map((block, idx) => (
                 <div key={idx} className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm">
                   <div className="flex items-start gap-2">
                     <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />

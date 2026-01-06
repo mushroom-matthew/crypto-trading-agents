@@ -13,12 +13,17 @@ A 24×7 multi-agent crypto trading stack built on Temporal and Model Context Pro
 - **📚 Historical Data Loading**: Automatic 1-hour historical data initialization for informed startup
 - **📋 Distributed Logging**: Individual agent workflow logging for better separation of concerns
 - **⚡ Durable Execution**: Built on Temporal workflows for fault tolerance and auditability
+- **🌐 Unified Web Dashboard**: React-based UI for backtest orchestration, live trading monitoring, wallet reconciliation, and agent inspection
+- **🔌 Real-Time WebSocket Streaming**: Live market ticks, trade fills, and position updates via WebSocket connections
+- **💼 Wallet Reconciliation**: Automated drift detection between ledger and exchange balances with threshold-based alerting
 
 ## Table of Contents
 
 - [Background](#background)
 - [Architecture](#architecture)
 - [Durable Tools Catalog](#durable-tools-catalog)
+- [Web UI & Real-Time Monitoring](#web-ui--real-time-monitoring)
+- [WebSocket Configuration](#websocket-configuration)
 - [Getting Started](#getting-started)
 - [Demo](#demo)
 - [Repository Layout](#repository-layout)
@@ -167,6 +172,134 @@ Each block corresponds to one or more MCP tools (Temporal workflows) described b
 | `ExecutionAgentWorkflow` | Individual execution agent logging and state    | Agent decisions      |
 | `JudgeAgentWorkflow`     | Individual judge agent logging and evaluations  | Performance analysis |
 | `BrokerAgentWorkflow`    | Broker agent state and user interaction logging | User interactions    |
+
+## Web UI & Real-Time Monitoring
+
+The system includes a modern React-based web dashboard (`ui/`) that provides comprehensive monitoring and control capabilities:
+
+### Dashboard Features
+
+**Backtest Control Tab**
+- Configure and launch backtests with custom parameters (symbols, timeframe, initial cash, risk settings)
+- Monitor backtest progress in real-time with live status updates
+- View equity curves, performance metrics, and trade history
+- Analyze daily reports with detailed breakdowns of trades, blocks, and risk budget usage
+
+**Live Trading Monitor Tab**
+- Real-time position tracking with P&L calculations
+- Recent fills and trade execution logs
+- Trade block monitoring with categorized reasons (insufficient budget, max concentration, etc.)
+- Risk budget allocation and usage visualization
+- Interactive market ticker with WebSocket-powered live price updates
+
+**Wallet Reconciliation Tab**
+- View all configured wallets with current ledger balances
+- Trigger on-demand reconciliation against exchange (Coinbase) balances
+- Drift detection with configurable thresholds
+- Color-coded status indicators for balance discrepancies
+- Tradeable fraction configuration per wallet
+
+**Agent Inspector Tab**
+- Trace decision chains via correlation ID linking
+- Event filtering by type, source, run_id, or correlation_id
+- LLM telemetry monitoring (model usage, token counts, cost estimates)
+- Workflow status cards (Broker, Execution, Judge agents)
+- Real-time event stream via WebSocket with polling fallback
+
+### Accessing the Dashboard
+
+1. Start the full stack:
+   ```bash
+   docker compose up
+   ```
+
+2. Start the UI development server:
+   ```bash
+   cd ui && npm run dev
+   ```
+
+3. Open your browser to `http://localhost:3000` (or the port shown in terminal)
+
+The dashboard automatically connects to the Ops API at `localhost:8081` and establishes WebSocket connections for real-time updates.
+
+## WebSocket Configuration
+
+The system uses WebSocket connections for real-time data streaming (market ticks, trade fills, position updates). The UI automatically constructs WebSocket URLs based on the deployment environment.
+
+### Environment Variables
+
+Configure WebSocket endpoints via these environment variables in `ui/.env`:
+
+```bash
+# Option 1: Explicit WebSocket URL (highest priority)
+VITE_WS_URL=ws://localhost:8081
+
+# Option 2: API URL (automatically converted to ws/wss)
+VITE_API_URL=http://localhost:8081
+
+# If neither is set, defaults to current window.location with port 8081 in dev mode
+```
+
+### WebSocket Endpoints
+
+The Ops API exposes two WebSocket endpoints:
+
+- **`/ws/live`** - Live trading updates (fills, positions, blocks, risk budget, agent events)
+- **`/ws/market`** - Market data updates (ticks, price changes, symbol updates)
+
+### Connection Behavior
+
+- **Automatic Reconnection**: WebSocket hook retries connection with exponential backoff (default 3s delay)
+- **Heartbeat/Keep-Alive**: Ping/pong messages every 30 seconds to maintain connection
+- **Graceful Fallback**: UI components fall back to HTTP polling if WebSocket unavailable
+- **Environment-Aware**: Automatically uses `wss://` for HTTPS deployments and `ws://` for HTTP
+
+### Testing WebSocket Connection
+
+Check WebSocket connection stats:
+```bash
+curl http://localhost:8081/ws/stats
+# Response: {"live_connections": 1, "market_connections": 1}
+```
+
+Test WebSocket connection manually (requires `wscat`):
+```bash
+npm install -g wscat
+wscat -c ws://localhost:8081/ws/market
+
+# Send ping
+> ping
+
+# Receive pong
+< {"type": "pong"}
+```
+
+### Production Deployment
+
+For production deployments behind load balancers or proxies:
+
+1. Configure explicit WebSocket URL:
+   ```bash
+   VITE_WS_URL=wss://your-domain.com
+   ```
+
+2. Ensure your proxy/load balancer supports WebSocket upgrade:
+   ```nginx
+   # Nginx example
+   location /ws/ {
+       proxy_pass http://ops-api:8081;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_set_header Host $host;
+   }
+   ```
+
+3. For custom API hosts (e.g., internal DNS):
+   ```bash
+   VITE_API_URL=https://api.internal.company.com:8081
+   # Automatically becomes wss://api.internal.company.com:8081
+   ```
 
 ## Getting Started (Compose-first)
 
