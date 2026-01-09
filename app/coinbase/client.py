@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from tenacity import AsyncRetrying, RetryError, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.config import Settings, get_settings
-from app.core.errors import CoinbaseAPIError
+from app.core.errors import CoinbaseAPIError, ConfigurationError
 from app.core.idempotency import IdempotencyKey
 from app.core.logging import get_logger
 
@@ -30,9 +30,21 @@ class CoinbaseClient:
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._settings = settings or get_settings()
+        key_value = self._settings.coinbase_api_key.get_secret_value() if self._settings.coinbase_api_key else ""
+        secret_value = (
+            self._settings.coinbase_api_secret.get_secret_value() if self._settings.coinbase_api_secret else ""
+        )
+        missing: list[str] = []
+        if not key_value:
+            missing.append("COINBASE_API_KEY")
+        if not secret_value:
+            missing.append("COINBASE_API_SECRET")
+        if missing:
+            missing_label = ", ".join(missing)
+            raise ConfigurationError(f"Missing Coinbase credentials: {missing_label}")
         self._client: Optional[httpx.AsyncClient] = None
-        self._key_preview = self._preview_secret(self._settings.coinbase_api_key.get_secret_value())
-        self._secret_preview = self._preview_secret(self._settings.coinbase_api_secret.get_secret_value())
+        self._key_preview = self._preview_secret(key_value)
+        self._secret_preview = self._preview_secret(secret_value)
         self._passphrase_preview = (
             self._preview_secret(self._settings.coinbase_passphrase.get_secret_value())
             if self._settings.coinbase_passphrase

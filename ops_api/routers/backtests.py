@@ -109,6 +109,10 @@ class BacktestConfig(BaseModel):
     start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
     end_date: str = Field(..., description="End date in YYYY-MM-DD format")
     initial_cash: float = Field(default=10000, description="Starting cash balance")
+    initial_allocations: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Starting portfolio allocation in USD (keys: cash and/or symbols)",
+    )
     strategy: Optional[str] = Field(default="baseline", description="Strategy to use (baseline, llm_strategist, etc.)")
 
 
@@ -232,6 +236,41 @@ async def start_backtest(config: BacktestConfig):
         # Generate unique run ID
         run_id = f"backtest-{uuid4()}"
 
+        symbols = [symbol.upper() for symbol in config.symbols]
+        initial_allocations = None
+        if config.initial_allocations:
+            initial_allocations = {}
+            symbol_set = set(symbols)
+            for key, value in config.initial_allocations.items():
+                normalized_key = "cash" if key.lower() == "cash" else key.upper()
+                if value < 0:
+                    raise HTTPException(status_code=400, detail=f"Allocation for {key} must be >= 0")
+                if normalized_key == "cash":
+                    initial_allocations["cash"] = initial_allocations.get("cash", 0.0) + float(value)
+                    continue
+                if normalized_key in symbol_set:
+                    initial_allocations[normalized_key] = initial_allocations.get(normalized_key, 0.0) + float(value)
+                    continue
+                base_matches = [symbol for symbol in symbols if symbol.split("-")[0] == normalized_key]
+                if len(base_matches) == 1:
+                    mapped = base_matches[0]
+                    initial_allocations[mapped] = initial_allocations.get(mapped, 0.0) + float(value)
+                    continue
+                if len(base_matches) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Allocation symbol {key} is ambiguous (matches {', '.join(base_matches)})",
+                    )
+                initial_allocations[normalized_key] = float(value)
+            invalid_keys = [
+                key for key in initial_allocations if key != "cash" and key not in symbol_set
+            ]
+            if invalid_keys:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Allocation symbols not in backtest list: {', '.join(invalid_keys)}",
+                )
+
         logger.info("Starting backtest workflow: %s", config.model_dump())
 
         # Start Temporal workflow (non-blocking)
@@ -240,11 +279,12 @@ async def start_backtest(config: BacktestConfig):
             BacktestWorkflow.run,
             args=[{
                 "run_id": run_id,
-                "symbols": config.symbols,
+                "symbols": symbols,
                 "timeframe": config.timeframe,
                 "start_date": config.start_date,
                 "end_date": config.end_date,
                 "initial_cash": config.initial_cash,
+                "initial_allocations": initial_allocations,
                 "strategy": config.strategy or "baseline",
             }],
             id=run_id,
@@ -257,6 +297,8 @@ async def start_backtest(config: BacktestConfig):
             message=f"Backtest started. Use GET /backtests/{run_id} to monitor progress."
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to start backtest: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -742,25 +784,44 @@ async def get_backtest_progress(run_id: str):
     Returns progress percentage, current phase, logs, and LLM plan generations.
     """
     try:
-        cached = get_backtest_cached(run_id)
-        with CACHE_LOCK:
-            progress_data = BACKTEST_PROGRESS.get(run_id, {})
+        from ops_api.temporal_client import get_temporal_client
+        from temporalio.service import RPCError
 
-        if not cached:
-            raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
+        client = await get_temporal_client()
+
+        try:
+            handle = client.get_workflow_handle(run_id)
+            status_data = await handle.query("get_status")
+        except RPCError:
+            cached = get_backtest_cached(run_id)
+            if not cached:
+                raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
+            return {
+                "run_id": run_id,
+                "status": cached.get("status", "completed"),
+                "progress_pct": 100.0 if cached.get("status") == "completed" else 0.0,
+                "current_phase": "Completed",
+                "current_timestamp": None,
+                "total_candles": None,
+                "processed_candles": None,
+                "plans_generated": 0,
+                "llm_calls_made": 0,
+                "latest_logs": [],
+                "strategy": cached.get("strategy", "baseline"),
+            }
 
         return {
             "run_id": run_id,
-            "status": cached["status"],
-            "progress_pct": progress_data.get("progress_pct", 0.0),
-            "current_phase": progress_data.get("current_phase", "Initializing"),
-            "current_timestamp": progress_data.get("current_timestamp"),
-            "total_candles": progress_data.get("total_candles"),
-            "processed_candles": progress_data.get("processed_candles"),
-            "plans_generated": progress_data.get("plans_generated", 0),
-            "llm_calls_made": progress_data.get("llm_calls_made", 0),
-            "latest_logs": progress_data.get("logs", [])[-10:],  # Last 10 log entries
-            "strategy": cached.get("strategy", "baseline"),
+            "status": status_data.get("status", "running"),
+            "progress_pct": status_data.get("progress", 0.0),
+            "current_phase": status_data.get("current_phase", "Initializing"),
+            "current_timestamp": status_data.get("current_timestamp"),
+            "total_candles": status_data.get("candles_total"),
+            "processed_candles": status_data.get("candles_processed"),
+            "plans_generated": 0,
+            "llm_calls_made": 0,
+            "latest_logs": [],
+            "strategy": "baseline",
         }
 
     except HTTPException:

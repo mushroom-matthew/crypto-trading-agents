@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "TRACE"] = "INFO"
     db_dsn: str = Field(..., alias="DB_DSN")
 
-    coinbase_api_key: SecretStr = Field(..., alias="COINBASE_API_KEY")
-    coinbase_api_secret: SecretStr = Field(..., alias="COINBASE_API_SECRET")
+    coinbase_api_key: Optional[SecretStr] = Field(None, alias="COINBASE_API_KEY")
+    coinbase_api_secret: Optional[SecretStr] = Field(None, alias="COINBASE_API_SECRET")
     coinbase_passphrase: Optional[SecretStr] = Field(None, alias="COINBASE_PASSPHRASE")
     coinbase_portfolio_id: Optional[str] = Field(None, alias="COINBASE_PORTFOLIO_ID")
     coinbase_base_url: HttpUrl = Field("https://api.exchange.coinbase.com", alias="COINBASE_BASE_URL")

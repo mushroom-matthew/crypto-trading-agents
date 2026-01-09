@@ -14,14 +14,19 @@ import { LiveProgressMonitor } from './LiveProgressMonitor';
 import { BacktestSelector } from './BacktestSelector';
 
 export function BacktestControl() {
-  const [config, setConfig] = useState<BacktestConfig>({
+  const defaultConfig: BacktestConfig = {
     symbols: ['BTC-USD'],
     timeframe: '15m',
     start_date: '2024-01-01',
     end_date: '2024-01-31',
     initial_cash: 10000,
     strategy: 'baseline',
-  });
+  };
+  const [config, setConfig] = useState<BacktestConfig>(defaultConfig);
+  const [symbolsInput, setSymbolsInput] = useState(defaultConfig.symbols.join(', '));
+  const [symbolsError, setSymbolsError] = useState<string | null>(null);
+  const [allocationInput, setAllocationInput] = useState('');
+  const [allocationError, setAllocationError] = useState<string | null>(null);
 
   const [selectedRun, setSelectedRun] = useState<string | null>(() => {
     // Restore from localStorage on mount
@@ -33,6 +38,10 @@ export function BacktestControl() {
     const preset = BACKTEST_PRESETS.find((p) => p.id === presetId);
     if (preset) {
       setConfig(preset.config);
+      setSymbolsInput(preset.config.symbols.join(', '));
+      setSymbolsError(null);
+      setAllocationInput('');
+      setAllocationError(null);
     }
   };
 
@@ -82,9 +91,90 @@ export function BacktestControl() {
     enabled: backtest?.status === 'completed' && !!config.symbols[0],
   });
 
+  const parseAllocations = (
+    value: string,
+    symbols: string[],
+  ): Record<string, number> | undefined => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    const allocations: Record<string, number> = {};
+    const baseMap = symbols.reduce<Record<string, string[]>>((acc, symbol) => {
+      const base = symbol.split('-')[0];
+      if (!acc[base]) {
+        acc[base] = [];
+      }
+      acc[base].push(symbol);
+      return acc;
+    }, {});
+    const entries = trimmed.split(',').map((entry) => entry.trim()).filter(Boolean);
+    for (const entry of entries) {
+      const [rawKey, rawValue] = entry.split(/[:=]/, 2).map((part) => part.trim());
+      if (!rawKey || !rawValue) {
+        throw new Error('Allocations must use key:value pairs (e.g., cash:2000, BTC:4000)');
+      }
+      const amount = Number(rawValue);
+      if (!Number.isFinite(amount) || amount < 0) {
+        throw new Error(`Allocation for ${rawKey} must be a non-negative number`);
+      }
+      const key = rawKey.toUpperCase();
+      if (rawKey.toLowerCase() === 'cash') {
+        allocations.cash = (allocations.cash || 0) + amount;
+        continue;
+      }
+      if (symbols.includes(key)) {
+        allocations[key] = (allocations[key] || 0) + amount;
+        continue;
+      }
+      const baseMatches = baseMap[key] || [];
+      if (baseMatches.length === 1) {
+        const mapped = baseMatches[0];
+        allocations[mapped] = (allocations[mapped] || 0) + amount;
+        continue;
+      }
+      if (baseMatches.length > 1) {
+        throw new Error(`Allocation symbol ${rawKey} is ambiguous (matches ${baseMatches.join(', ')})`);
+      }
+      throw new Error(`Allocation symbol ${rawKey} is not in the Trading Pairs list`);
+    }
+    return allocations;
+  };
+
+  const parseSymbols = (value: string): string[] => {
+    const symbols = value
+      .split(/[,\s]+/)
+      .map((symbol) => symbol.trim().toUpperCase())
+      .filter(Boolean);
+    if (!symbols.length) {
+      throw new Error('Enter at least one symbol');
+    }
+    return symbols;
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    startBacktest.mutate(config);
+    let symbols: string[];
+    let allocations: Record<string, number> | undefined;
+    try {
+      symbols = parseSymbols(symbolsInput);
+      setSymbolsError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid symbol format';
+      setSymbolsError(message);
+      return;
+    }
+    try {
+      allocations = parseAllocations(allocationInput, symbols);
+      setAllocationError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid allocation format';
+      setAllocationError(message);
+      return;
+    }
+    const payload = { ...config, symbols, initial_allocations: allocations };
+    setConfig(payload);
+    startBacktest.mutate(payload);
   };
 
   const isRunning = backtest?.status === 'running' || backtest?.status === 'queued';
@@ -150,16 +240,10 @@ export function BacktestControl() {
               </label>
               <input
                 type="text"
-                value={config.symbols.join(', ')}
+                value={symbolsInput}
                 onChange={(e) => {
-                  const value = e.target.value;
-                  setConfig({
-                    ...config,
-                    symbols: value
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean),
-                  });
+                  setSymbolsInput(e.target.value);
+                  setSymbolsError(null);
                 }}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
                 placeholder="BTC-USD, ETH-USD"
@@ -168,6 +252,9 @@ export function BacktestControl() {
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                 Enter one or more symbols separated by commas (e.g., BTC-USD, ETH-USD)
               </p>
+              {symbolsError && (
+                <p className="text-xs text-red-600 dark:text-red-400 mt-1">{symbolsError}</p>
+              )}
             </div>
 
             {/* Timeframe */}
@@ -233,6 +320,25 @@ export function BacktestControl() {
                 step="100"
                 disabled={isRunning}
               />
+            </div>
+
+            {/* Starting Allocations */}
+            <div>
+              <label className="block text-sm font-medium mb-2">Starting Allocation (USD)</label>
+              <input
+                type="text"
+                value={allocationInput}
+                onChange={(e) => setAllocationInput(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
+                placeholder="cash:2000, BTC:4000, ETH:4000"
+                disabled={isRunning}
+              />
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                Optional. Uses symbols from Trading Pairs (full or base ticker) and overrides Initial Cash.
+              </p>
+              {allocationError && (
+                <p className="text-xs text-red-600 dark:text-red-400 mt-1">{allocationError}</p>
+              )}
             </div>
 
             {/* Strategy */}

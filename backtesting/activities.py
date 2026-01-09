@@ -132,6 +132,7 @@ def run_simulation_chunk_activity(
             initial_cash=config.get("initial_cash", 10000.0),
             fee_rate=config.get("fee_rate", 0.001),
             strategy_config=StrategyWrapperConfig(**config.get("strategy_config", {})),
+            initial_allocations=config.get("initial_allocations"),
             flatten_positions_daily=config.get("flatten_positions_daily", False),
             risk_limits=None,  # TODO: Support risk limits
             progress_callback=progress_callback,
@@ -154,6 +155,7 @@ def run_simulation_chunk_activity(
             initial_cash=config.get("initial_cash", 10000.0),
             fee_rate=config.get("fee_rate", 0.001),
             strategy_config=StrategyWrapperConfig(**config.get("strategy_config", {})),
+            initial_allocations=config.get("initial_allocations"),
             flatten_positions_daily=config.get("flatten_positions_daily", False),
             risk_limits=None,
             progress_callback=progress_callback,

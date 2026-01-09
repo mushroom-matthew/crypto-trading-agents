@@ -25,6 +25,7 @@ export interface BacktestConfig {
   start_date: string;
   end_date: string;
   initial_cash: number;
+  initial_allocations?: Record<string, number>;
   strategy?: string;
 }
 
