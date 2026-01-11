@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import hashlib
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -49,7 +51,16 @@ class LLMClient:
             self._client = get_llm_client()
         return self._client
 
-    def generate_plan(self, llm_input: LLMInput, prompt_template: str | None = None) -> StrategyPlan:
+    def generate_plan(
+        self,
+        llm_input: LLMInput,
+        prompt_template: str | None = None,
+        *,
+        run_id: str | None = None,
+        plan_id: str | None = None,
+        prompt_hash: str | None = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> StrategyPlan:
         def _emit_llm_event(payload: Dict[str, Any]) -> None:
             try:
                 store = EventStore()
@@ -60,34 +71,46 @@ class LLMClient:
                     type="llm_call",  # type: ignore[arg-type]
                     payload=payload,
                     dedupe_key=None,
-                    run_id=None,
-                    correlation_id=None,
+                    run_id=run_id,
+                    correlation_id=plan_id or prompt_hash,
                 )
                 store.append(event)
             except Exception:
                 pass
 
+        input_hash = prompt_hash
+        if not input_hash:
+            payload_str = (prompt_template or "") + llm_input.to_json()
+            input_hash = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+
         if self.transport:
             raw = self.transport(llm_input.to_json())
             plan = StrategyPlan.from_json(raw)
+            duration_ms = 0
             self.last_generation_info = {
                 "source": "transport",
                 "fallback_plan_used": False,
                 "llm_failed_parse": False,
                 "llm_failure_reason": None,
                 "raw_output": raw,
+                "prompt_hash": input_hash,
             }
             _emit_llm_event(
                 {
                     "model": self.model,
                     "source": "transport",
                     "raw_len": len(raw or ""),
+                    "prompt_hash": input_hash,
+                    "plan_id": plan_id,
+                    "duration_ms": duration_ms,
+                    **(metadata or {}),
                 }
             )
             return plan
         last_error: Exception | None = None
         raw_output: str | None = None
         attempts = max(1, self.max_retries)
+        start_time = time.monotonic()
         for attempt in range(1, attempts + 1):
             try:
                 system_prompt = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "") or self._default_prompt()
@@ -108,12 +131,14 @@ class LLMClient:
                     plan_dict = self._extract_plan_json(content)
                     plan_dict = self._sanitize_plan_dict(plan_dict)
                     plan = StrategyPlan.model_validate(plan_dict)
+                    duration_ms = int((time.monotonic() - start_time) * 1000)
                     self.last_generation_info = {
                         "source": "llm",
                         "fallback_plan_used": False,
                         "llm_failed_parse": False,
                         "llm_failure_reason": None,
                         "raw_output": raw_output,
+                        "prompt_hash": input_hash,
                     }
                     _emit_llm_event(
                         {
@@ -122,6 +147,10 @@ class LLMClient:
                             "raw_len": len(raw_output or ""),
                             "tokens_in": completion.usage.input_tokens if hasattr(completion, "usage") else 0,
                             "tokens_out": completion.usage.output_tokens if hasattr(completion, "usage") else 0,
+                            "prompt_hash": input_hash,
+                            "plan_id": plan_id,
+                            "duration_ms": duration_ms,
+                            **(metadata or {}),
                         }
                     )
                     return plan
@@ -137,12 +166,14 @@ class LLMClient:
             raise last_error
         logging.warning("LLM strategist fallback triggered after retries: %s; raw_output=%s", last_error, raw_output)
         plan = self._fallback_plan(llm_input)
+        duration_ms = int((time.monotonic() - start_time) * 1000)
         self.last_generation_info = {
             "source": "fallback",
             "fallback_plan_used": True,
             "llm_failed_parse": True,
             "llm_failure_reason": str(last_error) if last_error else "unknown_failure",
             "raw_output": raw_output,
+            "prompt_hash": input_hash,
         }
         _emit_llm_event(
             {
@@ -150,6 +181,10 @@ class LLMClient:
                 "source": "fallback",
                 "raw_len": len(raw_output or ""),
                 "llm_failure_reason": str(last_error) if last_error else None,
+                "prompt_hash": input_hash,
+                "plan_id": plan_id,
+                "duration_ms": duration_ms,
+                **(metadata or {}),
             }
         )
         return plan

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from threading import Lock, Thread
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -24,12 +25,19 @@ from backtesting.dataset import load_ohlcv
 from backtesting.llm_strategist_runner import LLMStrategistBacktester
 from agents.strategies.llm_client import LLMClient
 from metrics.technical import sma, ema, rsi, macd, atr, bollinger_bands
+from data_loader.utils import ensure_utc, timeframe_to_seconds
 
 logger = logging.getLogger(__name__)
+
+# Task queue configuration - must match worker's TASK_QUEUE
+BACKTEST_TASK_QUEUE = os.environ.get("TASK_QUEUE", "mcp-tools")
 
 # Disk-based persistence directory
 BACKTEST_CACHE_DIR = Path(".cache/backtests")
 BACKTEST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Keep in sync with backtesting.simulator._compute_features defaults.
+MIN_FEATURE_CANDLES = 50
 
 
 def save_backtest_to_disk(run_id: str, data: Dict[str, Any]):
@@ -233,10 +241,35 @@ async def start_backtest(config: BacktestConfig):
         from ops_api.temporal_client import get_temporal_client
         from tools.backtest_execution import BacktestWorkflow
 
+        try:
+            requested_start_dt = ensure_utc(datetime.fromisoformat(config.start_date))
+            requested_end_dt = ensure_utc(datetime.fromisoformat(config.end_date))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {exc}") from exc
+        if requested_end_dt <= requested_start_dt:
+            raise HTTPException(status_code=400, detail="end_date must be after start_date")
+        try:
+            granularity_seconds = timeframe_to_seconds(config.timeframe)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        available_candles = int((requested_end_dt - requested_start_dt).total_seconds() // granularity_seconds) + 1
+        if available_candles < MIN_FEATURE_CANDLES:
+            required_range = timedelta(seconds=granularity_seconds * (MIN_FEATURE_CANDLES - 1))
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Date range too short for feature windows: need at least "
+                    f"{MIN_FEATURE_CANDLES} candles for timeframe {config.timeframe} "
+                    f"(>= {required_range}); got ~{available_candles}."
+                ),
+            )
+
         # Generate unique run ID
         run_id = f"backtest-{uuid4()}"
 
         symbols = [symbol.upper() for symbol in config.symbols]
+        warmup_delta = timedelta(seconds=granularity_seconds * (MIN_FEATURE_CANDLES - 1))
+        buffered_start_dt = requested_start_dt - warmup_delta
         initial_allocations = None
         if config.initial_allocations:
             initial_allocations = {}
@@ -281,14 +314,16 @@ async def start_backtest(config: BacktestConfig):
                 "run_id": run_id,
                 "symbols": symbols,
                 "timeframe": config.timeframe,
-                "start_date": config.start_date,
-                "end_date": config.end_date,
+                "start_date": buffered_start_dt.isoformat(),
+                "end_date": requested_end_dt.isoformat(),
+                "requested_start_date": requested_start_dt.isoformat(),
+                "requested_end_date": requested_end_dt.isoformat(),
                 "initial_cash": config.initial_cash,
                 "initial_allocations": initial_allocations,
                 "strategy": config.strategy or "baseline",
             }],
             id=run_id,
-            task_queue="mcp-tools",
+            task_queue=BACKTEST_TASK_QUEUE,
         )
 
         return BacktestCreateResponse(
@@ -452,17 +487,39 @@ async def get_equity_curve(run_id: str):
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
-        result: PortfolioBacktestResult = cached["result"]
-        equity_series = result.equity_curve
-
-        # Convert pandas Series to list of EquityCurvePoint
-        equity_points = [
-            EquityCurvePoint(
-                timestamp=timestamp.isoformat(),
-                equity=float(equity)
-            )
-            for timestamp, equity in equity_series.items()
-        ]
+        # Handle both formats: legacy (PortfolioBacktestResult) and new (workflow dict)
+        result_obj = cached.get("result")
+        if result_obj is not None and hasattr(result_obj, "equity_curve"):
+            # Legacy format: PortfolioBacktestResult object
+            result: PortfolioBacktestResult = result_obj
+            equity_series = result.equity_curve
+            equity_points = [
+                EquityCurvePoint(
+                    timestamp=timestamp.isoformat(),
+                    equity=float(equity)
+                )
+                for timestamp, equity in equity_series.items()
+            ]
+        elif "equity_curve" in cached:
+            # New format: list of dicts from Temporal workflow
+            equity_curve = cached["equity_curve"]
+            equity_points = []
+            for point in equity_curve:
+                # Handle different timestamp key names
+                ts = point.get("timestamp") or point.get("time") or point.get("index")
+                if ts is None:
+                    continue
+                # Format timestamp if it's not already a string
+                if hasattr(ts, "isoformat"):
+                    ts = ts.isoformat()
+                equity_points.append(
+                    EquityCurvePoint(
+                        timestamp=str(ts),
+                        equity=float(point.get("equity", point.get("value", 0)))
+                    )
+                )
+        else:
+            return []
 
         return equity_points
 
@@ -490,30 +547,67 @@ async def get_backtest_trades(
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
-        result: PortfolioBacktestResult = cached["result"]
-        trades_df = result.trades
+        # Handle both formats: legacy (PortfolioBacktestResult) and new (workflow dict)
+        result_obj = cached.get("result")
+        if result_obj is not None and hasattr(result_obj, "trades"):
+            # Legacy format: PortfolioBacktestResult object
+            result: PortfolioBacktestResult = result_obj
+            trades_df = result.trades
 
-        if trades_df.empty:
-            return []
+            if trades_df.empty:
+                return []
 
-        # Apply pagination
-        trades_subset = trades_df.iloc[offset:offset + limit]
+            # Apply pagination
+            trades_subset = trades_df.iloc[offset:offset + limit]
 
-        # Convert DataFrame to list of BacktestTrade
-        trades_list = []
-        for _, row in trades_subset.iterrows():
-            trades_list.append(
-                BacktestTrade(
-                    timestamp=row["time"].isoformat() if hasattr(row["time"], "isoformat") else str(row["time"]),
-                    symbol=row.get("symbol", "UNKNOWN"),
-                    side=row["side"],
-                    qty=float(row["qty"]),
-                    price=float(row["price"]),
-                    fee=float(row["fee"]) if "fee" in row else None,
-                    pnl=float(row["pnl"]) if "pnl" in row else None,
-                    trigger_id=row.get("trigger_id"),
+            # Convert DataFrame to list of BacktestTrade
+            trades_list = []
+            for _, row in trades_subset.iterrows():
+                trades_list.append(
+                    BacktestTrade(
+                        timestamp=row["time"].isoformat() if hasattr(row["time"], "isoformat") else str(row["time"]),
+                        symbol=row.get("symbol", "UNKNOWN"),
+                        side=row["side"],
+                        qty=float(row["qty"]),
+                        price=float(row["price"]),
+                        fee=float(row["fee"]) if "fee" in row else None,
+                        pnl=float(row["pnl"]) if "pnl" in row else None,
+                        trigger_id=row.get("trigger_id"),
+                    )
                 )
-            )
+        elif "trades" in cached:
+            # New format: list of dicts from Temporal workflow
+            trades = cached["trades"]
+            if not trades:
+                return []
+
+            # Apply pagination
+            trades_subset = trades[offset:offset + limit]
+
+            trades_list = []
+            for trade in trades_subset:
+                # Handle different timestamp key names
+                ts = trade.get("timestamp") or trade.get("time")
+                if ts is None:
+                    continue
+                if hasattr(ts, "isoformat"):
+                    ts = ts.isoformat()
+
+                trades_list.append(
+                    BacktestTrade(
+                        timestamp=str(ts),
+                        symbol=trade.get("symbol", "UNKNOWN"),
+                        side=trade.get("side", "UNKNOWN"),
+                        qty=float(trade.get("qty", 0)),
+                        price=float(trade.get("price", 0)),
+                        fee=float(trade.get("fee", 0)) if trade.get("fee") is not None else None,
+                        pnl=float(trade.get("pnl", 0)) if trade.get("pnl") is not None else None,
+                        # Try trigger_id first, fall back to reason (LLM strategist uses "reason")
+                        trigger_id=trade.get("trigger_id") or trade.get("reason"),
+                    )
+                )
+        else:
+            return []
 
         return trades_list
 
@@ -545,8 +639,12 @@ async def get_playback_candles(
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
         config = cached["config"]
-        start_date = datetime.fromisoformat(config["start_date"])
-        end_date = datetime.fromisoformat(config["end_date"])
+        start_date = datetime.fromisoformat(config.get("requested_start_date", config["start_date"]))
+        end_date = datetime.fromisoformat(config.get("requested_end_date", config["end_date"]))
+        timeframe = config.get("timeframe", "1h")
+        granularity_seconds = timeframe_to_seconds(timeframe)
+        warmup_delta = timedelta(seconds=granularity_seconds * (MIN_FEATURE_CANDLES - 1))
+        buffered_start = start_date - warmup_delta
 
         # Check if indicators are already cached
         cache_key = f"{run_id}:{symbol}:indicators"
@@ -554,7 +652,7 @@ async def get_playback_candles(
             df_with_indicators = BACKTEST_CACHE[cache_key]
         else:
             # Load OHLCV data
-            df = load_ohlcv(symbol, start_date, end_date)
+            df = load_ohlcv(symbol, buffered_start, end_date, timeframe=timeframe)
 
             if df.empty:
                 return []
@@ -591,8 +689,10 @@ async def get_playback_candles(
             with CACHE_LOCK:
                 BACKTEST_CACHE[cache_key] = df_with_indicators
 
+        df_window = df_with_indicators[(df_with_indicators.index >= start_date) & (df_with_indicators.index <= end_date)]
+
         # Apply pagination
-        df_subset = df_with_indicators.iloc[offset:offset + limit]
+        df_subset = df_window.iloc[offset:offset + limit]
 
         # Convert to response format
         candles = []
@@ -647,37 +747,69 @@ async def get_playback_events(
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
-        result: PortfolioBacktestResult = cached["result"]
-        trades_df = result.trades
-
-        if trades_df.empty:
-            return []
-
-        # Filter by symbol if specified
-        if symbol:
-            trades_df = trades_df[trades_df["symbol"] == symbol]
-
-        # Convert trades to events
         events = []
-        for _, row in trades_df.iterrows():
-            event_data = {
-                "symbol": row.get("symbol", "UNKNOWN"),
-                "side": row["side"],
-                "qty": float(row["qty"]),
-                "price": float(row["price"]),
-                "fee": float(row.get("fee", 0)),
-                "pnl": float(row.get("pnl", 0)),
-                "trigger_id": row.get("trigger_id"),
-            }
+        result_obj = cached.get("result")
+        if result_obj is not None and hasattr(result_obj, "trades"):
+            result: PortfolioBacktestResult = result_obj
+            trades_df = result.trades
 
-            events.append(
-                PlaybackEvent(
-                    timestamp=row["time"].isoformat() if hasattr(row["time"], "isoformat") else str(row["time"]),
-                    event_type="trade",
-                    symbol=event_data["symbol"],
-                    data=event_data,
+            if trades_df.empty:
+                return []
+
+            # Filter by symbol if specified
+            if symbol:
+                trades_df = trades_df[trades_df["symbol"] == symbol]
+
+            # Convert trades to events
+            for _, row in trades_df.iterrows():
+                event_data = {
+                    "symbol": row.get("symbol", "UNKNOWN"),
+                    "side": row["side"],
+                    "qty": float(row["qty"]),
+                    "price": float(row["price"]),
+                    "fee": float(row.get("fee", 0)),
+                    "pnl": float(row.get("pnl", 0)),
+                    "trigger_id": row.get("trigger_id"),
+                }
+
+                events.append(
+                    PlaybackEvent(
+                        timestamp=row["time"].isoformat() if hasattr(row["time"], "isoformat") else str(row["time"]),
+                        event_type="trade",
+                        symbol=event_data["symbol"],
+                        data=event_data,
+                    )
                 )
-            )
+        elif "trades" in cached:
+            trades = cached["trades"]
+            for trade in trades:
+                trade_symbol = trade.get("symbol")
+                if symbol and trade_symbol != symbol:
+                    continue
+                ts = trade.get("timestamp") or trade.get("time")
+                if ts is None:
+                    continue
+                if hasattr(ts, "isoformat"):
+                    ts = ts.isoformat()
+                event_data = {
+                    "symbol": trade_symbol or "UNKNOWN",
+                    "side": trade.get("side"),
+                    "qty": float(trade.get("qty", 0)),
+                    "price": float(trade.get("price", 0)),
+                    "fee": float(trade.get("fee", 0)) if trade.get("fee") is not None else 0.0,
+                    "pnl": float(trade.get("pnl", 0)) if trade.get("pnl") is not None else 0.0,
+                    "trigger_id": trade.get("trigger_id"),
+                }
+                events.append(
+                    PlaybackEvent(
+                        timestamp=str(ts),
+                        event_type="trade",
+                        symbol=event_data["symbol"],
+                        data=event_data,
+                    )
+                )
+        else:
+            return []
 
         # Filter by event type if specified
         if event_type:
@@ -709,54 +841,93 @@ async def get_portfolio_state_snapshot(run_id: str, timestamp: str):
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
-        result: PortfolioBacktestResult = cached["result"]
-        config = cached["config"]
-        initial_cash = config["initial_cash"]
-        trades_df = result.trades
+        config = cached.get("config", {})
+        initial_cash = config.get("initial_cash", 0.0)
 
         # Parse the target timestamp
         target_ts = pd.Timestamp(timestamp)
 
-        # Filter trades up to the target timestamp
-        if not trades_df.empty:
-            trades_before = trades_df[trades_df["time"] <= target_ts]
-        else:
-            trades_before = trades_df
-
-        # Reconstruct portfolio state
         cash = initial_cash
         positions: Dict[str, float] = {}
         total_pnl = 0.0
+        equity = cash
 
-        for _, trade in trades_before.iterrows():
-            symbol = trade.get("symbol", "UNKNOWN")
-            side = trade["side"]
-            qty = float(trade["qty"])
-            price = float(trade["price"])
-            fee = float(trade.get("fee", 0))
-            pnl = float(trade.get("pnl", 0))
+        result_obj = cached.get("result")
+        if result_obj is not None and hasattr(result_obj, "trades"):
+            result: PortfolioBacktestResult = result_obj
+            trades_df = result.trades
 
-            if side == "BUY":
-                cash -= (qty * price + fee)
-                positions[symbol] = positions.get(symbol, 0.0) + qty
-            elif side == "SELL":
-                cash += (qty * price - fee)
-                positions[symbol] = positions.get(symbol, 0.0) - qty
-                total_pnl += pnl
+            # Filter trades up to the target timestamp
+            if not trades_df.empty:
+                trades_before = trades_df[trades_df["time"] <= target_ts]
+            else:
+                trades_before = trades_df
 
-            # Remove positions that are effectively zero
-            if symbol in positions and abs(positions[symbol]) < 1e-8:
-                del positions[symbol]
+            for _, trade in trades_before.iterrows():
+                symbol = trade.get("symbol", "UNKNOWN")
+                side = str(trade["side"]).upper()
+                qty = float(trade["qty"])
+                price = float(trade["price"])
+                fee = float(trade.get("fee", 0))
+                pnl = float(trade.get("pnl", 0))
 
-        # Calculate equity (cash + position value at current prices)
-        # For simplicity, we'll use the equity curve if available
-        equity = cash  # Simplified - actual equity would need current prices
+                if side == "BUY":
+                    cash -= (qty * price + fee)
+                    positions[symbol] = positions.get(symbol, 0.0) + qty
+                elif side == "SELL":
+                    cash += (qty * price - fee)
+                    positions[symbol] = positions.get(symbol, 0.0) - qty
+                    total_pnl += pnl
 
-        # Try to get equity from equity curve
-        if not result.equity_curve.empty:
-            equity_at_time = result.equity_curve[result.equity_curve.index <= target_ts]
-            if not equity_at_time.empty:
-                equity = float(equity_at_time.iloc[-1])
+                if symbol in positions and abs(positions[symbol]) < 1e-8:
+                    del positions[symbol]
+
+            if not result.equity_curve.empty:
+                equity_at_time = result.equity_curve[result.equity_curve.index <= target_ts]
+                if not equity_at_time.empty:
+                    equity = float(equity_at_time.iloc[-1])
+        elif "trades" in cached:
+            trades = cached["trades"]
+            for trade in trades:
+                ts = trade.get("timestamp") or trade.get("time")
+                if ts is None:
+                    continue
+                trade_ts = pd.Timestamp(ts)
+                if trade_ts > target_ts:
+                    continue
+                symbol = trade.get("symbol", "UNKNOWN")
+                side = str(trade.get("side", "")).upper()
+                qty = float(trade.get("qty", 0))
+                price = float(trade.get("price", 0))
+                fee = float(trade.get("fee", 0)) if trade.get("fee") is not None else 0.0
+                pnl = float(trade.get("pnl", 0)) if trade.get("pnl") is not None else 0.0
+
+                if side == "BUY":
+                    cash -= (qty * price + fee)
+                    positions[symbol] = positions.get(symbol, 0.0) + qty
+                elif side == "SELL":
+                    cash += (qty * price - fee)
+                    positions[symbol] = positions.get(symbol, 0.0) - qty
+                    total_pnl += pnl
+
+                if symbol in positions and abs(positions[symbol]) < 1e-8:
+                    del positions[symbol]
+
+            equity_curve = cached.get("equity_curve", [])
+            if equity_curve:
+                equity_points = []
+                for point in equity_curve:
+                    ts = point.get("timestamp") or point.get("time") or point.get("index")
+                    if ts is None:
+                        continue
+                    equity_points.append((pd.Timestamp(ts), float(point.get("equity", point.get("value", 0)))))
+                if equity_points:
+                    equity_points.sort(key=lambda item: item[0])
+                    eligible = [val for ts, val in equity_points if ts <= target_ts]
+                    if eligible:
+                        equity = eligible[-1]
+        else:
+            raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
         return_pct = ((equity - initial_cash) / initial_cash) * 100
 
@@ -796,6 +967,8 @@ async def get_backtest_progress(run_id: str):
             cached = get_backtest_cached(run_id)
             if not cached:
                 raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
+            cached_strategy = cached.get("strategy") or (cached.get("config") or {}).get("strategy", "baseline")
+            llm_costs = (cached.get("llm_data") or {}).get("llm_costs") or {}
             return {
                 "run_id": run_id,
                 "status": cached.get("status", "completed"),
@@ -805,9 +978,9 @@ async def get_backtest_progress(run_id: str):
                 "total_candles": None,
                 "processed_candles": None,
                 "plans_generated": 0,
-                "llm_calls_made": 0,
+                "llm_calls_made": llm_costs.get("num_llm_calls", 0),
                 "latest_logs": [],
-                "strategy": cached.get("strategy", "baseline"),
+                "strategy": cached_strategy,
             }
 
         return {
@@ -821,7 +994,7 @@ async def get_backtest_progress(run_id: str):
             "plans_generated": 0,
             "llm_calls_made": 0,
             "latest_logs": [],
-            "strategy": "baseline",
+            "strategy": status_data.get("strategy", "baseline"),
         }
 
     except HTTPException:
@@ -845,13 +1018,13 @@ async def get_llm_insights(run_id: str):
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
-        if cached.get("strategy") != "llm_strategist" or not cached.get("llm_data"):
+        strategy = cached.get("strategy") or (cached.get("config") or {}).get("strategy")
+        llm_data = cached.get("llm_data")
+        if strategy != "llm_strategist" or not llm_data:
             raise HTTPException(
                 status_code=404,
                 detail="This backtest did not use the LLM strategist or LLM data is not available"
             )
-
-        llm_data = cached["llm_data"]
 
         return {
             "run_id": run_id,
@@ -862,7 +1035,7 @@ async def get_llm_insights(run_id: str):
             "final_cash": llm_data.get("final_cash", 0),
             "final_positions": llm_data.get("final_positions", {}),
             "total_plans_generated": len(llm_data.get("plan_log", [])),
-            "total_cost_usd": sum(llm_data.get("llm_costs", {}).values()),
+            "total_cost_usd": (llm_data.get("llm_costs", {}) or {}).get("estimated_cost_usd", 0),
         }
 
     except HTTPException:
@@ -881,36 +1054,53 @@ async def list_backtests(
     List all backtests with optional filtering.
 
     Returns summary of all backtest runs with status and basic info.
+    Merges in-memory cache with disk-persisted results.
     """
     try:
+        # Merge in-memory cache with disk cache
+        all_run_ids = set()
+
         with CACHE_LOCK:
-            cached_items = list(BACKTEST_CACHE.items())
+            for run_id in BACKTEST_CACHE.keys():
+                all_run_ids.add(run_id)
+
+        # Also include disk-cached backtests
+        disk_run_ids = list_cached_backtests()
+        all_run_ids.update(disk_run_ids)
 
         backtest_list = []
-        for run_id, cached in cached_items[:limit]:
+        for run_id in sorted(all_run_ids, reverse=True)[:limit]:
+            # Try to get from memory or disk
+            cached = get_backtest_cached(run_id)
+
+            if not cached:
+                continue
+
             # Skip entries without proper structure
-            if not isinstance(cached, dict) or "status" not in cached:
+            if not isinstance(cached, dict):
                 logger.warning(f"Skipping malformed cache entry: {run_id}")
                 continue
 
+            cached_status = cached.get("status", "unknown")
+
             # Filter by status if specified
-            if status and cached["status"] != status:
+            if status and cached_status != status:
                 continue
 
             backtest_list.append(
                 BacktestStatus(
                     run_id=run_id,
-                    status=cached.get("status", "unknown"),
-                    progress=100.0 if cached.get("status") == "completed" else 0.0,
+                    status=cached_status,
+                    progress=100.0 if cached_status == "completed" else 0.0,
                     started_at=cached.get("started_at"),
                     completed_at=cached.get("completed_at"),
-                    candles_total=None,
-                    candles_processed=None,
+                    candles_total=cached.get("candles_total"),
+                    candles_processed=cached.get("candles_processed"),
                     error=cached.get("error"),
                 )
             )
 
-        return backtest_list
+        return backtest_list[:limit]
 
     except Exception as e:
         logger.error("Failed to list backtests: %s", e)

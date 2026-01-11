@@ -101,6 +101,8 @@ def test_simple_plan_executes_one_trade(tmp_path, monkeypatch):
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     result = backtester.run(run_id="test-run")
     assert result.final_positions["BTC-USD"] > 0
@@ -144,6 +146,8 @@ def test_logs_risk_block_details(tmp_path, monkeypatch):
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     result = backtester.run(run_id="risk-test")
     report = next(entry for entry in result.daily_reports if entry["date"] == "2024-01-01")
@@ -182,6 +186,8 @@ def test_daily_risk_budget_blocks_orders(tmp_path, monkeypatch):
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     result = backtester.run(run_id="budget-test")
     report = next(entry for entry in result.daily_reports if entry["date"] == "2024-01-01")

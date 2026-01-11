@@ -12,6 +12,7 @@ import { BacktestPlaybackViewer } from './BacktestPlaybackViewer';
 import { LLMInsights } from './LLMInsights';
 import { LiveProgressMonitor } from './LiveProgressMonitor';
 import { BacktestSelector } from './BacktestSelector';
+import { PromptEditor } from './PromptEditor';
 
 export function BacktestControl() {
   const defaultConfig: BacktestConfig = {
@@ -473,6 +474,9 @@ export function BacktestControl() {
         </div>
       </div>
 
+      {/* Prompt Editor (collapsible) */}
+      <PromptEditor />
+
       {/* Live Progress Monitor (shown while running) */}
       {selectedRun && backtest && (
         <LiveProgressMonitor runId={selectedRun} status={backtest.status} />
@@ -604,6 +608,7 @@ export function BacktestControl() {
                     <th className="pb-3">Time</th>
                     <th className="pb-3">Symbol</th>
                     <th className="pb-3">Side</th>
+                    <th className="pb-3">Trigger</th>
                     <th className="pb-3 text-right">Qty</th>
                     <th className="pb-3 text-right">Price</th>
                     <th className="pb-3 text-right">P&L</th>
@@ -617,12 +622,15 @@ export function BacktestControl() {
                       <td className="py-2">
                         <span className={cn(
                           'px-2 py-0.5 rounded text-xs font-semibold',
-                          trade.side === 'BUY' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                          trade.side?.toLowerCase() === 'buy' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
                         )}>
-                          {trade.side}
+                          {trade.side?.toUpperCase()}
                         </span>
                       </td>
-                      <td className="py-2 text-right">{trade.qty.toFixed(6)}</td>
+                      <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-32 truncate" title={trade.trigger_id}>
+                        {trade.trigger_id || '-'}
+                      </td>
+                      <td className="py-2 text-right">{trade.qty?.toFixed(6)}</td>
                       <td className="py-2 text-right">{formatCurrency(trade.price)}</td>
                       <td className={cn(
                         'py-2 text-right font-semibold',
@@ -659,7 +667,7 @@ export function BacktestControl() {
         )}
 
         {/* Event Timeline */}
-        <EventTimeline limit={30} />
+        <EventTimeline limit={30} runId={selectedRun || undefined} />
       </div>
     </div>
   );

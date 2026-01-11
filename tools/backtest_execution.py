@@ -20,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
     from backtesting.activities import (
         load_ohlcv_activity,
         run_simulation_chunk_activity,
+        run_llm_backtest_activity,
         persist_results_activity,
     )
 
@@ -51,10 +52,14 @@ class BacktestWorkflow:
         self.completed_at: Optional[str] = None
         self.error: Optional[str] = None
 
+        # Config storage (for persist)
+        self._config: Dict[str, Any] = {}
+
         # Results accumulation (for continue-as-new)
         self.equity_curve: List[Dict] = []
         self.trades: List[Dict] = []
         self.summary: Dict[str, Any] = {}
+        self.llm_data: Dict[str, Any] | None = None
 
     @workflow.run
     async def run(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,8 +79,19 @@ class BacktestWorkflow:
             Dict with final backtest results
         """
         self.run_id = config["run_id"]
+        self._config = {
+            "symbols": config.get("symbols", []),
+            "start_date": config.get("start_date"),
+            "end_date": config.get("end_date"),
+            "requested_start_date": config.get("requested_start_date"),
+            "requested_end_date": config.get("requested_end_date"),
+            "timeframe": config.get("timeframe", "1h"),
+            "initial_cash": config.get("initial_cash", 10000),
+            "strategy": config.get("strategy", "baseline"),
+        }
         self.status = "running"
         self.started_at = workflow.now().isoformat()
+        strategy = config.get("strategy", "baseline")
 
         try:
             # Check if resuming from continue-as-new
@@ -85,17 +101,21 @@ class BacktestWorkflow:
             else:
                 workflow.logger.info(f"Starting new backtest {self.run_id}")
 
-            # Phase 1: Load data (5-20%)
-            if not self.equity_curve:  # Only load if not resuming
-                self.current_phase = "Loading Data"
-                self.progress = 5.0
-                ohlcv_data = await self._load_data(config)
+            if strategy == "llm_strategist":
+                # LLM strategist runs in a single activity (no chunking/continue-as-new).
+                await self._run_llm_backtest(config)
             else:
-                # Use cached data from resume_state
-                ohlcv_data = config["resume_state"]["ohlcv_data"]
+                # Phase 1: Load data (5-20%)
+                if not self.equity_curve:  # Only load if not resuming
+                    self.current_phase = "Loading Data"
+                    self.progress = 5.0
+                    ohlcv_data = await self._load_data(config)
+                else:
+                    # Use cached data from resume_state
+                    ohlcv_data = config["resume_state"]["ohlcv_data"]
 
-            # Phase 2: Run simulation (20-95%)
-            await self._run_simulation(config, ohlcv_data)
+                # Phase 2: Run simulation (20-95%)
+                await self._run_simulation(config, ohlcv_data)
 
             # Phase 3: Persist results (95-100%)
             self.current_phase = "Saving Results"
@@ -199,9 +219,31 @@ class BacktestWorkflow:
                         "candles_processed": self.candles_processed,
                         "summary": self.summary,
                         "ohlcv_data": ohlcv_data,  # Carry forward
+                        "config": self._config,  # Preserve config across continue-as-new
                     }
                 }]
             )
+
+    async def _run_llm_backtest(self, config: Dict[str, Any]) -> None:
+        """Run the LLM strategist backtest in a single activity call."""
+        self.current_phase = "Simulating (LLM)"
+        self.progress = 20.0
+
+        result = await workflow.execute_activity(
+            run_llm_backtest_activity,
+            args=[config],
+            schedule_to_close_timeout=timedelta(minutes=60),
+            heartbeat_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+
+        self.equity_curve = result.get("equity_curve", [])
+        self.trades = result.get("trades", [])
+        self.summary = result.get("summary", {})
+        self.llm_data = result.get("llm_data")
+        self.candles_processed = result.get("candles_processed", len(self.equity_curve))
+        self.candles_total = result.get("candles_total", self.candles_processed)
+        self.progress = 95.0
 
     async def _persist_results(self) -> Dict[str, Any]:
         """Persist results to disk and return summary.
@@ -234,6 +276,9 @@ class BacktestWorkflow:
         self.trades = resume_state.get("trades", [])
         self.candles_processed = resume_state.get("candles_processed", 0)
         self.summary = resume_state.get("summary", {})
+        # Restore config if present
+        if resume_state.get("config"):
+            self._config = resume_state["config"]
 
         workflow.logger.info(
             f"Restored state: {len(self.equity_curve)} equity points, "
@@ -259,6 +304,11 @@ class BacktestWorkflow:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error": self.error,
+
+            # Config (needed by playback endpoints)
+            "config": self._config,
+            "strategy": self._config.get("strategy"),
+            "llm_data": self.llm_data,
 
             # Performance metrics
             "final_equity": self.summary.get("final_equity"),
@@ -312,6 +362,7 @@ class BacktestWorkflow:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error": self.error,
+            "strategy": self._config.get("strategy"),
         }
 
     @workflow.query

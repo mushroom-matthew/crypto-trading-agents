@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
 
@@ -12,7 +12,7 @@ from typing import List
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,7 +29,7 @@ from ops_api.schemas import (
     RunSummary,
 )
 from ops_api.materializer import Materializer
-from ops_api.routers import agents, backtests, live, market, wallets
+from ops_api.routers import agents, backtests, live, market, wallets, prompts
 from ops_api.websocket_manager import manager as ws_manager
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
@@ -113,6 +113,7 @@ app.include_router(live.router)
 app.include_router(market.router)
 app.include_router(agents.router)
 app.include_router(wallets.router)
+app.include_router(prompts.router)
 
 
 # Legacy endpoints (for backward compatibility)
@@ -160,8 +161,20 @@ async def list_events() -> List[Event]:
 
 
 @app.get("/llm/telemetry", response_model=List[LLMTelemetry])
-async def llm_telemetry() -> List[LLMTelemetry]:
-    return materializer.list_llm()
+async def llm_telemetry(
+    run_id: str | None = Query(default=None),
+    since: datetime | None = Query(default=None),
+    limit: int = Query(default=200, le=500),
+) -> List[LLMTelemetry]:
+    telemetry = materializer.list_llm(limit=limit)
+    if run_id:
+        telemetry = [entry for entry in telemetry if entry.run_id == run_id]
+    if since:
+        telemetry = [entry for entry in telemetry if entry.ts >= since]
+    elif not run_id:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        telemetry = [entry for entry in telemetry if entry.ts >= cutoff]
+    return telemetry
 
 
 # WebSocket endpoints for real-time updates

@@ -379,6 +379,22 @@ def _compute_metrics_summary(
     }
 
 
+def _trade_window(
+    start: datetime,
+    end: datetime,
+    trade_start: datetime | None,
+    trade_end: datetime | None,
+) -> tuple[datetime, datetime]:
+    return trade_start or start, trade_end or end
+
+
+def _initial_price_for_trade(raw_data: pd.DataFrame, trade_start: datetime) -> float:
+    subset = raw_data[raw_data.index >= trade_start]
+    if not subset.empty:
+        return float(subset["close"].iloc[0])
+    return float(raw_data["close"].iloc[0])
+
+
 def run_backtest(
     pair: str,
     start: datetime,
@@ -390,6 +406,8 @@ def run_backtest(
     flatten_positions_daily: bool = False,
     risk_limits: "RiskLimitSettings | None" = None,
     progress_callback: ProgressCallback = None,
+    trade_start: datetime | None = None,
+    trade_end: datetime | None = None,
 ) -> BacktestResult:
     raw_data = load_ohlcv(pair, start, end, timeframe='1h')
     if raw_data.empty:
@@ -397,7 +415,8 @@ def run_backtest(
     features = _compute_features(raw_data)
     strategy = ExecutionAgentStrategy(strategy_config)
 
-    initial_price = float(raw_data["close"].iloc[0])
+    trade_start, trade_end = _trade_window(start, end, trade_start, trade_end)
+    initial_price = _initial_price_for_trade(raw_data, trade_start)
     initial_prices = {pair: initial_price}
     portfolio, cost_basis = _seed_portfolio_with_allocations(
         pairs=[pair],
@@ -413,8 +432,11 @@ def run_backtest(
     last_timestamp: pd.Timestamp | None = None
     last_prices: Dict[str, float] = {pair: initial_price}
 
-    total_rows = len(features)
-    for idx, (ts, row) in enumerate(features.iterrows()):
+    features_window = features[(features.index >= trade_start) & (features.index <= trade_end)]
+    if features_window.empty:
+        raise ValueError("No feature data available for supplied pairs")
+    total_rows = len(features_window)
+    for idx, (ts, row) in enumerate(features_window.iterrows()):
         # Call progress callback every 100 candles
         if progress_callback and idx % 100 == 0:
             progress_callback(idx, total_rows, ts.isoformat())
@@ -467,10 +489,13 @@ def run_multi_asset_backtest(
     flatten_positions_daily: bool = False,
     risk_limits: "RiskLimitSettings | None" = None,
     progress_callback: ProgressCallback = None,
+    trade_start: datetime | None = None,
+    trade_end: datetime | None = None,
 ) -> PortfolioBacktestResult:
     if not pairs:
         raise ValueError("pairs must not be empty")
 
+    trade_start, trade_end = _trade_window(start, end, trade_start, trade_end)
     raw_data_map: Dict[str, pd.DataFrame] = {}
     features_map: Dict[str, pd.DataFrame] = {}
     for pair in pairs:
@@ -480,7 +505,7 @@ def run_multi_asset_backtest(
         raw_data_map[pair] = raw
         features_map[pair] = _compute_features(raw)
 
-    initial_prices = {pair: float(raw_data_map[pair]["close"].iloc[0]) for pair in pairs}
+    initial_prices = {pair: _initial_price_for_trade(raw_data_map[pair], trade_start) for pair in pairs}
     portfolio, cost_basis = _seed_portfolio_with_allocations(
         pairs=pairs,
         initial_cash=initial_cash,
@@ -489,7 +514,7 @@ def run_multi_asset_backtest(
     )
     strategy = ExecutionAgentStrategy(strategy_config)
 
-    timestamps = sorted({ts for df in features_map.values() for ts in df.index})
+    timestamps = sorted({ts for df in features_map.values() for ts in df.index if trade_start <= ts <= trade_end})
     if not timestamps:
         raise ValueError("No feature data available for supplied pairs")
 
@@ -588,6 +613,8 @@ def run_portfolio_backtest(
     flatten_positions_daily: bool = False,
     risk_limits: "RiskLimitSettings | None" = None,
     progress_callback: ProgressCallback = None,
+    trade_start: datetime | None = None,
+    trade_end: datetime | None = None,
 ) -> PortfolioBacktestResult:
     if not pairs:
         raise ValueError("pairs must not be empty")
@@ -603,6 +630,8 @@ def run_portfolio_backtest(
             flatten_positions_daily=flatten_positions_daily,
             risk_limits=risk_limits,
             progress_callback=progress_callback,
+            trade_start=trade_start,
+            trade_end=trade_end,
         )
     if weights and len(weights) != len(pairs):
         raise ValueError("weights length must match pairs")
@@ -633,6 +662,8 @@ def run_portfolio_backtest(
             flatten_positions_daily=flatten_positions_daily,
             risk_limits=risk_limits,
             progress_callback=pair_progress_callback,
+            trade_start=trade_start,
+            trade_end=trade_end,
         )
         per_pair[pair] = result
 

@@ -10,6 +10,7 @@ import {
   Filter,
   ChevronDown,
   ChevronUp,
+  Sparkles,
 } from 'lucide-react';
 import { agentAPI, type AgentEvent } from '../lib/api';
 import { cn, formatDateTime } from '../lib/utils';
@@ -49,23 +50,30 @@ const EVENT_CONFIG: Record<
     color: 'text-red-500',
     label: 'Trade Blocked',
   },
+  llm_call: {
+    icon: Sparkles,
+    color: 'text-amber-500',
+    label: 'LLM Call',
+  },
 };
 
 interface EventTimelineProps {
   limit?: number;
   showFilter?: boolean;
+  runId?: string;
 }
 
-export function EventTimeline({ limit = 50, showFilter = true }: EventTimelineProps) {
+export function EventTimeline({ limit = 50, showFilter = true, runId }: EventTimelineProps) {
   const [filterType, setFilterType] = useState<string>('');
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(new Set());
 
   // Query agent events with auto-refresh every 3 seconds
   const { data: events = [], isLoading } = useQuery({
-    queryKey: ['agent-events', filterType],
+    queryKey: ['agent-events', filterType, runId],
     queryFn: () =>
       agentAPI.getEvents({
         type: filterType || undefined,
+        run_id: runId || undefined,
         limit,
       }),
     refetchInterval: 3000,
@@ -238,19 +246,16 @@ function renderEventSummary(event: AgentEvent): React.ReactNode {
       return <span>User request: {payload.text || 'N/A'}</span>;
 
     case 'plan_generated':
-      return (
-        <span>
-          Strategy plan for {payload.symbol || 'unknown'} (ID: {payload.strategy_id || 'N/A'})
-        </span>
-      );
+      return renderPlanGeneratedSummary(payload);
 
     case 'plan_judged':
       return (
         <span>
-          Score: {payload.overall_score || 'N/A'}/100
+          Score: {payload.overall_score ?? payload.score ?? 'N/A'}/100
           {payload.recommendations && payload.recommendations.length > 0 && (
             <> - {payload.recommendations[0]}</>
           )}
+          {!payload.recommendations?.length && payload.notes && <> - {payload.notes}</>}
         </span>
       );
 
@@ -276,7 +281,34 @@ function renderEventSummary(event: AgentEvent): React.ReactNode {
         </span>
       );
 
+    case 'llm_call':
+      return (
+        <span>
+          {payload.model || 'LLM'} · in {payload.tokens_in ?? 'N/A'} / out {payload.tokens_out ?? 'N/A'} · {payload.duration_ms ?? 'N/A'}ms
+        </span>
+      );
+
     default:
       return <span>{JSON.stringify(payload).substring(0, 100)}...</span>;
   }
+}
+
+function renderPlanGeneratedSummary(payload: Record<string, any>): React.ReactNode {
+  const planId = payload.plan_id || payload.strategy_id || payload.planId;
+  const regime = payload.regime || payload.market_regime;
+  const numTriggers = payload.num_triggers ?? (Array.isArray(payload.triggers) ? payload.triggers.length : undefined);
+  const symbol = payload.symbol;
+  const allowedSymbols = payload.allowed_symbols;
+  const symbolLabel = symbol || (Array.isArray(allowedSymbols) ? allowedSymbols.join(', ') : 'unknown');
+  const parts = [
+    `Plan ${planId || 'N/A'}`,
+    `symbol(s): ${symbolLabel}`,
+  ];
+  if (regime) {
+    parts.push(`regime: ${regime}`);
+  }
+  if (numTriggers !== undefined) {
+    parts.push(`triggers: ${numTriggers}`);
+  }
+  return <span>{parts.join(' · ')}</span>;
 }

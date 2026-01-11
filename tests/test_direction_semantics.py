@@ -113,6 +113,8 @@ def test_exit_direction_not_blocked(monkeypatch, tmp_path):
         plan_provider=_StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     result = backtester.run(run_id="direction-exit-ok")
     # Exit should not be blocked by allowed_directions and should flatten the position.

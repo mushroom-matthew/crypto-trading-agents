@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 import json
 import logging
 import os
@@ -36,6 +37,8 @@ from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings
 from services.risk_adjustment_service import apply_judge_risk_feedback, effective_risk_limits, snapshot_adjustments, build_risk_profile
 from services.strategy_run_registry import StrategyRunConfig, StrategyRunRegistry, strategy_run_registry
 from services.strategist_plan_service import StrategistPlanService
+from ops_api.event_store import EventStore
+from ops_api.schemas import Event
 from tools import execution_tools
 from trading_core.trigger_compiler import compile_plan
 from trading_core.trigger_budget import enforce_trigger_budget
@@ -58,6 +61,11 @@ def _new_limit_entry() -> Dict[str, Any]:
 
 def _ensure_timestamp_index(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.index, pd.DatetimeIndex):
+        # Ensure index is UTC for consistent comparison with start/end
+        if df.index.tz is None:
+            df = df.tz_localize("UTC")
+        else:
+            df = df.tz_convert("UTC")
         return df
     if "time" in df.columns:
         df = df.set_index("time")
@@ -65,6 +73,11 @@ def _ensure_timestamp_index(df: pd.DataFrame) -> pd.DataFrame:
         df = df.set_index("timestamp")
     else:
         raise ValueError("Dataframe must include time column")
+    # Ensure index is UTC
+    if df.index.tz is None:
+        df.index = pd.to_datetime(df.index, utc=True)
+    else:
+        df.index = df.index.tz_convert("UTC")
     return df.sort_index()
 
 
@@ -194,6 +207,19 @@ class PortfolioTracker:
             proceeds = notional - fee
             self.cash += proceeds
             delta = -qty
+
+        # Calculate realized PnL BEFORE position update (need pre-trade position)
+        realized_pnl = 0.0
+        pre_position = self.positions.get(order.symbol, 0.0)
+        avg_price = self.avg_entry_price.get(order.symbol, order.price)
+        # Check if this trade closes/reduces position (opposite direction)
+        if (pre_position > 0 and order.side == "sell") or (pre_position < 0 and order.side == "buy"):
+            closing_qty = min(abs(pre_position), qty)
+            if pre_position > 0:  # Closing long
+                realized_pnl = closing_qty * (order.price - avg_price)
+            else:  # Closing short
+                realized_pnl = closing_qty * (avg_price - order.price)
+
         self._update_position(
             order.symbol,
             delta,
@@ -203,6 +229,7 @@ class PortfolioTracker:
             order.timeframe,
             market_structure_entry=market_structure_entry,
         )
+
         self.fills.append(
             {
                 "timestamp": order.timestamp,
@@ -212,6 +239,7 @@ class PortfolioTracker:
                 "price": order.price,
                 "fee": fee,
                 "reason": order.reason,
+                "pnl": realized_pnl,
                 "market_structure_entry": market_structure_entry,
             }
         )
@@ -271,6 +299,9 @@ class LLMStrategistBacktester:
         factor_data: pd.DataFrame | None = None,
         auto_hedge_market: bool = False,
         factor_data_path: Path | None = None,
+        min_hold_hours: float = 2.0,
+        min_flat_hours: float = 2.0,
+        confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -302,6 +333,7 @@ class LLMStrategistBacktester:
         self.plan_provider = plan_provider or StrategyPlanProvider(llm_client, cache_dir=cache_dir, llm_calls_per_day=self.calls_per_day)
         self.run_registry = run_registry or strategy_run_registry
         self.plan_service = StrategistPlanService(plan_provider=self.plan_provider, registry=self.run_registry)
+        self._event_store = EventStore()
         self.window_configs = {tf: IndicatorWindowConfig(timeframe=tf) for tf in self.timeframes}
         if isinstance(risk_params, RiskLimitSettings):
             self.base_risk_limits = risk_params
@@ -318,6 +350,7 @@ class LLMStrategistBacktester:
         self.risk_profile.archetype_multipliers = arch_mults
         self.risk_profile.archetype_hour_multipliers = arch_hour_mults
         self.multiplier_meta = multiplier_meta
+
         self.rpr_comparison_snapshot: Dict[str, Any] = self._load_rpr_comparison_snapshot()
         self.daily_risk_budget_state: Dict[str, Dict[str, float]] = {}
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
@@ -340,6 +373,24 @@ class LLMStrategistBacktester:
         self.flattened_days: set[str] = set()
         self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
         self.flatten_session_boundary_hour = flatten_session_boundary_hour
+        self.min_hold_hours = float(min_hold_hours)
+        hold_override = os.environ.get("LLM_MIN_HOLD_HOURS")
+        if hold_override:
+            try:
+                self.min_hold_hours = float(hold_override)
+            except ValueError:
+                logger.warning("Invalid LLM_MIN_HOLD_HOURS=%s; using %.2f", hold_override, self.min_hold_hours)
+        self.min_hold_hours = max(0.0, self.min_hold_hours)
+        self.min_hold_window = timedelta(hours=self.min_hold_hours)
+        self.min_flat_hours = float(min_flat_hours)
+        flat_override = os.environ.get("LLM_MIN_FLAT_HOURS")
+        if flat_override:
+            try:
+                self.min_flat_hours = float(flat_override)
+            except ValueError:
+                logger.warning("Invalid LLM_MIN_FLAT_HOURS=%s; using %.2f", flat_override, self.min_flat_hours)
+        self.min_flat_hours = max(0.0, self.min_flat_hours)
+        self.min_flat_window = timedelta(hours=self.min_flat_hours)
         self.session_trade_multipliers = list(session_trade_multipliers) if session_trade_multipliers else None
         self.timeframe_trigger_caps = {str(tf): int(cap) for tf, cap in (timeframe_trigger_caps or {}).items() if cap is not None}
         self.flatten_policy = flatten_policy or (
@@ -352,6 +403,7 @@ class LLMStrategistBacktester:
             self.factor_data = self._default_factor_data()
         self.latest_factor_exposures: Dict[str, Dict[str, Any]] = {}
         self.auto_hedge_market = auto_hedge_market
+        self.confidence_override_threshold = confidence_override_threshold
         if self.flatten_policy == "daily_close":
             self.flatten_positions_daily = True
             self.flatten_session_boundary_hour = None
@@ -372,6 +424,8 @@ class LLMStrategistBacktester:
         self.archetype_load_by_day: Dict[str, Dict[tuple[str, str, int], int]] = defaultdict(lambda: defaultdict(int))
         self.archetype_load_threshold = int(os.environ.get("ARCHETYPE_LOAD_THRESHOLD", "8"))
         self.archetype_load_scale_start = float(os.environ.get("ARCHETYPE_LOAD_SCALE_START", "0.6"))
+        self.last_flat_time_by_symbol: Dict[str, datetime] = {}
+        self.current_trigger_engine: TriggerEngine | None = None
         # Daily loss anchoring: set once per day at day boundary, never refreshed intraday.
         self.daily_loss_anchor_by_day: Dict[str, float] = {}
         self.llm_generation_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -383,6 +437,29 @@ class LLMStrategistBacktester:
             self.end,
             self.plan_interval.total_seconds() / 3600,
         )
+
+    def _emit_event(
+        self,
+        event_type: str,
+        payload: Dict[str, Any],
+        *,
+        run_id: str,
+        correlation_id: str | None = None,
+    ) -> None:
+        try:
+            event = Event(
+                event_id=str(uuid4()),
+                ts=datetime.now(timezone.utc),
+                source="llm_strategist",
+                type=event_type,  # type: ignore[arg-type]
+                payload=payload,
+                dedupe_key=None,
+                run_id=run_id,
+                correlation_id=correlation_id,
+            )
+            self._event_store.append(event)
+        except Exception:
+            logger.debug("Failed to emit %s event", event_type, exc_info=True)
 
     def _load_archetype_multipliers(self) -> tuple[Dict[str, float], Dict[str, float], Dict[str, Any]]:
         """Load archetype and archetype|hour multipliers from a JSON blob or file path (optional)."""
@@ -818,8 +895,64 @@ class LLMStrategistBacktester:
         risk_engine = getattr(self, "latest_risk_engine", None)
         limit_entry = self.limit_enforcement_by_day[day_key]
         reason_map = set(item.value for item in BlockReason)
-        custom_reasons = {"timeframe_cap", "session_cap", "trigger_load"}
+        custom_reasons = {"timeframe_cap", "session_cap", "trigger_load", "min_hold", "min_flat"}
         plan_id = (plan_payload or {}).get("plan_id")
+
+        def _base_trigger_id(reason: str) -> str:
+            for suffix in ("_exit", "_flat"):
+                if reason.endswith(suffix):
+                    return reason[: -len(suffix)]
+            return reason
+
+        def _trigger_category(trigger_id: str) -> str | None:
+            plan_limits = self.plan_limits_by_day.get(day_key) or {}
+            catalog = plan_limits.get("trigger_catalog") or {}
+            entry = catalog.get(trigger_id)
+            if isinstance(entry, dict):
+                return entry.get("category")
+            return None
+
+        def _min_hold_block(order: Order) -> str | None:
+            if self.min_hold_hours <= 0:
+                return None
+            if order.reason == "eod_flatten":
+                return None
+            # IMPORTANT: Use self.portfolio.positions (live state) instead of
+            # portfolio_state.positions (snapshot) to get accurate current position
+            current_qty = self.portfolio.positions.get(order.symbol, 0.0)
+            if abs(current_qty) <= 1e-9:
+                return None
+            if (current_qty > 0 and order.side == "buy") or (current_qty < 0 and order.side == "sell"):
+                return None
+            opened_at = self.portfolio.position_meta.get(order.symbol, {}).get("opened_at")
+            if not isinstance(opened_at, datetime):
+                return None
+            if order.timestamp - opened_at >= self.min_hold_window:
+                return None
+            trigger_id = _base_trigger_id(order.reason)
+            category = _trigger_category(trigger_id)
+            if category == "emergency_exit" or "emergency" in trigger_id.lower():
+                return None
+            elapsed_minutes = int((order.timestamp - opened_at).total_seconds() // 60)
+            return f"Min hold {self.min_hold_hours:.2f}h not met; open for {elapsed_minutes}m"
+
+        def _min_flat_block(order: Order) -> str | None:
+            if self.min_flat_hours <= 0:
+                return None
+            if order.reason == "eod_flatten" or order.reason.endswith("_exit") or order.reason.endswith("_flat"):
+                return None
+            # IMPORTANT: Use self.portfolio.positions (live state) instead of
+            # portfolio_state.positions (snapshot) to get accurate current position
+            current_qty = self.portfolio.positions.get(order.symbol, 0.0)
+            if abs(current_qty) > 1e-9:
+                return None
+            last_flat = self.last_flat_time_by_symbol.get(order.symbol)
+            if not isinstance(last_flat, datetime):
+                return None
+            if order.timestamp - last_flat >= self.min_flat_window:
+                return None
+            elapsed_minutes = int((order.timestamp - last_flat).total_seconds() // 60)
+            return f"Min flat {self.min_flat_hours:.2f}h not met; flat for {elapsed_minutes}m"
 
         def _structure_fields(snapshot: Mapping[str, Any] | None) -> Dict[str, Any]:
             if not snapshot:
@@ -920,6 +1053,40 @@ class LLMStrategistBacktester:
         if not plan_payload or not compiled_payload:
             for order in orders:
                 limit_entry["trades_attempted"] += 1
+                hold_detail = _min_hold_block(order)
+                if hold_detail:
+                    _record_block_entry(
+                        {
+                            "timestamp": order.timestamp.isoformat(),
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "price": order.price,
+                            "quantity": order.quantity,
+                            "timeframe": order.timeframe,
+                            "trigger_id": order.reason,
+                            "reason": "min_hold",
+                            "detail": hold_detail,
+                        },
+                        "min_hold",
+                    )
+                    continue
+                flat_detail = _min_flat_block(order)
+                if flat_detail:
+                    _record_block_entry(
+                        {
+                            "timestamp": order.timestamp.isoformat(),
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "price": order.price,
+                            "quantity": order.quantity,
+                            "timeframe": order.timeframe,
+                            "trigger_id": order.reason,
+                            "reason": "min_flat",
+                            "detail": flat_detail,
+                        },
+                        "min_flat",
+                    )
+                    continue
                 risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
                 _record_hints(order)
                 allowance = self._risk_budget_allowance(day_key, order)
@@ -984,7 +1151,15 @@ class LLMStrategistBacktester:
                 _record_execution_detail(order, "trigger_engine", risk_used=risk_used, latency_seconds=0.0)
                 structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
                 risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
+                pre_qty = self.portfolio.positions.get(order.symbol, 0.0)
                 self.portfolio.execute(order, market_structure_entry=structure_snapshot)
+                post_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                # Track fill in trigger engine for cooldown/hold period enforcement
+                is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
+                if self.current_trigger_engine:
+                    self.current_trigger_engine.record_fill(order.symbol, is_entry)
+                if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
+                    self.last_flat_time_by_symbol[order.symbol] = order.timestamp
                 structure_fields = _structure_fields(structure_snapshot)
                 record = {
                     "symbol": order.symbol,
@@ -1018,12 +1193,6 @@ class LLMStrategistBacktester:
                     order.price,
                 )
             return executed_records
-
-        def _gated_trigger_id(reason: str) -> str:
-            for suffix in ("_exit", "_flat"):
-                if reason.endswith(suffix):
-                    return reason[: -len(suffix)]
-            return reason
 
         plan_generated_at = None
         if plan_payload:
@@ -1086,10 +1255,46 @@ class LLMStrategistBacktester:
         for order in orders:
             timestamp = order.timestamp.isoformat()
             raw_trigger_id = order.reason
-            trigger_id = _gated_trigger_id(raw_trigger_id)
+            trigger_id = _base_trigger_id(raw_trigger_id)
             archetype = self._archetype_for_trigger(day_key, trigger_id)
             arche_load, arche_key = _archetype_state(archetype, order.timeframe, order.timestamp)
             events_payload = [{"trigger_id": trigger_id, "timestamp": timestamp}]
+            hold_detail = _min_hold_block(order)
+            if hold_detail:
+                limit_entry["trades_attempted"] += 1
+                _record_block_entry(
+                    {
+                        "timestamp": order.timestamp.isoformat(),
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "price": order.price,
+                        "quantity": order.quantity,
+                        "timeframe": order.timeframe,
+                        "trigger_id": order.reason,
+                        "reason": "min_hold",
+                        "detail": hold_detail,
+                    },
+                    "min_hold",
+                )
+                continue
+            flat_detail = _min_flat_block(order)
+            if flat_detail:
+                limit_entry["trades_attempted"] += 1
+                _record_block_entry(
+                    {
+                        "timestamp": order.timestamp.isoformat(),
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "price": order.price,
+                        "quantity": order.quantity,
+                        "timeframe": order.timeframe,
+                        "trigger_id": order.reason,
+                        "reason": "min_flat",
+                        "detail": flat_detail,
+                    },
+                    "min_flat",
+                )
+                continue
             result = execution_tools.run_live_step_tool(
                 run_id,
                 plan_payload,
@@ -1240,7 +1445,15 @@ class LLMStrategistBacktester:
                 _record_execution_detail(order, "execution_engine", risk_used=risk_used, latency_seconds=latency_seconds)
                 structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
                 risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
+                pre_qty = self.portfolio.positions.get(order.symbol, 0.0)
                 self.portfolio.execute(order, market_structure_entry=structure_snapshot)
+                post_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                # Track fill in trigger engine for cooldown/hold period enforcement
+                is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
+                if self.current_trigger_engine:
+                    self.current_trigger_engine.record_fill(order.symbol, is_entry)
+                if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
+                    self.last_flat_time_by_symbol[order.symbol] = order.timestamp
                 structure_fields = _structure_fields(structure_snapshot)
                 record = {
                     "symbol": order.symbol,
@@ -1406,23 +1619,47 @@ class LLMStrategistBacktester:
                     risk_profile=self.risk_profile,
                 )
                 self.latest_risk_engine = risk_engine
-                trigger_engine = TriggerEngine(current_plan, risk_engine, trade_risk=TradeRiskEvaluator(risk_engine))
+                trigger_engine = TriggerEngine(
+                    current_plan,
+                    risk_engine,
+                    trade_risk=TradeRiskEvaluator(risk_engine),
+                    confidence_override_threshold=self.confidence_override_threshold,
+                )
+                self.current_trigger_engine = trigger_engine
                 llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
                 self.llm_generation_by_day[day_key].append(llm_meta)
+                trigger_summary = [
+                    {
+                        "id": trig.id,
+                        "symbol": trig.symbol,
+                        "direction": trig.direction,
+                        "timeframe": trig.timeframe,
+                        "category": trig.category,
+                        "confidence": trig.confidence_grade,
+                    }
+                    for trig in current_plan.triggers[:50]
+                ]
                 plan_log.append(
                     {
                         "plan_id": current_plan.plan_id,
                         "generated_at": current_plan.generated_at.isoformat(),
                         "valid_until": current_plan.valid_until.isoformat(),
                         "regime": current_plan.regime,
+                        "market_regime": current_plan.regime,
+                        "timestamp": current_plan.generated_at.isoformat(),
                         "num_triggers": len(current_plan.triggers),
+                        "triggers": trigger_summary,
                         "max_trades_per_day": current_plan.max_trades_per_day,
                         "derived_max_trades_per_day": derived_cap or current_plan.max_trades_per_day,
                         "min_trades_per_day": current_plan.min_trades_per_day,
                         "max_triggers_per_symbol_per_day": current_plan.max_triggers_per_symbol_per_day,
                         "trigger_budgets": current_plan.trigger_budgets,
+                        "allowed_symbols": current_plan.allowed_symbols,
+                        "allowed_directions": current_plan.allowed_directions,
                     }
                 )
+                # Emit plan_generated event for UI timeline
+                self._emit_plan_generated_event(run_id, current_plan, trigger_summary)
                 policy_max_trades = getattr(current_plan, "_policy_max_trades_per_day", current_plan.max_trades_per_day)
                 policy_max_triggers = getattr(
                     current_plan, "_policy_max_triggers_per_symbol_per_day", current_plan.max_triggers_per_symbol_per_day
@@ -1489,6 +1726,16 @@ class LLMStrategistBacktester:
             slot_orders: List[Dict[str, Any]] = []
             market_structure_briefs: Dict[str, Any] = {}
             indicator_briefs = self._indicator_briefs(active_assets)
+            # Update latest prices FIRST so portfolio valuation reflects current bar
+            for pair in self.pairs:
+                base_tf = self.timeframes[0]
+                df = self.market_data.get(pair, {}).get(base_tf)
+                if df is not None and ts in df.index:
+                    latest_prices[pair] = float(df.loc[ts, "close"])
+
+            # Mark-to-market BEFORE sizing decisions so equity reflects current prices
+            self.portfolio.mark_to_market(ts, latest_prices)
+
             for pair in self.pairs:
                 for timeframe in self.timeframes:
                     df = self.market_data.get(pair, {}).get(timeframe)
@@ -1681,6 +1928,7 @@ class LLMStrategistBacktester:
                 timestamp=timestamp,
             )
             self.portfolio.execute(order)
+            self.last_flat_time_by_symbol[symbol] = timestamp
             orders.append(order)
         if not orders:
             self.flattened_days.add(day_key)
@@ -2063,6 +2311,8 @@ class LLMStrategistBacktester:
         blocked_risk = sum(risk_breakdown.values())
         blocked_trigger_load = skipped_counts.get("trigger_load", 0)
         blocked_archetype_load = skipped_counts.get("archetype_load", 0)
+        blocked_min_hold = skipped_counts.get("min_hold", 0)
+        blocked_min_flat = skipped_counts.get("min_flat", 0)
         attempted = summary.get("attempted_triggers", 0)
         executed = summary.get("executed_trades", 0)
         execution_rate = (executed / attempted) if attempted else 0.0
@@ -2089,6 +2339,8 @@ class LLMStrategistBacktester:
             "blocked_by_risk_budget": blocked_risk_budget,
             "blocked_by_trigger_load": blocked_trigger_load,
             "blocked_by_archetype_load": blocked_archetype_load,
+            "blocked_by_min_hold": blocked_min_hold,
+            "blocked_by_min_flat": blocked_min_flat,
             "execution_rate": execution_rate,
             "active_brake": active_brake,
             "risk_budget_used_pct": 0.0,
@@ -2172,9 +2424,29 @@ class LLMStrategistBacktester:
             }
         raw_feedback = self._judge_feedback(summary)
         summary["judge_feedback"] = raw_feedback
+        # Emit plan_judged event for UI timeline
+        self._emit_plan_judged_event(run_id, day_key, raw_feedback)
         feedback_obj = JudgeFeedback.model_validate(raw_feedback)
         run = self._apply_feedback_adjustments(run_id, feedback_obj, equity_return_pct > 0)
         summary["risk_adjustments"] = list(snapshot_adjustments(run.risk_adjustments or {}))
+        plan_id = (plan_limits or {}).get("plan_id")
+        self._emit_event(
+            "plan_judged",
+            {
+                "date": day_key,
+                "plan_id": plan_id,
+                "score": raw_feedback.get("score"),
+                "notes": raw_feedback.get("notes"),
+                "constraints": raw_feedback.get("constraints"),
+                "strategist_constraints": raw_feedback.get("strategist_constraints"),
+                "executed_trades": summary.get("executed_trades"),
+                "return_pct": summary.get("return_pct"),
+                "risk_budget_used_pct": summary.get("risk_budget", {}).get("used_pct"),
+                "llm_data_quality": summary.get("llm_data_quality"),
+            },
+            run_id=run_id,
+            correlation_id=plan_id,
+        )
         (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))
         self.flattened_days.discard(day_key)
         return summary
@@ -2735,6 +3007,70 @@ class LLMStrategistBacktester:
             "archetype_quality": _finalize(archetype_quality),
             "archetype_hour_quality": _finalize(archetype_hour_quality),
         }
+
+    def _emit_plan_generated_event(
+        self,
+        run_id: str,
+        plan: "StrategyPlan",
+        trigger_summary: List[Dict[str, Any]],
+    ) -> None:
+        """Emit a plan_generated event to the event store for UI timeline display."""
+        from datetime import datetime as dt
+        try:
+            event = Event(
+                event_id=f"{run_id}-plan-{plan.plan_id}",
+                ts=plan.generated_at if isinstance(plan.generated_at, dt) else dt.fromisoformat(str(plan.generated_at)),
+                source="llm_strategist",
+                type="plan_generated",
+                payload={
+                    "plan_id": plan.plan_id,
+                    "strategy_id": plan.plan_id,  # For UI compatibility
+                    "symbol": self.pairs[0] if self.pairs else "MULTI",
+                    "regime": plan.regime,
+                    "market_regime": plan.regime,
+                    "num_triggers": len(plan.triggers),
+                    "max_trades_per_day": plan.max_trades_per_day,
+                    "triggers": trigger_summary[:10],  # Limit for payload size
+                    "global_view": plan.global_view,
+                },
+                run_id=run_id,
+                correlation_id=run_id,
+            )
+            self._event_store.append(event)
+        except Exception as exc:
+            logger.warning("Failed to emit plan_generated event: %s", exc)
+
+    def _emit_plan_judged_event(
+        self,
+        run_id: str,
+        day_key: str,
+        judge_feedback: Dict[str, Any],
+    ) -> None:
+        """Emit a plan_judged event to the event store for UI timeline display."""
+        from datetime import datetime as dt
+        try:
+            ts = dt.fromisoformat(f"{day_key}T23:59:59+00:00")
+            score = judge_feedback.get("score", 50)
+            event = Event(
+                event_id=f"{run_id}-judge-{day_key}",
+                ts=ts,
+                source="llm_strategist",
+                type="plan_judged",
+                payload={
+                    "day": day_key,
+                    "score": score,
+                    "overall_score": score,  # For UI compatibility
+                    "notes": judge_feedback.get("notes"),
+                    "recommendations": judge_feedback.get("recommendations", []),
+                    "strategist_constraints": judge_feedback.get("strategist_constraints"),
+                    "risk_adjustments": judge_feedback.get("risk_adjustments"),
+                },
+                run_id=run_id,
+                correlation_id=run_id,
+            )
+            self._event_store.append(event)
+        except Exception as exc:
+            logger.warning("Failed to emit plan_judged event: %s", exc)
 
     def _judge_feedback(self, summary: Dict[str, Any]) -> Dict[str, Any]:
         score = 50.0

@@ -186,6 +186,8 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
             "archetype_load": report.get("archetype_load_blocks", 0),
             "trigger_load": report.get("trigger_load_blocks", 0),
             "symbol_cap": report.get("symbol_cap_blocks", 0),
+            "min_hold": limit_stats.get("blocked_by_min_hold", 0),
+            "min_flat": limit_stats.get("blocked_by_min_flat", 0),
             # Aliases to satisfy reporting consumers.
             "max_daily_loss_pct": base_blocks.get("max_daily_loss_pct", 0),
             "max_daily_risk_budget_pct": base_blocks.get("risk_budget", 0),

@@ -62,6 +62,8 @@ def test_high_budget_activity_consumes_budget(tmp_path: Path) -> None:
         market_data=market_data,
         run_registry=run_registry,
         prompt_template_path=None,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     execution_tools.registry = run_registry
     backtester.risk_profile = RiskProfile(global_multiplier=1.0, symbol_multipliers={"BTC-USD": 1.0})

@@ -6,6 +6,8 @@ import hashlib
 import logging
 import math
 import os
+from uuid import uuid4
+from datetime import timezone
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +16,8 @@ from pathlib import Path
 from schemas.llm_strategist import LLMInput, StrategyPlan
 
 from .llm_client import LLMClient
+from ops_api.event_store import EventStore
+from ops_api.schemas import Event
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,7 @@ class StrategyPlanProvider:
         self.daily_counts = defaultdict(int)
         self.cost_tracker = LLMCostTracker()
         self.last_generation_info: dict[str, object] = {}
+        self._event_store = EventStore()
 
     def _cache_path(self, run_id: str, plan_date: datetime, llm_input: LLMInput) -> Path:
         digest = hashlib.sha256(llm_input.to_json().encode("utf-8")).hexdigest()
@@ -81,6 +86,7 @@ class StrategyPlanProvider:
         cached = self._load_cached(cache_path)
         if cached:
             plan = self._enrich_plan(cached, llm_input)
+            plan = plan.model_copy(update={"run_id": run_id})
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(plan.to_json(indent=2))
             self.last_generation_info = {
@@ -91,12 +97,22 @@ class StrategyPlanProvider:
                 "raw_output": None,
             }
             object.__setattr__(plan, "_llm_meta", self.last_generation_info)
+            self._emit_plan_generated(plan, llm_input, run_id)
             return plan
         date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
             raise RuntimeError(f"LLM call budget exhausted for {date_key[1]}")
-        plan = self.llm_client.generate_plan(llm_input, prompt_template=prompt_template)
+        input_hash = hashlib.sha256(llm_input.to_json().encode("utf-8")).hexdigest()
+        metadata = self._llm_call_metadata(llm_input, plan_date)
+        plan = self.llm_client.generate_plan(
+            llm_input,
+            prompt_template=prompt_template,
+            run_id=run_id,
+            prompt_hash=input_hash,
+            metadata=metadata,
+        )
         plan = self._enrich_plan(plan, llm_input)
+        plan = plan.model_copy(update={"run_id": run_id})
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(plan.to_json(indent=2))
         self.daily_counts[date_key] += 1
@@ -104,6 +120,7 @@ class StrategyPlanProvider:
         meta = getattr(self.llm_client, "last_generation_info", {}) or {}
         self.last_generation_info = meta
         object.__setattr__(plan, "_llm_meta", meta)
+        self._emit_plan_generated(plan, llm_input, run_id)
         return plan
 
     def _enrich_plan(self, plan: StrategyPlan, llm_input: LLMInput) -> StrategyPlan:
@@ -217,3 +234,66 @@ class StrategyPlanProvider:
             if "other" not in plan.allowed_trigger_categories:
                 plan.allowed_trigger_categories.append("other")
         return plan
+
+    def _llm_call_metadata(self, llm_input: LLMInput, plan_date: datetime) -> dict[str, object]:
+        symbols = sorted({asset.symbol for asset in llm_input.assets})
+        timeframes = sorted(
+            {
+                indicator.timeframe
+                for asset in llm_input.assets
+                for indicator in asset.indicators
+                if indicator.timeframe
+            }
+        )
+        plan_dt = plan_date if plan_date.tzinfo else plan_date.replace(tzinfo=timezone.utc)
+        return {
+            "plan_date": plan_dt.astimezone(timezone.utc).isoformat(),
+            "symbols": symbols,
+            "timeframes": timeframes,
+            "asset_count": len(symbols),
+            "timeframe_count": len(timeframes),
+        }
+
+    def _emit_plan_generated(self, plan: StrategyPlan, llm_input: LLMInput, run_id: str) -> None:
+        try:
+            trigger_summary = [
+                {
+                    "id": trig.id,
+                    "symbol": trig.symbol,
+                    "direction": trig.direction,
+                    "timeframe": trig.timeframe,
+                    "category": trig.category,
+                    "confidence": trig.confidence_grade,
+                }
+                for trig in plan.triggers[:50]
+            ]
+            payload = {
+                "plan_id": plan.plan_id,
+                "run_id": run_id,
+                "generated_at": plan.generated_at.isoformat(),
+                "valid_until": plan.valid_until.isoformat(),
+                "regime": plan.regime,
+                "num_triggers": len(plan.triggers),
+                "triggers": trigger_summary,
+                "allowed_symbols": plan.allowed_symbols,
+                "allowed_directions": plan.allowed_directions,
+                "max_trades_per_day": plan.max_trades_per_day,
+                "min_trades_per_day": plan.min_trades_per_day,
+                "max_triggers_per_symbol_per_day": plan.max_triggers_per_symbol_per_day,
+                "risk_constraints": plan.risk_constraints.model_dump(),
+                "source": (self.last_generation_info or {}).get("source"),
+                "llm_meta": self.last_generation_info,
+            }
+            event = Event(
+                event_id=str(uuid4()),
+                ts=datetime.now(timezone.utc),
+                source="llm_strategist",
+                type="plan_generated",  # type: ignore[arg-type]
+                payload=payload,
+                dedupe_key=None,
+                run_id=run_id,
+                correlation_id=plan.plan_id,
+            )
+            self._event_store.append(event)
+        except Exception:
+            logger.debug("Failed to emit plan_generated event", exc_info=True)

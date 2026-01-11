@@ -128,20 +128,47 @@ export function LLMInsights({ runId }: LLMInsightsProps) {
                   <span className="text-xs font-mono text-purple-600 dark:text-purple-400">
                     Plan #{idx + 1}
                   </span>
-                  {plan.timestamp && (
+                  {(plan.timestamp || plan.generated_at) && (
                     <span className="text-xs text-gray-500 dark:text-gray-400">
-                      {new Date(plan.timestamp).toLocaleString()}
+                      {new Date(plan.timestamp || plan.generated_at).toLocaleString()}
                     </span>
                   )}
                 </div>
-                {plan.triggers && plan.triggers.length > 0 && (
+                {(plan.num_triggers || (plan.triggers && plan.triggers.length > 0)) && (
                   <div className="text-sm text-gray-700 dark:text-gray-300">
-                    <span className="font-semibold">{plan.triggers.length}</span> triggers defined
+                    <span className="font-semibold">
+                      {plan.num_triggers ?? plan.triggers.length}
+                    </span>{' '}
+                    triggers defined
                   </div>
                 )}
-                {plan.market_regime && (
+                {(plan.market_regime || plan.regime) && (
                   <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                    Market Regime: {plan.market_regime}
+                    Market Regime: {plan.market_regime || plan.regime}
+                  </div>
+                )}
+                {plan.max_trades_per_day != null && (
+                  <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                    Max Trades/Day: {plan.max_trades_per_day}
+                  </div>
+                )}
+                {plan.triggers && plan.triggers.length > 0 && (
+                  <div className="mt-3 space-y-1 text-xs text-gray-600 dark:text-gray-400">
+                    {plan.triggers.slice(0, 4).map((trigger: any) => (
+                      <div key={trigger.id} className="flex items-center justify-between">
+                        <span className="font-mono text-gray-700 dark:text-gray-200">
+                          {trigger.symbol} {trigger.direction}
+                        </span>
+                        <span className="font-mono text-gray-500 dark:text-gray-400">
+                          {trigger.timeframe}
+                        </span>
+                      </div>
+                    ))}
+                    {plan.triggers.length > 4 && (
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        +{plan.triggers.length - 4} more triggers
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -174,6 +201,46 @@ export function LLMInsights({ runId }: LLMInsightsProps) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Daily Judgement */}
+      {insights.daily_reports && insights.daily_reports.length > 0 && (
+        <div className="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+          <h3 className="text-sm font-semibold mb-3 text-gray-700 dark:text-gray-300">
+            Daily Judgement ({insights.daily_reports.length})
+          </h3>
+          <div className="max-h-64 overflow-y-auto space-y-2">
+            {insights.daily_reports.slice(-7).map((report: any, idx: number) => (
+              <div
+                key={report.date || report.timestamp || idx}
+                className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded flex flex-col gap-1 text-xs"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-gray-700 dark:text-gray-200">
+                    {report.date || report.day || report.timestamp}
+                  </span>
+                  <span className="text-gray-500 dark:text-gray-400">
+                    Return {Number(report.return_pct || 0).toFixed(2)}%
+                  </span>
+                </div>
+                {report.judge_feedback && (
+                  <div className="text-gray-600 dark:text-gray-300">
+                    Score: {report.judge_feedback.score ?? 'n/a'}{' '}
+                    {report.judge_feedback.notes ? `- ${report.judge_feedback.notes}` : ''}
+                  </div>
+                )}
+                <div className="text-gray-500 dark:text-gray-400">
+                  Trades: {report.executed_trades ?? report.trade_count ?? 0}
+                </div>
+              </div>
+            ))}
+          </div>
+          {insights.daily_reports.length > 7 && (
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Showing last 7 days
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -15,6 +15,20 @@ const api = axios.create({
   },
 });
 
+// Error interceptor to extract FastAPI error details
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    // Extract detail message from FastAPI error response
+    if (error.response?.data?.detail) {
+      error.message = error.response.data.detail;
+    } else if (error.response?.data?.message) {
+      error.message = error.response.data.message;
+    }
+    return Promise.reject(error);
+  }
+);
+
 // ============================================================================
 // Type Definitions
 // ============================================================================
@@ -286,8 +300,12 @@ export const agentAPI = {
   },
 
   // Get LLM telemetry entries
-  getLLMTelemetry: async (): Promise<LLMTelemetry[]> => {
-    const response = await api.get('/llm/telemetry');
+  getLLMTelemetry: async (params?: {
+    run_id?: string;
+    limit?: number;
+    since?: string;
+  }): Promise<LLMTelemetry[]> => {
+    const response = await api.get('/llm/telemetry', { params });
     return response.data;
   },
 
@@ -316,6 +334,67 @@ export const walletsAPI = {
     const response = await api.get('/wallets/reconcile/history', {
       params: { limit },
     });
+    return response.data;
+  },
+};
+
+// Prompt management types
+export interface PromptInfo {
+  name: string;
+  content: string;
+  file_path: string;
+}
+
+export interface PromptListResponse {
+  prompts: string[];
+}
+
+export interface PromptVersion {
+  version_id: string;
+  timestamp: string;
+  file_path: string;
+  size_bytes: number;
+}
+
+export interface PromptVersionsResponse {
+  name: string;
+  versions: PromptVersion[];
+}
+
+export const promptsAPI = {
+  // List available prompts
+  list: async (): Promise<PromptListResponse> => {
+    const response = await api.get('/prompts/');
+    return response.data;
+  },
+
+  // Get a specific prompt by name
+  get: async (name: string): Promise<PromptInfo> => {
+    const response = await api.get(`/prompts/${name}`);
+    return response.data;
+  },
+
+  // Update a prompt (creates a version backup first)
+  update: async (name: string, content: string): Promise<PromptInfo> => {
+    const response = await api.put(`/prompts/${name}`, { content });
+    return response.data;
+  },
+
+  // Reset a prompt to default
+  reset: async (name: string): Promise<PromptInfo> => {
+    const response = await api.post(`/prompts/${name}/reset`);
+    return response.data;
+  },
+
+  // List all versions of a prompt
+  listVersions: async (name: string): Promise<PromptVersionsResponse> => {
+    const response = await api.get(`/prompts/${name}/versions`);
+    return response.data;
+  },
+
+  // Restore a specific version
+  restoreVersion: async (name: string, versionId: string): Promise<PromptInfo> => {
+    const response = await api.post(`/prompts/${name}/versions/${versionId}/restore`);
     return response.data;
   },
 };

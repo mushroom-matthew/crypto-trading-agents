@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from temporalio import activity
@@ -32,10 +35,13 @@ async def load_ohlcv_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     Retry: 3 attempts with exponential backoff
     """
     from backtesting.dataset import load_ohlcv
+    from data_loader.utils import ensure_utc
 
     symbols = config["symbols"]
-    start = datetime.fromisoformat(config["start_date"])
-    end = datetime.fromisoformat(config["end_date"])
+    start = ensure_utc(datetime.fromisoformat(config["start_date"]))
+    end = ensure_utc(datetime.fromisoformat(config["end_date"]))
+    trade_start = ensure_utc(datetime.fromisoformat(config.get("requested_start_date", config["start_date"])))
+    trade_end = ensure_utc(datetime.fromisoformat(config.get("requested_end_date", config["end_date"])))
     timeframe = config.get("timeframe", "1h")
 
     logger.info(f"Loading OHLCV data for {len(symbols)} symbols from {start} to {end}")
@@ -51,9 +57,10 @@ async def load_ohlcv_activity(config: Dict[str, Any]) -> Dict[str, Any]:
                 end=end,
                 timeframe=timeframe
             )
+            window = df[(df.index >= trade_start) & (df.index <= trade_end)]
             ohlcv_dict[symbol] = {
                 "data": df.to_dict(orient="records"),
-                "total_candles": len(df)
+                "total_candles": len(window)
             }
             logger.info(f"Loaded {len(df)} candles for {symbol}")
         except Exception as e:
@@ -122,6 +129,11 @@ def run_simulation_chunk_activity(
         except Exception as e:
             logger.warning(f"Heartbeat failed: {e}")
 
+    from data_loader.utils import ensure_utc
+
+    trade_start = ensure_utc(datetime.fromisoformat(config.get("requested_start_date", config["start_date"])))
+    trade_end = ensure_utc(datetime.fromisoformat(config.get("requested_end_date", config["end_date"])))
+
     # Run appropriate simulation
     if is_portfolio:
         # Portfolio backtest
@@ -136,10 +148,15 @@ def run_simulation_chunk_activity(
             flatten_positions_daily=config.get("flatten_positions_daily", False),
             risk_limits=None,  # TODO: Support risk limits
             progress_callback=progress_callback,
+            trade_start=trade_start,
+            trade_end=trade_end,
         )
 
-        # Extract data
-        equity_curve = result.equity_curve.to_dict(orient="records")
+        # Extract data - equity_curve is a Series, not DataFrame
+        equity_curve = [
+            {"timestamp": str(ts), "equity": float(val)}
+            for ts, val in result.equity_curve.items()
+        ]
         trades = result.trades.to_dict(orient="records") if not result.trades.empty else []
 
     else:
@@ -159,9 +176,15 @@ def run_simulation_chunk_activity(
             flatten_positions_daily=config.get("flatten_positions_daily", False),
             risk_limits=None,
             progress_callback=progress_callback,
+            trade_start=trade_start,
+            trade_end=trade_end,
         )
 
-        equity_curve = result.equity_curve.to_dict(orient="records")
+        # equity_curve is a Series, not DataFrame
+        equity_curve = [
+            {"timestamp": str(ts), "equity": float(val)}
+            for ts, val in result.equity_curve.items()
+        ]
         trades = result.trades.to_dict(orient="records") if not result.trades.empty else []
 
     logger.info(f"Chunk complete: {len(equity_curve)} equity points, {len(trades)} trades")
@@ -172,6 +195,134 @@ def run_simulation_chunk_activity(
         "candles_processed": chunk_end_idx - chunk_start_idx,
         "has_more": has_more,
         "summary": result.summary if hasattr(result, 'summary') else {}
+    }
+
+
+@activity.defn
+def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Run LLM strategist backtest for the full range (no chunking)."""
+    from agents.strategies.llm_client import LLMClient
+    from backtesting.llm_strategist_runner import LLMStrategistBacktester
+    from backtesting.dataset import load_ohlcv
+    from data_loader.utils import ensure_utc
+    from backtesting.simulator import _compute_metrics_summary
+    import pandas as pd
+
+    symbols = config["symbols"]
+    start = ensure_utc(datetime.fromisoformat(config["start_date"]))
+    end = ensure_utc(datetime.fromisoformat(config["end_date"]))
+    timeframe = config.get("timeframe", "1h")
+    initial_cash = config.get("initial_cash", 10000.0)
+    fee_rate = config.get("fee_rate", 0.001)
+    llm_calls_per_day = int(config.get("llm_calls_per_day", 1))
+    llm_model = config.get("llm_model")
+    llm_cache_dir = config.get("llm_cache_dir", ".cache/strategy_plans")
+    risk_params = config.get("risk_params")
+    timeframes = config.get("timeframes") or [timeframe]
+    flatten_positions_daily = config.get("flatten_positions_daily", False)
+    flatten_notional_threshold = config.get("flatten_notional_threshold", 0.0)
+    min_hold_hours = config.get("min_hold_hours", 2.0)
+    min_flat_hours = config.get("min_flat_hours", 2.0)
+
+    logger.info(
+        "Running LLM strategist backtest",
+        extra={"symbols": symbols, "start": start.isoformat(), "end": end.isoformat(), "timeframes": timeframes},
+    )
+
+    llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
+    market_data: Dict[str, Dict[str, pd.DataFrame]] = {}
+    for symbol in symbols:
+        df = load_ohlcv(symbol, start, end, timeframe=timeframe)
+        if df.empty:
+            raise ValueError(f"No OHLCV data available for {symbol}")
+        market_data[symbol] = {timeframe: df}
+
+    trade_start = ensure_utc(datetime.fromisoformat(config.get("requested_start_date", config["start_date"])))
+    trade_end = ensure_utc(datetime.fromisoformat(config.get("requested_end_date", config["end_date"])))
+
+    backtester = LLMStrategistBacktester(
+        pairs=symbols,
+        start=trade_start,
+        end=trade_end,
+        initial_cash=initial_cash,
+        fee_rate=fee_rate,
+        llm_client=llm_client,
+        cache_dir=Path(llm_cache_dir),
+        llm_calls_per_day=llm_calls_per_day,
+        risk_params=risk_params,
+        timeframes=timeframes,
+        market_data=market_data,
+        flatten_positions_daily=flatten_positions_daily,
+        flatten_notional_threshold=flatten_notional_threshold,
+        min_hold_hours=float(min_hold_hours),
+        min_flat_hours=float(min_flat_hours),
+    )
+    result_holder: Dict[str, Any] = {}
+    error_holder: Dict[str, Exception] = {}
+
+    def _run_backtest() -> None:
+        try:
+            result_holder["result"] = backtester.run(run_id=config.get("run_id", "llm-backtest"))
+        except Exception as exc:
+            error_holder["error"] = exc
+
+    worker_thread = threading.Thread(target=_run_backtest, name="llm-backtest-worker", daemon=True)
+    worker_thread.start()
+
+    try:
+        while worker_thread.is_alive():
+            try:
+                activity.heartbeat({"phase": "llm_backtest", "status": "running"})
+            except Exception as exc:
+                logger.warning("LLM backtest heartbeat failed: %s", exc)
+            time.sleep(10)
+        worker_thread.join()
+        if error_holder.get("error"):
+            raise error_holder["error"]
+        result = result_holder["result"]
+    finally:
+        worker_thread.join(timeout=1)
+
+    equity_curve = [
+        {"timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts), "equity": float(val)}
+        for ts, val in result.equity_curve.items()
+    ]
+    fills_df = result.fills
+    trades: List[Dict[str, Any]] = []
+    if not fills_df.empty:
+        for record in fills_df.to_dict(orient="records"):
+            ts = record.get("timestamp")
+            if hasattr(ts, "isoformat"):
+                record["timestamp"] = ts.isoformat()
+            trades.append(record)
+
+    if fills_df.empty:
+        trades_for_metrics = pd.DataFrame(columns=["time", "symbol", "side", "qty", "price", "fee"])
+    else:
+        trades_for_metrics = fills_df.rename(columns={"timestamp": "time"}).copy()
+        trades_for_metrics["time"] = pd.to_datetime(trades_for_metrics["time"], utc=True)
+
+    summary = _compute_metrics_summary(result.equity_curve, trades_for_metrics, initial_cash)
+    if isinstance(result.summary, dict) and result.summary.get("run_summary") is not None:
+        summary["run_summary"] = result.summary["run_summary"]
+    summary["llm_costs"] = result.llm_costs
+    llm_data = {
+        "plan_log": result.plan_log,
+        "llm_costs": result.llm_costs,
+        "daily_reports": result.daily_reports,
+        "final_cash": result.final_cash,
+        "final_positions": result.final_positions,
+    }
+
+    candles_processed = len(equity_curve)
+    return {
+        "equity_curve": equity_curve,
+        "trades": trades,
+        "candles_processed": candles_processed,
+        "candles_total": candles_processed,
+        "has_more": False,
+        "summary": summary,
+        "llm_data": llm_data,
     }
 
 

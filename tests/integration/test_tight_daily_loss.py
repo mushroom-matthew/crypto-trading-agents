@@ -60,6 +60,8 @@ def test_tight_daily_loss_stops_new_entries(tmp_path: Path) -> None:
         market_data=market_data,
         run_registry=run_registry,
         prompt_template_path=None,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     # Ensure the deterministic execution tool shares the same registry as this run.
     execution_tools.registry = run_registry

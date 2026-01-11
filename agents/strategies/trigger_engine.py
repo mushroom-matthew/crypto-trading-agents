@@ -41,17 +41,53 @@ class Order:
 class TriggerEngine:
     """Evaluates TriggerCondition strings on every bar walking forward."""
 
+    # Confidence grade priority mapping (higher = more priority)
+    CONFIDENCE_PRIORITY = {"A": 3, "B": 2, "C": 1, None: 0}
+
     def __init__(
         self,
         plan: StrategyPlan,
         risk_engine: RiskEngine,
         evaluator: RuleEvaluator | None = None,
         trade_risk: TradeRiskEvaluator | None = None,
+        confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
+        min_hold_bars: int = 4,
+        trade_cooldown_bars: int = 2,
     ) -> None:
+        """Initialize the trigger engine.
+
+        Args:
+            plan: Strategy plan with triggers
+            risk_engine: Risk engine for position sizing
+            evaluator: Rule evaluator (optional)
+            trade_risk: Trade risk evaluator (optional)
+            confidence_override_threshold: Minimum confidence grade for entry to override exit.
+                "A" = only A-grade entries override exits (most conservative)
+                "B" = A or B grade entries override exits
+                "C" = all graded entries override exits
+                None = exit always has priority (no confidence override)
+            min_hold_bars: Minimum bars to hold a position before allowing exit (default: 4).
+                This prevents rapid flip-flops by requiring positions to be held for a minimum time.
+            trade_cooldown_bars: Minimum bars between trades for the same symbol (default: 2).
+                This prevents overtrading by enforcing a cooldown period after each trade.
+        """
         self.plan = plan
         self.risk_engine = risk_engine
         self.evaluator = evaluator or RuleEvaluator()
         self.trade_risk = trade_risk or TradeRiskEvaluator(risk_engine)
+        self.confidence_override_threshold = confidence_override_threshold
+        self.min_hold_bars = max(0, min_hold_bars)
+        self.trade_cooldown_bars = max(0, trade_cooldown_bars)
+        # Store trigger confidence for deduplication
+        self._trigger_confidence: dict[str, Literal["A", "B", "C"] | None] = {
+            t.id: t.confidence_grade for t in plan.triggers
+        }
+        # Track position entry bar index for minimum hold enforcement
+        self._position_entry_bar: dict[str, int] = {}
+        # Track last trade bar index for cooldown enforcement
+        self._last_trade_bar: dict[str, int] = {}
+        # Current bar counter
+        self._bar_counter: int = 0
 
     def _context(
         self,
@@ -203,6 +239,15 @@ class TriggerEngine:
     ) -> tuple[List[Order], List[dict]]:
         orders: List[Order] = []
         block_entries: List[dict] = []
+
+        # Increment bar counter for cooldown/hold tracking
+        self._bar_counter += 1
+
+        # Check trade cooldown for this symbol
+        if self._is_in_cooldown(bar.symbol):
+            # Skip all triggers for this symbol during cooldown
+            return orders, block_entries
+
         context = self._context(indicator, asset_state, market_structure, portfolio)
         for trigger in self.plan.triggers:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
@@ -218,6 +263,11 @@ class TriggerEngine:
                 self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar)
                 continue
             if exit_fired:
+                # Check minimum hold period before allowing exit
+                if self._is_within_hold_period(trigger.symbol):
+                    detail = f"Position held for less than {self.min_hold_bars} bars"
+                    self._record_block(block_entries, trigger, "MIN_HOLD_PERIOD", detail, bar)
+                    continue
                 exit_order = self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_exit", block_entries)
                 if exit_order:
                     orders.append(exit_order)
@@ -236,4 +286,121 @@ class TriggerEngine:
                 entry = self._entry_order(trigger, indicator, portfolio, bar, block_entries)
                 if entry:
                     orders.append(entry)
+
+        # Deduplicate orders per symbol with EXIT PRIORITY:
+        # If both exit and entry orders exist for same symbol, only keep the exit.
+        # This prevents whipsawing (entering then immediately exiting).
+        orders = self._deduplicate_orders(orders, bar.symbol)
+
         return orders, block_entries
+
+    def _is_in_cooldown(self, symbol: str) -> bool:
+        """Check if symbol is in trade cooldown period."""
+        if self.trade_cooldown_bars <= 0:
+            return False
+        last_trade = self._last_trade_bar.get(symbol)
+        if last_trade is None:
+            return False
+        bars_since_trade = self._bar_counter - last_trade
+        return bars_since_trade < self.trade_cooldown_bars
+
+    def _is_within_hold_period(self, symbol: str) -> bool:
+        """Check if position is within minimum hold period (can't exit yet)."""
+        if self.min_hold_bars <= 0:
+            return False
+        entry_bar = self._position_entry_bar.get(symbol)
+        if entry_bar is None:
+            return False
+        bars_held = self._bar_counter - entry_bar
+        return bars_held < self.min_hold_bars
+
+    def record_fill(self, symbol: str, is_entry: bool) -> None:
+        """Record a fill for cooldown and hold period tracking.
+
+        Call this after an order is filled to update tracking state.
+
+        Args:
+            symbol: The symbol that was traded
+            is_entry: True if this was an entry (new position), False if exit
+        """
+        self._last_trade_bar[symbol] = self._bar_counter
+        if is_entry:
+            self._position_entry_bar[symbol] = self._bar_counter
+        else:
+            # Clear entry bar when position is closed
+            self._position_entry_bar.pop(symbol, None)
+
+    def _deduplicate_orders(self, orders: List[Order], bar_symbol: str) -> List[Order]:
+        """Deduplicate orders per symbol using confidence-aware exit priority.
+
+        Rules:
+        1. Default: Exit orders (reason ending in _exit or _flat) take priority
+        2. Exception: High-confidence entries can override exits if confidence >= threshold
+        3. Only one order per symbol per bar is allowed
+        4. If multiple competing orders exist, use highest confidence then first-in-list
+
+        The confidence_override_threshold determines when entries can override exits:
+        - "A": Only A-grade entries override exits
+        - "B": A or B grade entries override exits
+        - "C": All graded entries override exits
+        - None: Exit always has priority (no confidence override)
+        """
+        if len(orders) <= 1:
+            return orders
+
+        # Group by symbol
+        by_symbol: dict[str, List[Order]] = {}
+        for order in orders:
+            by_symbol.setdefault(order.symbol, []).append(order)
+
+        result: List[Order] = []
+        for symbol, symbol_orders in by_symbol.items():
+            if len(symbol_orders) == 1:
+                result.append(symbol_orders[0])
+                continue
+
+            # Separate exits from entries
+            exits = [o for o in symbol_orders if o.reason.endswith("_exit") or o.reason.endswith("_flat")]
+            entries = [o for o in symbol_orders if o not in exits]
+
+            # Get confidence levels for entries
+            def get_confidence(order: Order) -> Literal["A", "B", "C"] | None:
+                # Extract base trigger_id (remove _exit/_flat suffix)
+                trigger_id = order.reason
+                for suffix in ("_exit", "_flat"):
+                    if trigger_id.endswith(suffix):
+                        trigger_id = trigger_id[:-len(suffix)]
+                        break
+                return self._trigger_confidence.get(trigger_id)
+
+            def meets_threshold(confidence: Literal["A", "B", "C"] | None) -> bool:
+                """Check if confidence meets the override threshold."""
+                if self.confidence_override_threshold is None:
+                    return False  # No override allowed
+                if confidence is None:
+                    return False  # No confidence grade
+                threshold_priority = self.CONFIDENCE_PRIORITY.get(self.confidence_override_threshold, 0)
+                confidence_priority = self.CONFIDENCE_PRIORITY.get(confidence, 0)
+                return confidence_priority >= threshold_priority
+
+            # Find highest-confidence entry that meets threshold
+            high_conf_entries = [
+                (o, self.CONFIDENCE_PRIORITY.get(get_confidence(o), 0))
+                for o in entries
+                if meets_threshold(get_confidence(o))
+            ]
+
+            if high_conf_entries:
+                # Sort by confidence priority (descending), take highest
+                high_conf_entries.sort(key=lambda x: x[1], reverse=True)
+                best_entry = high_conf_entries[0][0]
+                # High-confidence entry overrides exits
+                result.append(best_entry)
+            elif exits:
+                # Default: exit priority
+                result.append(exits[0])
+            elif entries:
+                # No exits, no high-conf entries: use first entry
+                result.append(entries[0])
+
+        return result

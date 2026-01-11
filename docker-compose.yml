@@ -88,6 +88,9 @@ services:
     command: sh -lc "uv run uvicorn ops_api.app:app --host 0.0.0.0 --port 8081"
     ports:
       - "8081:8081"
+    volumes:
+      - backtest_cache:/app/.cache/backtests
+      - ./data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
       interval: 10s
@@ -104,8 +107,18 @@ services:
       app:
         condition: service_started
     env_file: .env
-    command: sh -lc "uv run python -m worker.main"
+    # Add explicit wait for Temporal gRPC to be reachable before starting worker
+    command: sh -lc "sleep 5 && uv run python -m worker.main"
     restart: unless-stopped
+    # Workaround for Temporal Rust SDK DNS resolution issues
+    dns:
+      - 127.0.0.11  # Docker's embedded DNS server
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - backtest_cache:/app/.cache/backtests
+      - ./data:/app/data
 
 volumes:
   pgdata:
+  backtest_cache:

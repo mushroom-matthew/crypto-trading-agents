@@ -157,6 +157,7 @@ async def get_workflows():
 @router.get("/llm/telemetry", response_model=List[LLMTelemetry])
 async def get_llm_telemetry(
     run_id: Optional[str] = Query(default=None),
+    since: Optional[datetime] = Query(default=None),
     limit: int = Query(default=100, le=500)
 ):
     """
@@ -170,6 +171,8 @@ async def get_llm_telemetry(
         # Filter by run_id if provided
         if run_id:
             telemetry = [t for t in telemetry if t.run_id == run_id]
+        if since:
+            telemetry = [t for t in telemetry if t.ts >= since]
 
         return telemetry
 

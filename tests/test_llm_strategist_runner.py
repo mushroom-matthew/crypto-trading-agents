@@ -101,6 +101,8 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     result = backtester.run(run_id="test-run")
     assert result.final_positions["BTC-USD"] > 0
@@ -178,6 +180,8 @@ def test_cap_state_reports_policy_vs_derived(monkeypatch, tmp_path, strict_fixed
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     result = backtester.run(run_id=f"cap-state-{strict_fixed_caps}")
     summary = result.daily_reports[-1]
@@ -251,6 +255,8 @@ def test_exit_orders_map_to_plan_triggers(monkeypatch, tmp_path):
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
     )
     result = backtester.run(run_id="test-run-exit")
     assert result.fills.shape[0] >= 1
@@ -306,6 +312,8 @@ def test_flatten_daily_zeroes_overnight_exposure(monkeypatch, tmp_path):
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
         flatten_positions_daily=True,
     )
     result = backtester.run(run_id="test-run-flatten")
@@ -365,6 +373,8 @@ def test_factor_exposures_in_reports(monkeypatch, tmp_path):
         plan_provider=StubPlanProvider(plan),
         market_data=market_data,
         run_registry=run_registry,
+        min_hold_hours=0.0,
+        min_flat_hours=0.0,
         factor_data=factor_df,
         auto_hedge_market=True,
     )

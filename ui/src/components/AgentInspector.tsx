@@ -25,9 +25,18 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   trade_blocked: 'Trade Blocked',
   position_update: 'Position Update',
   tick: 'Market Tick',
+  llm_call: 'LLM Call',
 };
 
-const SOURCE_OPTIONS = ['broker_agent', 'execution_agent', 'judge_agent', 'execution_ledger', 'market_stream', 'ops_api'];
+const SOURCE_OPTIONS = [
+  'broker_agent',
+  'execution_agent',
+  'judge_agent',
+  'execution_ledger',
+  'market_stream',
+  'ops_api',
+  'llm_strategist',
+];
 
 function formatTokens(inCount?: number, outCount?: number) {
   const inVal = Number.isFinite(inCount) ? (inCount as number) : 0;
@@ -47,9 +56,9 @@ function renderEventSummary(event: AgentEvent) {
     case 'intent':
       return payload.text || 'User intent';
     case 'plan_generated':
-      return `Plan for ${payload.symbol || 'unknown'} (${payload.strategy_id || 'n/a'})`;
+      return `Plan ${payload.plan_id || 'unknown'} (${payload.regime || payload.market_regime || 'n/a'})`;
     case 'plan_judged':
-      return `Score ${payload.overall_score ?? 'n/a'} / 100`;
+      return `Score ${payload.score ?? payload.overall_score ?? 'n/a'} / 100`;
     case 'order_submitted':
       return `${payload.side || ''} ${payload.qty ?? '?'} ${payload.symbol || ''} @ ${
         payload.type || 'market'
@@ -64,6 +73,8 @@ function renderEventSummary(event: AgentEvent) {
       return `${payload.symbol || ''} qty ${payload.qty ?? '?'} pnl ${payload.pnl ?? 'n/a'}`;
     case 'trigger_fired':
       return `${payload.symbol || ''} ${payload.side || ''} trigger ${payload.trigger_id || ''}`;
+    case 'llm_call':
+      return `${payload.model || 'llm'} (${payload.tokens_in ?? 0} in / ${payload.tokens_out ?? 0} out)`;
     default:
       return JSON.stringify(payload);
   }
@@ -104,8 +115,9 @@ export function AgentInspector() {
   });
 
   const { data: telemetry = [], isLoading: telemetryLoading } = useQuery({
-    queryKey: ['agent-inspector-llm-telemetry'],
-    queryFn: () => agentAPI.getLLMTelemetry(),
+    queryKey: ['agent-inspector-llm-telemetry', runIdFilter],
+    queryFn: () =>
+      agentAPI.getLLMTelemetry(runIdFilter ? { run_id: runIdFilter } : undefined),
     refetchInterval: 8000,
   });
 

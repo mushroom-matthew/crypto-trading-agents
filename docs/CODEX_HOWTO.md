@@ -154,29 +154,160 @@ The Coinbase client (`app/coinbase/client.py`) handles real money. Extra care:
 
 ## Debugging Tips
 
-### View Temporal Workflow State
+### Step 1: Check Service Status
+
+Always start by checking which services are running:
+
+```bash
+# Check all container status
+docker compose ps
+
+# Look for:
+# - STATUS: "Up" vs "Restarting" vs "Exit"
+# - HEALTH: "(healthy)" vs "(unhealthy)" vs "(health: starting)"
+```
+
+### Step 2: Check Container Logs
+
+```bash
+# Check specific service logs
+docker compose logs --tail=100 worker
+docker compose logs --tail=100 ops-api
+
+# Follow logs in real-time
+docker compose logs -f worker ops-api
+
+# Search for specific errors
+docker compose logs worker 2>&1 | grep -i "error\|exception\|failed"
+```
+
+### Step 3: Check Environment Variables
+
+```bash
+# Check what env vars a container sees
+docker compose exec worker env | grep -E "(TEMPORAL|TASK_QUEUE|DB)"
+
+# Compare with .env file
+grep -E "^TASK_QUEUE" .env
+```
+
+### Step 4: Test Network Connectivity
+
+```bash
+# Test DNS resolution from container
+docker compose exec ops-api python -c "import socket; print(socket.gethostbyname('temporal'))"
+
+# Test if service is reachable
+docker compose exec ops-api curl -s http://temporal:7233 || echo "Not reachable"
+```
+
+### Step 5: View Temporal Workflow State
 
 ```bash
 # Temporal UI at http://localhost:8088
 docker compose up temporal-ui
+
+# Check if namespace is registered
+docker compose exec temporal tctl namespace list
 ```
 
-### Check Workflow Logs
+### Step 6: Check Workflow Logs
 
 ```python
-# Query workflow state
+# Query workflow state programmatically
 handle = client.get_workflow_handle("workflow-id")
 status = await handle.query(Workflow.get_status)
 ```
 
-### Database State
+### Step 7: Database State
 
 ```bash
 # Connect to PostgreSQL
-docker compose exec db psql -U botuser -d ledger
+docker compose exec db psql -U botuser -d botdb
 
 # Run migrations
-uv run alembic upgrade head
+docker compose exec ops-api uv run alembic upgrade head
+```
+
+## Common Issues and Fixes
+
+### Issue: Worker keeps restarting with DNS error
+
+**Symptom:**
+```
+RuntimeError: Failed client connect: Server connection error:
+tonic::transport::Error(Transport, ConnectError("dns error"...))
+```
+
+**Diagnosis:**
+```bash
+# Check if Python can resolve DNS (usually works)
+docker compose exec worker python -c "import socket; print(socket.gethostbyname('temporal'))"
+
+# Check Temporal SDK (may fail due to Rust DNS issues)
+docker compose logs worker | grep "dns error"
+```
+
+**Fix:** Add DNS config to docker-compose.yml:
+```yaml
+worker:
+  dns:
+    - 127.0.0.11  # Docker's embedded DNS
+  command: sh -lc "sleep 5 && uv run python -m worker.main"
+```
+
+### Issue: Backtest stuck at "queued" or not found
+
+**Symptom:** UI shows backtest created but status never updates
+
+**Diagnosis:**
+```bash
+# Check if workflow was started
+# Look in Temporal UI at http://localhost:8088 for workflow ID
+
+# Check task queue mismatch
+grep "task_queue" ops_api/routers/backtests.py  # What API uses
+grep "^TASK_QUEUE" .env                          # What worker uses
+```
+
+**Fix:** Ensure task queues match:
+```python
+# In ops_api/routers/backtests.py
+BACKTEST_TASK_QUEUE = os.environ.get("TASK_QUEUE", "mcp-tools")
+# Use BACKTEST_TASK_QUEUE instead of hardcoded value
+```
+
+### Issue: API returns 500 with "equity_curve" error
+
+**Symptom:** Backtest completes but `/backtests/{id}/equity` fails
+
+**Diagnosis:**
+```bash
+# Check what format is persisted
+ls -la .cache/backtests/
+python -c "import pickle; print(pickle.load(open('.cache/backtests/backtest-xxx.pkl', 'rb')).keys())"
+```
+
+**Root Cause:** Data format mismatch between workflow persistence and API expectations
+
+**Fix:** Update API to handle multiple data formats (see `ops_api/routers/backtests.py`)
+
+### Issue: Services marked as unhealthy
+
+**Symptom:** `docker compose ps` shows `(unhealthy)`
+
+**Diagnosis:**
+```bash
+# Check health check command
+docker inspect crypto-trading-agents-ops-api-1 | grep -A 10 "Healthcheck"
+
+# Test health endpoint manually
+curl http://localhost:8081/health
+```
+
+**Fix:** Usually a startup timing issue. Restart the service:
+```bash
+docker compose restart ops-api
 ```
 
 ## Red Flags to Watch For
@@ -211,6 +342,22 @@ Document what you tried and the error messages for context.
 | `docs/ARCHITECTURE.md` | System design details |
 | `docs/SLOP_AUDIT.md` | Known issues and priorities |
 | `docs/UI_UNIFICATION_PLAN.md` | Dashboard implementation guide |
+| `docs/FULL_STACK_WIRING_ISSUES.md` | Data flow diagrams and known wiring issues |
+| `docs/LOCAL_DEV_QUICKSTART.md` | Quick start guide for local development |
+
+## Debugging Method Summary
+
+When debugging full-stack issues, follow this order:
+
+1. **Check service status** (`docker compose ps`)
+2. **Read container logs** (`docker compose logs --tail=100 <service>`)
+3. **Verify environment variables** (`docker compose exec <service> env`)
+4. **Test network connectivity** (DNS, ports)
+5. **Check Temporal UI** (http://localhost:8088)
+6. **Trace data flow** (UI → API → Workflow → Activity → Data Source)
+7. **Check data format compatibility** (what's saved vs what's expected)
+
+Always document what you tried and what error messages you saw before escalating.
 
 ---
 

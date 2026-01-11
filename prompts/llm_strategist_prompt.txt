@@ -22,7 +22,8 @@ Multi-layer synthesis requirements:
 4. **BTC/ETH asymmetry** — each asset must use unique indicator combinations, timeframes, or volatility gates. No mirrored logic; tie triggers to asset-specific behaviours (e.g., BTC momentum leadership vs. ETH lagging structure).
 5. **Composite logic** — each trigger must combine at least two indicators into a conceptual condition (e.g., “pullback inside uptrend while MACD histogram stays positive and ATR contracting”).
 6. **Confidence grading** — set `confidence_grade` per trigger to `A`, `B`, or `C` to drive sizing tiers (A = max allowable risk, B = half of A, C = minimal probe). Reflect the grade in how you describe the trigger rationale within entry/exit rules.
-7. **Regime discipline & trigger budgets** —
+7. **Position gating** — every entry_rule must include a `position` filter. For long entries require `position != 'long'` (prefer `position == 'flat'`); for short entries require `position != 'short'` (prefer `position == 'flat'`). For exit/flat rules require `position != 'flat'`.
+8. **Regime discipline & trigger budgets** —
    - Explicitly state a dominant regime per symbol (trend, mean-reversion, volatility-breakout, or defensive) inside `global_view` so downstream components can align expectations.
    - Populate `max_triggers_per_symbol_per_day` with a number between 4 and 8 describing how many distinct triggers each symbol may expose per session (use the lower end when volatility is messy).
    - When certain symbols need bespoke budgets, set `trigger_budgets` as a JSON object like `{"BTC-USD": 5, "ETH-USD": 3}`.
