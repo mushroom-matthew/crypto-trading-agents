@@ -29,7 +29,7 @@ from ops_api.schemas import (
     RunSummary,
 )
 from ops_api.materializer import Materializer
-from ops_api.routers import agents, backtests, live, market, wallets, prompts
+from ops_api.routers import agents, backtests, live, market, wallets, prompts, paper_trading
 from ops_api.websocket_manager import manager as ws_manager
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
@@ -114,6 +114,7 @@ app.include_router(market.router)
 app.include_router(agents.router)
 app.include_router(wallets.router)
 app.include_router(prompts.router)
+app.include_router(paper_trading.router)
 
 
 # Legacy endpoints (for backward compatibility)

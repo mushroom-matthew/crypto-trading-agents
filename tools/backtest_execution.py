@@ -120,12 +120,13 @@ class BacktestWorkflow:
             # Phase 3: Persist results (95-100%)
             self.current_phase = "Saving Results"
             self.progress = 95.0
-            final_results = await self._persist_results()
+            completed_at = workflow.now().isoformat()
+            final_results = await self._persist_results(completed_at)
 
             # Complete
             self.status = "completed"
             self.progress = 100.0
-            self.completed_at = workflow.now().isoformat()
+            self.completed_at = completed_at
 
             workflow.logger.info(f"Backtest {self.run_id} completed successfully")
 
@@ -245,7 +246,7 @@ class BacktestWorkflow:
         self.candles_total = result.get("candles_total", self.candles_processed)
         self.progress = 95.0
 
-    async def _persist_results(self) -> Dict[str, Any]:
+    async def _persist_results(self, completed_at: str) -> Dict[str, Any]:
         """Persist results to disk and return summary.
 
         Returns:
@@ -254,7 +255,10 @@ class BacktestWorkflow:
         workflow.logger.info("Persisting results")
 
         # Calculate final metrics
-        final_results = self._calculate_metrics()
+        final_results = self._calculate_metrics(
+            status_override="completed",
+            completed_at_override=completed_at,
+        )
 
         # Persist to disk via activity
         await workflow.execute_activity(
@@ -285,7 +289,11 @@ class BacktestWorkflow:
             f"{len(self.trades)} trades, {self.candles_processed} candles processed"
         )
 
-    def _calculate_metrics(self) -> Dict[str, Any]:
+    def _calculate_metrics(
+        self,
+        status_override: Optional[str] = None,
+        completed_at_override: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Calculate final backtest metrics.
 
         Returns:
@@ -300,9 +308,9 @@ class BacktestWorkflow:
         # Extract metrics from summary (calculated by simulator)
         metrics = {
             "run_id": self.run_id,
-            "status": self.status,
+            "status": status_override or self.status,
             "started_at": self.started_at,
-            "completed_at": self.completed_at,
+            "completed_at": completed_at_override or self.completed_at,
             "error": self.error,
 
             # Config (needed by playback endpoints)

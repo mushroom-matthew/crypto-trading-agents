@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,65 @@ from agents.llm.client_factory import get_llm_client
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
 from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint, StrategyPlan
+
+
+def _repair_json(raw: str) -> str:
+    """Attempt to repair common JSON issues from LLM output.
+
+    Handles:
+    - Unterminated strings (truncates to last valid structure)
+    - Trailing commas before ] or }
+    - Unbalanced braces (adds missing closing braces)
+    """
+    if not raw:
+        return raw
+
+    # Remove trailing commas before ] or }
+    raw = re.sub(r',\s*([\]\}])', r'\1', raw)
+
+    # Try parsing as-is first
+    try:
+        json.loads(raw)
+        return raw
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find a valid JSON substring by progressively truncating
+    # Start from the end and work backwards looking for valid JSON
+    for end_pos in range(len(raw), 0, -1):
+        candidate = raw[:end_pos]
+
+        # Count braces to check balance
+        open_braces = candidate.count('{') - candidate.count('}')
+        open_brackets = candidate.count('[') - candidate.count(']')
+
+        # Add missing closing braces/brackets
+        if open_braces > 0 or open_brackets > 0:
+            # Check if we're in the middle of a string
+            # Simple heuristic: if odd number of unescaped quotes, we're in a string
+            quote_count = len(re.findall(r'(?<!\\)"', candidate))
+            if quote_count % 2 != 0:
+                # We're in a string - need to close it
+                candidate = candidate.rstrip()
+                if not candidate.endswith('"'):
+                    candidate += '"'
+
+            # Remove any trailing comma
+            candidate = re.sub(r',\s*$', '', candidate)
+
+            # Add closing brackets/braces
+            candidate += ']' * open_brackets
+            candidate += '}' * open_braces
+
+        try:
+            json.loads(candidate)
+            logging.info("Repaired JSON by truncating to %d chars (was %d)", len(candidate), len(raw))
+            return candidate
+        except json.JSONDecodeError:
+            continue
+
+    # If nothing works, return original
+    return raw
 
 
 class CompletionTransport(Protocol):
@@ -122,7 +182,7 @@ class LLMClient:
                             {"role": "user", "content": llm_input.to_json()},
                         ],
                         temperature=0.1,
-                        max_output_tokens=1200,
+                        max_output_tokens=2500,
                     )
                     content = completion.output[0].content[0].text
                     raw_output = content
@@ -204,10 +264,14 @@ class LLMClient:
             last = raw.rfind("}")
             if first != -1 and last != -1 and last > first:
                 raw = raw[first : last + 1]
+
+        # Attempt to repair truncated/malformed JSON
+        raw = _repair_json(raw)
+
         try:
             parsed = json.loads(raw)
         except Exception as exc:
-            logging.warning("Failed to parse strategist output as JSON: %s; raw_output=%s", exc, raw)
+            logging.warning("Failed to parse strategist output as JSON: %s; raw_output=%s", exc, raw[:500])
             raise
         if not isinstance(parsed, dict):
             raise ValueError("Strategist output is not a JSON object")

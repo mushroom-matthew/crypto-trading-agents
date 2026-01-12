@@ -62,6 +62,14 @@ export default defineConfig({
         target: 'http://localhost:8081',
         changeOrigin: true,
       },
+      '/prompts': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/paper-trading': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
     },
   },
 });

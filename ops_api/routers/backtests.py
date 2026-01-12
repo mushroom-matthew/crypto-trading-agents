@@ -47,6 +47,16 @@ def save_backtest_to_disk(run_id: str, data: Dict[str, Any]):
         pickle.dump(data, f)
     logger.info(f"Saved backtest {run_id} to disk")
 
+def _normalize_cached_backtest(cached: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize cached backtest data for API consumers."""
+    if not isinstance(cached, dict):
+        return cached
+    status = cached.get("status")
+    if status not in ("completed", "failed"):
+        cached = dict(cached)
+        cached["status"] = "completed"
+    return cached
+
 
 def load_backtest_from_disk(run_id: str) -> Dict[str, Any] | None:
     """Load backtest from disk if it exists."""
@@ -54,7 +64,7 @@ def load_backtest_from_disk(run_id: str) -> Dict[str, Any] | None:
     if cache_file.exists():
         try:
             with open(cache_file, 'rb') as f:
-                return pickle.load(f)
+                return _normalize_cached_backtest(pickle.load(f))
         except Exception as e:
             logger.error(f"Failed to load backtest {run_id} from disk: {e}")
     return None
@@ -69,6 +79,10 @@ def get_backtest_cached(run_id: str) -> Dict[str, Any] | None:
     """Get backtest from cache, with disk fallback."""
     with CACHE_LOCK:
         cached = BACKTEST_CACHE.get(run_id)
+    if cached:
+        cached = _normalize_cached_backtest(cached)
+        with CACHE_LOCK:
+            BACKTEST_CACHE[run_id] = cached
 
     # Fallback to disk if not in memory
     if not cached:
@@ -122,6 +136,8 @@ class BacktestConfig(BaseModel):
         description="Starting portfolio allocation in USD (keys: cash and/or symbols)",
     )
     strategy: Optional[str] = Field(default="baseline", description="Strategy to use (baseline, llm_strategist, etc.)")
+    strategy_id: Optional[str] = Field(default=None, description="Strategy template ID for LLM strategist")
+    strategy_prompt: Optional[str] = Field(default=None, description="Custom strategy prompt for LLM strategist")
 
 
 class BacktestCreateResponse(BaseModel):
@@ -321,6 +337,7 @@ async def start_backtest(config: BacktestConfig):
                 "initial_cash": config.initial_cash,
                 "initial_allocations": initial_allocations,
                 "strategy": config.strategy or "baseline",
+                "strategy_prompt": config.strategy_prompt,
             }],
             id=run_id,
             task_queue=BACKTEST_TASK_QUEUE,

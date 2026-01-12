@@ -213,6 +213,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     end = ensure_utc(datetime.fromisoformat(config["end_date"]))
     timeframe = config.get("timeframe", "1h")
     initial_cash = config.get("initial_cash", 10000.0)
+    initial_allocations = config.get("initial_allocations")
     fee_rate = config.get("fee_rate", 0.001)
     llm_calls_per_day = int(config.get("llm_calls_per_day", 1))
     llm_model = config.get("llm_model")
@@ -223,6 +224,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     flatten_notional_threshold = config.get("flatten_notional_threshold", 0.0)
     min_hold_hours = config.get("min_hold_hours", 2.0)
     min_flat_hours = config.get("min_flat_hours", 2.0)
+    strategy_prompt = config.get("strategy_prompt")
 
     logger.info(
         "Running LLM strategist backtest",
@@ -256,6 +258,8 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         flatten_notional_threshold=flatten_notional_threshold,
         min_hold_hours=float(min_hold_hours),
         min_flat_hours=float(min_flat_hours),
+        initial_allocations=initial_allocations,
+        strategy_prompt=strategy_prompt,
     )
     result_holder: Dict[str, Any] = {}
     error_holder: Dict[str, Exception] = {}

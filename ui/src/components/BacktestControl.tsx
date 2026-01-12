@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info } from 'lucide-react';
-import { backtestAPI, type BacktestConfig } from '../lib/api';
+import { backtestAPI, promptsAPI, type BacktestConfig } from '../lib/api';
 import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
 import { BACKTEST_PRESETS } from '../lib/presets';
 import { MarketTicker } from './MarketTicker';
@@ -28,11 +28,19 @@ export function BacktestControl() {
   const [symbolsError, setSymbolsError] = useState<string | null>(null);
   const [allocationInput, setAllocationInput] = useState('');
   const [allocationError, setAllocationError] = useState<string | null>(null);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string>('default');
 
   const [selectedRun, setSelectedRun] = useState<string | null>(() => {
     // Restore from localStorage on mount
     return localStorage.getItem('selectedBacktestRunId');
   });
+
+  // Fetch available strategies
+  const { data: strategiesData } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: () => promptsAPI.listStrategies(),
+  });
+  const strategies = strategiesData?.strategies || [];
 
   // Load preset configuration
   const loadPreset = (presetId: string) => {
@@ -153,7 +161,7 @@ export function BacktestControl() {
     return symbols;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     let symbols: string[];
     let allocations: Record<string, number> | undefined;
@@ -173,7 +181,26 @@ export function BacktestControl() {
       setAllocationError(message);
       return;
     }
-    const payload = { ...config, symbols, initial_allocations: allocations };
+
+    // Fetch strategy prompt if using LLM strategist
+    let strategyPrompt: string | undefined;
+    if (config.strategy === 'llm_strategist' && selectedStrategyId) {
+      try {
+        const strategyData = await promptsAPI.getStrategy(selectedStrategyId);
+        strategyPrompt = strategyData.content;
+      } catch (err) {
+        console.error('Failed to fetch strategy prompt:', err);
+        // Continue with default prompt if fetch fails
+      }
+    }
+
+    const payload = {
+      ...config,
+      symbols,
+      initial_allocations: allocations,
+      strategy_id: selectedStrategyId,
+      strategy_prompt: strategyPrompt,
+    };
     setConfig(payload);
     startBacktest.mutate(payload);
   };
@@ -355,6 +382,32 @@ export function BacktestControl() {
                 <option value="llm_strategist">LLM Strategist</option>
               </select>
             </div>
+
+            {/* Strategy Template (only for LLM Strategist) */}
+            {config.strategy === 'llm_strategist' && (
+              <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+                <label className="block text-sm font-medium mb-2 text-purple-800 dark:text-purple-300">
+                  Strategy Template
+                </label>
+                <select
+                  value={selectedStrategyId}
+                  onChange={(e) => setSelectedStrategyId(e.target.value)}
+                  className="w-full px-3 py-2 border border-purple-300 dark:border-purple-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  disabled={isRunning}
+                >
+                  {strategies.map((strategy) => (
+                    <option key={strategy.id} value={strategy.id}>
+                      {strategy.name}
+                    </option>
+                  ))}
+                </select>
+                {strategies.find(s => s.id === selectedStrategyId)?.description && (
+                  <p className="text-xs text-purple-600 dark:text-purple-400 mt-2">
+                    {strategies.find(s => s.id === selectedStrategyId)?.description}
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Submit Button */}
             <button

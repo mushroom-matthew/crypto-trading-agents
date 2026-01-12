@@ -2,9 +2,10 @@ import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BacktestControl } from './components/BacktestControl';
 import { LiveTradingMonitor } from './components/LiveTradingMonitor';
+import { PaperTradingControl } from './components/PaperTradingControl';
 import WalletReconciliation from './components/WalletReconciliation';
 import { AgentInspector } from './components/AgentInspector';
-import { BarChart3, Activity, Wallet, Brain } from 'lucide-react';
+import { BarChart3, Activity, Wallet, Brain, PlayCircle } from 'lucide-react';
 import { cn } from './lib/utils';
 
 // Create a client
@@ -17,7 +18,7 @@ const queryClient = new QueryClient({
   },
 });
 
-type Tab = 'backtest' | 'live' | 'wallets' | 'agents';
+type Tab = 'backtest' | 'paper' | 'live' | 'wallets' | 'agents';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('backtest');
@@ -40,6 +41,18 @@ function App() {
               >
                 <BarChart3 className="w-5 h-5" />
                 Backtest Control
+              </button>
+              <button
+                onClick={() => setActiveTab('paper')}
+                className={cn(
+                  'flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm transition-colors',
+                  activeTab === 'paper'
+                    ? 'border-green-500 text-green-600 dark:text-green-400'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:hover:text-gray-300'
+                )}
+              >
+                <PlayCircle className="w-5 h-5" />
+                Paper Trading
               </button>
               <button
                 onClick={() => setActiveTab('live')}
@@ -82,8 +95,9 @@ function App() {
         </div>
 
         {/* Tab Content */}
-        <div>
+        <div className="max-w-7xl mx-auto px-6 py-6">
           {activeTab === 'backtest' && <BacktestControl />}
+          {activeTab === 'paper' && <PaperTradingControl />}
           {activeTab === 'live' && <LiveTradingMonitor />}
           {activeTab === 'agents' && <AgentInspector />}
           {activeTab === 'wallets' && <WalletReconciliation />}

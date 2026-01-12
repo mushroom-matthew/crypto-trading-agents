@@ -41,6 +41,8 @@ export interface BacktestConfig {
   initial_cash: number;
   initial_allocations?: Record<string, number>;
   strategy?: string;
+  strategy_id?: string;
+  strategy_prompt?: string;
 }
 
 export interface BacktestCreateResponse {
@@ -361,6 +363,17 @@ export interface PromptVersionsResponse {
   versions: PromptVersion[];
 }
 
+export interface StrategyInfo {
+  id: string;
+  name: string;
+  description: string;
+  file_path: string;
+}
+
+export interface StrategiesListResponse {
+  strategies: StrategyInfo[];
+}
+
 export const promptsAPI = {
   // List available prompts
   list: async (): Promise<PromptListResponse> => {
@@ -395,6 +408,200 @@ export const promptsAPI = {
   // Restore a specific version
   restoreVersion: async (name: string, versionId: string): Promise<PromptInfo> => {
     const response = await api.post(`/prompts/${name}/versions/${versionId}/restore`);
+    return response.data;
+  },
+
+  // List all available strategy templates
+  listStrategies: async (): Promise<StrategiesListResponse> => {
+    const response = await api.get('/prompts/strategies/');
+    return response.data;
+  },
+
+  // Get a specific strategy template
+  getStrategy: async (strategyId: string): Promise<PromptInfo> => {
+    const response = await api.get(`/prompts/strategies/${strategyId}`);
+    return response.data;
+  },
+};
+
+// ============================================================================
+// Paper Trading Types
+// ============================================================================
+
+export interface PaperTradingSessionConfig {
+  symbols: string[];
+  initial_cash?: number;
+  initial_allocations?: Record<string, number>;
+  strategy_prompt?: string;
+  strategy_id?: string;
+  plan_interval_hours?: number;
+  enable_symbol_discovery?: boolean;
+  min_volume_24h?: number;
+  llm_model?: string;
+}
+
+export interface PaperTradingSession {
+  session_id: string;
+  status: string;
+  symbols: string[];
+  cycle_count: number;
+  has_plan: boolean;
+  last_plan_time: string | null;
+  plan_interval_hours: number;
+}
+
+export interface PaperTradingPortfolio {
+  cash: number;
+  positions: Record<string, number>;
+  entry_prices: Record<string, number>;
+  last_prices: Record<string, number>;
+  total_equity: number;
+  unrealized_pnl: number;
+  realized_pnl: number;
+}
+
+export interface PaperTradingPlan {
+  generated_at: string | null;
+  valid_until: string | null;
+  trigger_count: number;
+  allowed_symbols: string[];
+  max_trades_per_day: number | null;
+}
+
+export interface PaperTradingTrade {
+  timestamp: string;
+  symbol: string;
+  side: string;
+  qty: number;
+  price: number;
+  fee: number | null;
+  pnl: number | null;
+}
+
+export interface SessionListItem {
+  session_id: string;
+  status: string;
+  start_time: string | null;
+  close_time: string | null;
+}
+
+export interface PaperTradingPlanRecord {
+  plan_index: number;
+  generated_at: string;
+  trigger_count: number;
+  max_trades_per_day: number | null;
+  market_regime: string | null;
+  symbols: string[];
+  valid_until: string | null;
+  triggers: Array<{
+    id: string;
+    symbol: string;
+    direction: string;
+    timeframe?: string;
+  }>;
+}
+
+export interface PaperTradingPlanHistory {
+  session_id: string;
+  total_plans: number;
+  plans: PaperTradingPlanRecord[];
+}
+
+export interface EquitySnapshot {
+  timestamp: string;
+  cash: number;
+  total_equity: number;
+  positions: Record<string, number>;
+  unrealized_pnl: number;
+  realized_pnl: number;
+}
+
+export interface PaperTradingEquityCurve {
+  session_id: string;
+  total_snapshots: number;
+  equity_curve: EquitySnapshot[];
+}
+
+export const paperTradingAPI = {
+  // Start a new paper trading session
+  startSession: async (config: PaperTradingSessionConfig): Promise<{ session_id: string; status: string; message: string }> => {
+    const response = await api.post('/paper-trading/sessions', config);
+    return response.data;
+  },
+
+  // Get session status
+  getSession: async (sessionId: string): Promise<PaperTradingSession> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}`);
+    return response.data;
+  },
+
+  // Stop a session
+  stopSession: async (sessionId: string): Promise<{ session_id: string; status: string; message: string }> => {
+    const response = await api.post(`/paper-trading/sessions/${sessionId}/stop`);
+    return response.data;
+  },
+
+  // Get portfolio status
+  getPortfolio: async (sessionId: string): Promise<PaperTradingPortfolio> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/portfolio`);
+    return response.data;
+  },
+
+  // Get current strategy plan
+  getPlan: async (sessionId: string): Promise<PaperTradingPlan> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/plan`);
+    return response.data;
+  },
+
+  // Force regeneration of strategy plan
+  forceReplan: async (sessionId: string): Promise<{ session_id: string; status: string; message: string }> => {
+    const response = await api.post(`/paper-trading/sessions/${sessionId}/replan`);
+    return response.data;
+  },
+
+  // Get trade history
+  getTrades: async (sessionId: string, limit = 100): Promise<PaperTradingTrade[]> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/trades`, {
+      params: { limit },
+    });
+    return response.data;
+  },
+
+  // Update symbols
+  updateSymbols: async (sessionId: string, symbols: string[]): Promise<{ session_id: string; symbols: string[]; message: string }> => {
+    const response = await api.post(`/paper-trading/sessions/${sessionId}/symbols`, symbols);
+    return response.data;
+  },
+
+  // List all sessions
+  listSessions: async (status?: string, limit = 20): Promise<{ sessions: SessionListItem[]; count: number }> => {
+    const response = await api.get('/paper-trading/sessions', {
+      params: { status, limit },
+    });
+    return response.data;
+  },
+
+  // Get plan history for a session (LLM insights)
+  getPlanHistory: async (sessionId: string, limit = 50): Promise<PaperTradingPlanHistory> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/plans`, {
+      params: { limit },
+    });
+    return response.data;
+  },
+
+  // Get equity curve for a session
+  getEquityCurve: async (sessionId: string, limit = 500): Promise<PaperTradingEquityCurve> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/equity`, {
+      params: { limit },
+    });
+    return response.data;
+  },
+
+  // Update strategy prompt for a running session
+  updateStrategy: async (sessionId: string, strategyPrompt: string): Promise<{ session_id: string; status: string; message: string }> => {
+    const response = await api.put(`/paper-trading/sessions/${sessionId}/strategy`, {
+      strategy_prompt: strategyPrompt,
+    });
     return response.data;
   },
 };

@@ -85,6 +85,8 @@ def _ensure_timestamp_index(df: pd.DataFrame) -> pd.DataFrame:
 class PortfolioTracker:
     initial_cash: float
     fee_rate: float
+    initial_allocations: Dict[str, float] | None = None
+    initial_prices: Dict[str, float] | None = None
     cash: float = field(init=False)
     positions: Dict[str, float] = field(default_factory=dict)
     avg_entry_price: Dict[str, float] = field(default_factory=dict)
@@ -95,6 +97,33 @@ class PortfolioTracker:
 
     def __post_init__(self) -> None:
         self.cash = self.initial_cash
+
+        # Apply initial allocations if provided
+        if self.initial_allocations:
+            # Override cash if specified in allocations
+            self.cash = float(self.initial_allocations.get("cash", self.initial_cash))
+
+            # Create initial positions from notional allocations
+            prices = self.initial_prices or {}
+            for symbol, notional in self.initial_allocations.items():
+                if symbol == "cash":
+                    continue
+                notional = float(notional)
+                if notional <= 0:
+                    continue
+                price = prices.get(symbol)
+                if not price or price <= 0:
+                    continue
+                qty = notional / price
+                self.positions[symbol] = qty
+                self.avg_entry_price[symbol] = price
+                self.position_meta[symbol] = {
+                    "reason": "initial_allocation",
+                    "timeframe": None,
+                    "opened_at": None,
+                    "entry_price": price,
+                    "entry_side": "long",
+                }
 
     def _record_pnl(
         self,
@@ -287,6 +316,7 @@ class LLMStrategistBacktester:
         risk_params: Dict[str, Any] | RiskLimitSettings | None = None,
         timeframes: Sequence[str] = ("1h", "4h", "1d"),
         prompt_template_path: Path | None = None,
+        strategy_prompt: str | None = None,
         plan_provider: StrategyPlanProvider | None = None,
         market_data: Dict[str, Dict[str, pd.DataFrame]] | None = None,
         run_registry: StrategyRunRegistry | None = None,
@@ -302,6 +332,7 @@ class LLMStrategistBacktester:
         min_hold_hours: float = 2.0,
         min_flat_hours: float = 2.0,
         confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
+        initial_allocations: Dict[str, float] | None = None,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -327,7 +358,24 @@ class LLMStrategistBacktester:
                     self.end = self._normalize_datetime(last)
         if self.start is None or self.end is None:
             raise ValueError("start and end must be provided when market data is not supplied")
-        self.portfolio = PortfolioTracker(initial_cash=initial_cash, fee_rate=fee_rate)
+
+        # Get initial prices for allocation handling
+        self.initial_allocations = initial_allocations
+        initial_prices: Dict[str, float] = {}
+        if initial_allocations:
+            base_tf = self.timeframes[0]
+            for symbol in self.pairs:
+                df = self.market_data.get(symbol, {}).get(base_tf)
+                if df is not None and not df.empty:
+                    # Get the first available price
+                    initial_prices[symbol] = float(df.iloc[0]["close"])
+
+        self.portfolio = PortfolioTracker(
+            initial_cash=initial_cash,
+            fee_rate=fee_rate,
+            initial_allocations=initial_allocations,
+            initial_prices=initial_prices,
+        )
         self.calls_per_day = max(1, llm_calls_per_day)
         self.plan_interval = timedelta(hours=24 / self.calls_per_day)
         self.plan_provider = plan_provider or StrategyPlanProvider(llm_client, cache_dir=cache_dir, llm_calls_per_day=self.calls_per_day)
@@ -355,7 +403,13 @@ class LLMStrategistBacktester:
         self.daily_risk_budget_state: Dict[str, Dict[str, float]] = {}
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
         self.strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
-        self.prompt_template = prompt_template_path.read_text() if prompt_template_path and prompt_template_path.exists() else None
+        # Use strategy_prompt directly if provided, otherwise load from file path
+        if strategy_prompt:
+            self.prompt_template = strategy_prompt
+        elif prompt_template_path and prompt_template_path.exists():
+            self.prompt_template = prompt_template_path.read_text()
+        else:
+            self.prompt_template = None
         self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.trigger_activity_by_day: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         self.skipped_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))

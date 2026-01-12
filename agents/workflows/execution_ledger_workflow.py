@@ -82,6 +82,61 @@ class ExecutionLedgerWorkflow:
             self.equity_wallet_name = str(preferences["equity_wallet_name"])
 
     @workflow.signal
+    def initialize_portfolio(self, portfolio: Dict[str, Any]) -> None:
+        """Initialize portfolio with cash and positions for paper trading.
+
+        Args:
+            portfolio: Dict with:
+                - cash: Initial cash amount
+                - positions: Dict of symbol -> quantity
+                - prices: Dict of symbol -> current price (for entry price tracking)
+        """
+        # Set cash
+        if "cash" in portfolio:
+            self.cash = Decimal(str(portfolio["cash"]))
+            self.initial_cash = self.cash
+            workflow.logger.info(f"Initialized cash to {self.cash}")
+
+        # Set positions
+        positions = portfolio.get("positions", {})
+        prices = portfolio.get("prices", {})
+
+        for symbol, qty in positions.items():
+            qty_decimal = Decimal(str(qty))
+            if qty_decimal != 0:
+                self.positions[symbol] = qty_decimal
+                # Set entry price from provided prices
+                if symbol in prices:
+                    self.entry_price[symbol] = Decimal(str(prices[symbol]))
+                    self.last_price[symbol] = self.entry_price[symbol]
+                    self.last_price_timestamp[symbol] = int(datetime.now(timezone.utc).timestamp() * 1000)
+                workflow.logger.info(f"Initialized position: {symbol} = {qty_decimal} @ {self.entry_price.get(symbol, 'unknown')}")
+
+        # Reset P&L tracking
+        self.realized_pnl = Decimal("0")
+        self.scraped_profits = Decimal("0")
+        self.transaction_history = []
+        self.fill_count = 0
+
+        workflow.logger.info(f"Portfolio initialized: cash={self.cash}, positions={len(self.positions)}")
+
+    @workflow.signal
+    def reset_portfolio(self) -> None:
+        """Reset portfolio to initial state (clear all positions)."""
+        initial_balance = os.environ.get("INITIAL_PORTFOLIO_BALANCE", "1000")
+        self.initial_cash = Decimal(initial_balance)
+        self.cash = self.initial_cash
+        self.positions = {}
+        self.entry_price = {}
+        self.last_price = {}
+        self.last_price_timestamp = {}
+        self.realized_pnl = Decimal("0")
+        self.scraped_profits = Decimal("0")
+        self.transaction_history = []
+        self.fill_count = 0
+        workflow.logger.info("Portfolio reset to initial state")
+
+    @workflow.signal
     def record_fill(self, fill: Dict) -> None:
         sequence = self.fill_count + 1
         if self.wallet_provider is None:
