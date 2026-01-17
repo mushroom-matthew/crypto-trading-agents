@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import random
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, List, Literal
+from typing import Any, Iterable, List, Literal
 
 from schemas.llm_strategist import AssetState, IndicatorSnapshot, PortfolioState, StrategyPlan, TriggerCondition
 from trading_core.execution_engine import BlockReason
 
 from .risk_engine import RiskEngine
-from .rule_dsl import MissingIndicatorError, RuleEvaluator, RuleSyntaxError
+from .rule_dsl import EvaluationTrace, MissingIndicatorError, RuleEvaluator, RuleSyntaxError
+
+
 from .trade_risk import TradeRiskEvaluator
+
+
+@dataclass
+class TriggerEvaluationSample:
+    """A sampled trigger evaluation for debugging."""
+    timestamp: datetime
+    trigger_id: str
+    symbol: str
+    rule_type: Literal["entry", "exit"]
+    trace: EvaluationTrace
+    bar_close: float
+    position: Literal["long", "short", "flat"]
 
 
 @dataclass(frozen=True)
@@ -53,6 +68,8 @@ class TriggerEngine:
         confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
         min_hold_bars: int = 4,
         trade_cooldown_bars: int = 2,
+        debug_sample_rate: float = 0.0,
+        debug_max_samples: int = 100,
     ) -> None:
         """Initialize the trigger engine.
 
@@ -70,6 +87,9 @@ class TriggerEngine:
                 This prevents rapid flip-flops by requiring positions to be held for a minimum time.
             trade_cooldown_bars: Minimum bars between trades for the same symbol (default: 2).
                 This prevents overtrading by enforcing a cooldown period after each trade.
+            debug_sample_rate: Probability (0.0-1.0) of sampling trigger evaluations for debugging.
+                Set to 0.0 to disable sampling (default). Set to 1.0 to sample all evaluations.
+            debug_max_samples: Maximum number of samples to collect (default: 100).
         """
         self.plan = plan
         self.risk_engine = risk_engine
@@ -88,6 +108,10 @@ class TriggerEngine:
         self._last_trade_bar: dict[str, int] = {}
         # Current bar counter
         self._bar_counter: int = 0
+        # Debug sampling configuration
+        self.debug_sample_rate = max(0.0, min(1.0, debug_sample_rate))
+        self.debug_max_samples = debug_max_samples
+        self.evaluation_samples: List[TriggerEvaluationSample] = []
 
     def _context(
         self,
@@ -249,11 +273,19 @@ class TriggerEngine:
             return orders, block_entries
 
         context = self._context(indicator, asset_state, market_structure, portfolio)
+        current_position = self._position_direction(bar.symbol, portfolio)
+
         for trigger in self.plan.triggers:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
                 continue
+
+            # Exit rule evaluation
             try:
                 exit_fired = bool(trigger.exit_rule and self.evaluator.evaluate(trigger.exit_rule, context))
+                # Debug sampling for exit rule
+                self._maybe_sample_evaluation(
+                    bar, trigger, "exit", trigger.exit_rule, context, current_position
+                )
             except MissingIndicatorError as exc:
                 detail = f"{exc}; exit_rule='{trigger.exit_rule}'"
                 self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, detail, bar)
@@ -262,6 +294,7 @@ class TriggerEngine:
                 detail = f"{exc}; exit_rule='{trigger.exit_rule}'"
                 self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar)
                 continue
+
             if exit_fired:
                 # Check minimum hold period before allowing exit
                 if self._is_within_hold_period(trigger.symbol):
@@ -272,8 +305,14 @@ class TriggerEngine:
                 if exit_order:
                     orders.append(exit_order)
                     continue
+
+            # Entry rule evaluation
             try:
                 entry_fired = bool(trigger.entry_rule and self.evaluator.evaluate(trigger.entry_rule, context))
+                # Debug sampling for entry rule
+                self._maybe_sample_evaluation(
+                    bar, trigger, "entry", trigger.entry_rule, context, current_position
+                )
             except MissingIndicatorError as exc:
                 detail = f"{exc}; entry_rule='{trigger.entry_rule}'"
                 self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, detail, bar)
@@ -282,6 +321,7 @@ class TriggerEngine:
                 detail = f"{exc}; entry_rule='{trigger.entry_rule}'"
                 self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar)
                 continue
+
             if entry_fired:
                 entry = self._entry_order(trigger, indicator, portfolio, bar, block_entries)
                 if entry:
@@ -329,6 +369,68 @@ class TriggerEngine:
         else:
             # Clear entry bar when position is closed
             self._position_entry_bar.pop(symbol, None)
+
+    def _maybe_sample_evaluation(
+        self,
+        bar: Bar,
+        trigger: TriggerCondition,
+        rule_type: Literal["entry", "exit"],
+        rule: str | None,
+        context: dict[str, Any],
+        position: Literal["long", "short", "flat"],
+    ) -> None:
+        """Conditionally sample a trigger evaluation for debugging.
+
+        Samples are collected probabilistically based on debug_sample_rate.
+        Once debug_max_samples are collected, no more samples are added.
+        """
+        if not rule:
+            return
+        if self.debug_sample_rate <= 0.0:
+            return
+        if len(self.evaluation_samples) >= self.debug_max_samples:
+            return
+        if random.random() > self.debug_sample_rate:
+            return
+
+        # Get detailed trace from evaluator
+        trace = self.evaluator.evaluate_with_trace(rule, context)
+
+        sample = TriggerEvaluationSample(
+            timestamp=bar.timestamp,
+            trigger_id=trigger.id,
+            symbol=trigger.symbol,
+            rule_type=rule_type,
+            trace=trace,
+            bar_close=bar.close,
+            position=position,
+        )
+        self.evaluation_samples.append(sample)
+
+    def get_evaluation_samples_summary(self) -> List[dict[str, Any]]:
+        """Get a summary of evaluation samples for inclusion in backtest results.
+
+        Returns a list of dicts suitable for JSON serialization.
+        """
+        summaries = []
+        for sample in self.evaluation_samples:
+            summaries.append({
+                "timestamp": sample.timestamp.isoformat(),
+                "trigger_id": sample.trigger_id,
+                "symbol": sample.symbol,
+                "rule_type": sample.rule_type,
+                "expression": sample.trace.expression,
+                "result": sample.trace.result,
+                "bar_close": sample.bar_close,
+                "position": sample.position,
+                "context_values": {
+                    k: v for k, v in sample.trace.context_values.items()
+                    if v != "<missing>" and v is not None
+                },
+                "sub_results": sample.trace.sub_results,
+                "error": sample.trace.error,
+            })
+        return summaries
 
     def _deduplicate_orders(self, orders: List[Order], bar_symbol: str) -> List[Order]:
         """Deduplicate orders per symbol using confidence-aware exit priority.

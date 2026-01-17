@@ -1,0 +1,31 @@
+STRATEGYPLAN SCHEMA (SHARED)
+
+You MUST include the following top-level keys in every response:
+- generated_at (ISO 8601 timestamp string)
+- valid_until (ISO 8601 timestamp string)
+- regime (one of: bull, bear, range, high_vol, mixed)
+- risk_constraints (object)
+- sizing_rules (array)
+- triggers (array; can be empty but must exist)
+
+Trigger schema (each item in triggers MUST include these keys):
+- id (string)
+- symbol (string, e.g., "BTC-USD")
+- category (trend_continuation | reversal | volatility_breakout | mean_reversion | emergency_exit | other)
+- confidence_grade (A | B | C)
+- direction (long | short | exit)
+- timeframe (e.g., "1h")
+- entry_rule (string expression - NO subscript syntax like indicator[-1])
+- exit_rule (string expression - NO subscript syntax like indicator[-1], can be empty for emergency exit)
+
+Do NOT use these keys in triggers: type, risk_grade.
+
+Risk constraints MUST include:
+- max_position_risk_pct
+- max_symbol_exposure_pct
+- max_portfolio_exposure_pct
+- max_daily_loss_pct
+- max_daily_risk_budget_pct (optional)
+
+Sizing rules MUST include one entry per symbol. If unsure, use:
+{ "symbol": "<SYMBOL>", "sizing_mode": "fixed_fraction", "target_risk_pct": <max_position_risk_pct> }

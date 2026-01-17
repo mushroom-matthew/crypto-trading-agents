@@ -47,6 +47,21 @@ class IndicatorSnapshot(SerializableModel):
     donchian_lower_short: float | None = None
     bollinger_upper: float | None = None
     bollinger_lower: float | None = None
+    # Cycle indicators (200-bar window for cyclical analysis)
+    cycle_high_200: float | None = None
+    cycle_low_200: float | None = None
+    cycle_range_200: float | None = None
+    cycle_position: float | None = None
+    # Fibonacci retracement levels (from cycle high/low)
+    fib_236: float | None = None
+    fib_382: float | None = None
+    fib_500: float | None = None
+    fib_618: float | None = None
+    fib_786: float | None = None
+    # Expansion/contraction ratios (swing-based)
+    last_expansion_pct: float | None = None
+    last_contraction_pct: float | None = None
+    expansion_contraction_ratio: float | None = None
 
 
 class AssetState(SerializableModel):

@@ -37,15 +37,17 @@ Trigger Composition Requirements:
    - Failed breakout: quick stop if price reverses back into range
    - Trail winners: use ATR-based trailing stop (2x ATR from high)
 
-Entry Rule Patterns (use these templates):
-- Upside breakout: "close > donchian_high and atr_14 > tf_4h_atr_14 * 0.8 and bollinger_bandwidth > bollinger_bandwidth[-5] * 1.2 and rsi_14 > 55"
-- Squeeze breakout: "bollinger_bandwidth < bollinger_bandwidth_ma * 0.8 and close > bollinger_upper and volume > volume_ma * 1.5"
-- Range expansion: "high - low > atr_14 * 1.5 and close > open and close > sma_short"
+VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].
+- entry_rule = "close > donchian_upper_short and atr_14 > tf_4h_atr_14 * 0.8 and tf_1h_atr_14 > tf_4h_atr_14 and rsi_14 > 55"
+- entry_rule = "bollinger_bandwidth < bollinger_bandwidth_ma * 0.8 and close > bollinger_upper"
+- entry_rule = "high - low > atr_14 * 1.5 and close > open and close > sma_short"
 
-Exit Rule Patterns:
-- Momentum loss: "atr_14 < atr_14[-3] * 0.7 or rsi_14 < 45"
-- Failed breakout: "close < donchian_high * 0.98 and close < sma_short"
-- Trailing: "close < highest_close_10 - atr_14 * 2"
+VALID exit_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+NOTE: Do NOT use subscript syntax like indicator[-1]. Use current values and cross-indicator logic.
+- exit_rule = "atr_14 < tf_4h_atr_14 * 0.5 or rsi_14 < 45"
+- exit_rule = "close < donchian_upper_short * 0.98 and close < sma_short"
+- exit_rule = "close < sma_short - atr_14 * 2"
 
 Risk Management:
 - Set max_position_risk_pct at 1.5-2.0% (moderate due to volatile nature)

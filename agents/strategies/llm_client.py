@@ -120,6 +120,7 @@ class LLMClient:
         plan_id: str | None = None,
         prompt_hash: str | None = None,
         metadata: Dict[str, Any] | None = None,
+        use_vector_store: bool = False,
     ) -> StrategyPlan:
         def _emit_llm_event(payload: Dict[str, Any]) -> None:
             try:
@@ -173,7 +174,8 @@ class LLMClient:
         start_time = time.monotonic()
         for attempt in range(1, attempts + 1):
             try:
-                system_prompt = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "") or self._default_prompt()
+                vector_context = self._get_vector_context(llm_input) if use_vector_store else None
+                system_prompt = self._build_system_prompt(prompt_template, vector_context)
                 with langfuse_span("llm_strategist.backtest", metadata={"model": self.model}) as span:
                     completion = self.client.responses.create(
                         model=self.model,
@@ -284,6 +286,52 @@ class LLMClient:
             raise ValueError(f"Strategist output missing keys: {', '.join(missing)}")
         return parsed
 
+    def _get_vector_context(self, llm_input: LLMInput) -> str | None:
+        """Get relevant trigger examples from vector store."""
+        try:
+            from .trigger_vector_store import get_trigger_vector_store
+
+            store = get_trigger_vector_store()
+            if not store.examples:
+                return None
+
+            # Build context from input
+            context = {
+                "regime": llm_input.global_context.get("regime", "unknown") if llm_input.global_context else "unknown",
+            }
+
+            # Get trend and vol state from first asset
+            if llm_input.assets:
+                asset = llm_input.assets[0]
+                context["trend_state"] = asset.trend_state or "unknown"
+                context["vol_state"] = asset.vol_state or "normal"
+                context["symbol"] = asset.symbol
+
+                # Get RSI range if available
+                if asset.indicators:
+                    rsi = asset.indicators[0].rsi_14
+                    if rsi is not None:
+                        if rsi < 30:
+                            context["rsi_range"] = "oversold"
+                        elif rsi > 70:
+                            context["rsi_range"] = "overbought"
+                        else:
+                            context["rsi_range"] = "neutral"
+
+            return store.get_context_injection(context, top_k=3)
+        except Exception as e:
+            logging.warning("Failed to get vector context: %s", e)
+            return None
+
+    def _build_system_prompt(self, prompt_template: str | None, vector_context: str | None = None) -> str:
+        base = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "") or self._default_prompt()
+        schema = self._schema_prompt()
+        if schema and schema not in base:
+            base = f"{base}\n\n{schema}"
+        if vector_context:
+            base = f"{base}\n\n{vector_context}"
+        return base
+
     def _fallback_plan(self, llm_input: LLMInput) -> StrategyPlan:
         now = datetime.now(timezone.utc)
         risk_dict = llm_input.risk_params
@@ -329,4 +377,14 @@ class LLMClient:
         prompt_path = Path(__file__).resolve().parents[2] / "prompts" / "llm_strategist_prompt.txt"
         if prompt_path.exists():
             return prompt_path.read_text(encoding="utf-8").strip()
+        return ""
+
+    @staticmethod
+    @lru_cache(1)
+    def _schema_prompt() -> str:
+        """Load shared StrategyPlan schema block for all strategist prompts."""
+
+        schema_path = Path(__file__).resolve().parents[2] / "prompts" / "strategy_plan_schema.txt"
+        if schema_path.exists():
+            return schema_path.read_text(encoding="utf-8").strip()
         return ""

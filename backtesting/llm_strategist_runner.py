@@ -333,6 +333,13 @@ class LLMStrategistBacktester:
         min_flat_hours: float = 2.0,
         confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
         initial_allocations: Dict[str, float] | None = None,
+        walk_away_enabled: bool = False,
+        walk_away_profit_target_pct: float = 25.0,
+        max_trades_per_day: int | None = None,
+        max_triggers_per_symbol_per_day: int | None = None,
+        debug_trigger_sample_rate: float = 0.0,
+        debug_trigger_max_samples: int = 100,
+        use_trigger_vector_store: bool = False,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -458,6 +465,23 @@ class LLMStrategistBacktester:
         self.latest_factor_exposures: Dict[str, Dict[str, Any]] = {}
         self.auto_hedge_market = auto_hedge_market
         self.confidence_override_threshold = confidence_override_threshold
+
+        # Walk-away threshold: stop trading after hitting daily profit target
+        self.walk_away_enabled = walk_away_enabled
+        self.walk_away_profit_target_pct = max(1.0, walk_away_profit_target_pct)
+        self.walk_away_triggered_days: set[str] = set()
+        self.walk_away_events: List[Dict[str, Any]] = []
+        self.plan_max_trades_per_day = int(max_trades_per_day) if max_trades_per_day is not None else None
+        self.plan_max_triggers_per_symbol_per_day = (
+            int(max_triggers_per_symbol_per_day) if max_triggers_per_symbol_per_day is not None else None
+        )
+        # Debug sampling for trigger evaluation
+        self.debug_trigger_sample_rate = max(0.0, min(1.0, debug_trigger_sample_rate))
+        self.debug_trigger_max_samples = debug_trigger_max_samples
+        self._all_trigger_evaluation_samples: List[Dict[str, Any]] = []
+        # Vector store for trigger examples
+        self.use_trigger_vector_store = use_trigger_vector_store
+
         if self.flatten_policy == "daily_close":
             self.flatten_positions_daily = True
             self.flatten_session_boundary_hour = None
@@ -1624,6 +1648,49 @@ class LLMStrategistBacktester:
                 self._set_daily_loss_anchor(day_key, self.portfolio.portfolio_state(ts).equity)
                 execution_tools.reset_run_state(run_id)
 
+            # Walk-away check: skip trading if daily profit target already reached
+            if self.walk_away_enabled and day_key in self.walk_away_triggered_days:
+                # Already triggered walk-away for this day - just update prices and continue
+                for pair in self.pairs:
+                    base_tf = self.timeframes[0]
+                    df = self.market_data.get(pair, {}).get(base_tf)
+                    if df is not None and ts in df.index:
+                        latest_prices[pair] = float(df.loc[ts, "close"])
+                self.portfolio.mark_to_market(ts, latest_prices)
+                continue
+
+            # Check if we should trigger walk-away NOW
+            if self.walk_away_enabled and day_key not in self.walk_away_triggered_days:
+                daily_anchor = self.daily_loss_anchor_by_day.get(day_key)
+                if daily_anchor and daily_anchor > 0:
+                    current_equity = self.portfolio.portfolio_state(ts).equity
+                    daily_return_pct = ((current_equity - daily_anchor) / daily_anchor) * 100
+                    if daily_return_pct >= self.walk_away_profit_target_pct:
+                        # Trigger walk-away!
+                        self.walk_away_triggered_days.add(day_key)
+                        walk_away_event = {
+                            "timestamp": ts.isoformat(),
+                            "day": day_key,
+                            "trigger": "profit_target",
+                            "daily_return_pct": round(daily_return_pct, 2),
+                            "target_pct": self.walk_away_profit_target_pct,
+                            "equity_at_trigger": current_equity,
+                            "anchor_equity": daily_anchor,
+                        }
+                        self.walk_away_events.append(walk_away_event)
+                        logger.info(
+                            "Walk-away triggered: day=%s return=%.2f%% target=%.2f%% equity=%.2f",
+                            day_key, daily_return_pct, self.walk_away_profit_target_pct, current_equity
+                        )
+                        # Update prices and continue without trading
+                        for pair in self.pairs:
+                            base_tf = self.timeframes[0]
+                            df = self.market_data.get(pair, {}).get(base_tf)
+                            if df is not None and ts in df.index:
+                                latest_prices[pair] = float(df.loc[ts, "close"])
+                        self.portfolio.mark_to_market(ts, latest_prices)
+                        continue
+
             new_plan_needed = current_plan is None or ts >= current_plan.valid_until
             if new_plan_needed:
                 asset_states = self._asset_states(ts)
@@ -1643,6 +1710,7 @@ class LLMStrategistBacktester:
                     llm_input,
                     plan_date=slot_start,
                     prompt_template=self.prompt_template,
+                    use_vector_store=self.use_trigger_vector_store,
                 )
                 current_plan = current_plan.model_copy(
                     update={
@@ -1657,6 +1725,7 @@ class LLMStrategistBacktester:
                         "valid_until": slot_end,
                     }
                 )
+                current_plan = self._apply_plan_overrides(current_plan)
                 current_plan = self._apply_trigger_budget(current_plan)
                 sizing_targets = {
                     rule.symbol: (rule.target_risk_pct or self.active_risk_limits.max_position_risk_pct)
@@ -1673,11 +1742,17 @@ class LLMStrategistBacktester:
                     risk_profile=self.risk_profile,
                 )
                 self.latest_risk_engine = risk_engine
+                # Collect samples from previous trigger engine before creating new one
+                if trigger_engine is not None and self.debug_trigger_sample_rate > 0:
+                    samples = trigger_engine.get_evaluation_samples_summary()
+                    self._all_trigger_evaluation_samples.extend(samples)
                 trigger_engine = TriggerEngine(
                     current_plan,
                     risk_engine,
                     trade_risk=TradeRiskEvaluator(risk_engine),
                     confidence_override_threshold=self.confidence_override_threshold,
+                    debug_sample_rate=self.debug_trigger_sample_rate,
+                    debug_max_samples=self.debug_trigger_max_samples,
                 )
                 self.current_trigger_engine = trigger_engine
                 llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
@@ -1690,6 +1765,8 @@ class LLMStrategistBacktester:
                         "timeframe": trig.timeframe,
                         "category": trig.category,
                         "confidence": trig.confidence_grade,
+                        "entry_rule": trig.entry_rule,
+                        "exit_rule": trig.exit_rule,
                     }
                     for trig in current_plan.triggers[:50]
                 ]
@@ -1873,6 +1950,11 @@ class LLMStrategistBacktester:
                     self.judge_constraints = judge_constraints
                 daily_reports.append(summary)
 
+        # Collect samples from final trigger engine
+        if trigger_engine is not None and self.debug_trigger_sample_rate > 0:
+            samples = trigger_engine.get_evaluation_samples_summary()
+            self._all_trigger_evaluation_samples.extend(samples)
+
         equity_df = pd.DataFrame(self.portfolio.equity_records)
         equity_curve = (
             equity_df.set_index("timestamp")["equity"]
@@ -1905,6 +1987,13 @@ class LLMStrategistBacktester:
             "gross_trade_return_pct": gross_trade_return_pct,
             "return_pct": equity_return_pct,
             "run_summary": run_summary,
+            # Walk-away tracking
+            "walk_away_enabled": self.walk_away_enabled,
+            "walk_away_events": self.walk_away_events,
+            "walk_away_days_triggered": list(self.walk_away_triggered_days),
+            # Debug trigger evaluation samples (if enabled)
+            "trigger_evaluation_samples": self._all_trigger_evaluation_samples if self.debug_trigger_sample_rate > 0 else None,
+            "trigger_evaluation_sample_count": len(self._all_trigger_evaluation_samples) if self.debug_trigger_sample_rate > 0 else 0,
         }
         return StrategistBacktestResult(
             equity_curve=equity_curve,
@@ -1947,6 +2036,23 @@ class LLMStrategistBacktester:
         if trimmed > 0:
             logger.info("Trimmed %s triggers via budget controls: %s", trimmed, meaningful)
         return trimmed_plan
+
+    def _apply_plan_overrides(self, plan: StrategyPlan) -> StrategyPlan:
+        updates: Dict[str, Any] = {}
+        if self.plan_max_trades_per_day is not None:
+            updates["max_trades_per_day"] = self.plan_max_trades_per_day
+        if self.plan_max_triggers_per_symbol_per_day is not None:
+            updates["max_triggers_per_symbol_per_day"] = self.plan_max_triggers_per_symbol_per_day
+        if not updates:
+            return plan
+        updated = plan.model_copy(update=updates)
+        if "max_trades_per_day" in updates:
+            object.__setattr__(updated, "_policy_max_trades_per_day", updates["max_trades_per_day"])
+            object.__setattr__(updated, "_resolved_trade_cap", updates["max_trades_per_day"])
+        if "max_triggers_per_symbol_per_day" in updates:
+            object.__setattr__(updated, "_policy_max_triggers_per_symbol_per_day", updates["max_triggers_per_symbol_per_day"])
+            object.__setattr__(updated, "_resolved_trigger_cap", updates["max_triggers_per_symbol_per_day"])
+        return updated
 
     def _apply_risk_limits_to_plan(self, plan: StrategyPlan) -> StrategyPlan:
         """Inject active risk limits (including daily risk budget) and derive trade caps."""

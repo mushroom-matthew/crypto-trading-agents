@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, Mapping
+from typing import Any, Dict, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,8 @@ class IndicatorWindowConfig:
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
+    cycle_window: int = 200
+    swing_lookback: int = 100
 
 
 def _ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
@@ -82,6 +84,114 @@ def _realized_vol(series: pd.Series, window: int) -> float | None:
     return float(log_returns.tail(window).std(ddof=0))
 
 
+def _cycle_indicators(
+    close: pd.Series, high: pd.Series, low: pd.Series, window: int = 200
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Compute cycle-based min/max over rolling window.
+
+    Returns:
+        cycle_high: Rolling max high over window
+        cycle_low: Rolling min low over window
+        cycle_range: (high - low) / close as percentage
+        cycle_position: Where price sits in range (0=low, 1=high)
+    """
+    if len(high) < window:
+        return None, None, None, None
+    cycle_high = float(high.tail(window).max())
+    cycle_low = float(low.tail(window).min())
+    current_close = float(close.iloc[-1])
+    if cycle_high == cycle_low or current_close == 0:
+        return cycle_high, cycle_low, None, None
+    cycle_range = (cycle_high - cycle_low) / current_close
+    cycle_position = (current_close - cycle_low) / (cycle_high - cycle_low)
+    return cycle_high, cycle_low, cycle_range, cycle_position
+
+
+def _fibonacci_levels(
+    cycle_high: float | None, cycle_low: float | None
+) -> Dict[str, float | None]:
+    """Compute Fibonacci retracement levels from cycle extremes.
+
+    Retracement levels are measured from the high, representing pullback targets.
+    """
+    if cycle_high is None or cycle_low is None:
+        return {
+            "fib_236": None,
+            "fib_382": None,
+            "fib_500": None,
+            "fib_618": None,
+            "fib_786": None,
+        }
+    range_val = cycle_high - cycle_low
+    return {
+        "fib_236": cycle_high - range_val * 0.236,
+        "fib_382": cycle_high - range_val * 0.382,
+        "fib_500": cycle_high - range_val * 0.500,
+        "fib_618": cycle_high - range_val * 0.618,
+        "fib_786": cycle_high - range_val * 0.786,
+    }
+
+
+def _expansion_contraction(
+    high: pd.Series, low: pd.Series, lookback: int = 100
+) -> tuple[float | None, float | None, float | None]:
+    """Compute expansion/contraction ratios from recent swings.
+
+    Uses simple pivot detection to find local min/max points and measures
+    the percentage moves between them.
+
+    Returns:
+        last_expansion_pct: Last swing low→high move (%)
+        last_contraction_pct: Last swing high→low move (%)
+        expansion_contraction_ratio: expansion / contraction
+    """
+    if len(high) < lookback:
+        return None, None, None
+
+    # Use recent data for swing detection
+    recent_high = high.tail(lookback)
+    recent_low = low.tail(lookback)
+
+    # Find the highest and lowest points in the lookback
+    high_idx = recent_high.idxmax()
+    low_idx = recent_low.idxmin()
+    high_val = float(recent_high.loc[high_idx])
+    low_val = float(recent_low.loc[low_idx])
+
+    if low_val == 0:
+        return None, None, None
+
+    # Determine which came first to calculate expansion vs contraction
+    if high_idx > low_idx:
+        # Low came first, then high: this is an expansion (bullish move)
+        expansion_pct = ((high_val - low_val) / low_val) * 100.0
+        # Look for contraction after the high
+        after_high = recent_low.loc[high_idx:]
+        if len(after_high) > 1:
+            low_after = float(after_high.min())
+            contraction_pct = ((high_val - low_after) / high_val) * 100.0
+        else:
+            contraction_pct = None
+    else:
+        # High came first, then low: this is a contraction (bearish move)
+        contraction_pct = ((high_val - low_val) / high_val) * 100.0
+        # Look for expansion after the low
+        after_low = recent_high.loc[low_idx:]
+        if len(after_low) > 1:
+            high_after = float(after_low.max())
+            expansion_pct = ((high_after - low_val) / low_val) * 100.0
+        else:
+            expansion_pct = None
+
+    # Calculate ratio if both are available
+    if expansion_pct is not None and contraction_pct is not None and contraction_pct > 0:
+        ratio = expansion_pct / contraction_pct
+    else:
+        ratio = None
+
+    return expansion_pct, contraction_pct, ratio
+
+
 def compute_indicator_snapshot(
     df: pd.DataFrame,
     symbol: str,
@@ -114,6 +224,19 @@ def compute_indicator_snapshot(
     realized_short = _realized_vol(close, window.realized_vol_short)
     realized_medium = _realized_vol(close, window.realized_vol_medium)
 
+    # Cycle indicators (200-bar window for cyclical analysis)
+    cycle_high, cycle_low, cycle_range, cycle_position = _cycle_indicators(
+        close, high, low, window=window.cycle_window
+    )
+
+    # Fibonacci retracement levels
+    fib_levels = _fibonacci_levels(cycle_high, cycle_low)
+
+    # Expansion/contraction ratios
+    expansion_pct, contraction_pct, exp_cont_ratio = _expansion_contraction(
+        high, low, lookback=window.swing_lookback
+    )
+
     as_of = prepared["timestamp"].iloc[-1].to_pydatetime()
     return IndicatorSnapshot(
         symbol=symbol,
@@ -138,6 +261,18 @@ def compute_indicator_snapshot(
         donchian_lower_short=donchian_lower,
         bollinger_upper=boll_upper,
         bollinger_lower=boll_lower,
+        cycle_high_200=cycle_high,
+        cycle_low_200=cycle_low,
+        cycle_range_200=cycle_range,
+        cycle_position=cycle_position,
+        fib_236=fib_levels["fib_236"],
+        fib_382=fib_levels["fib_382"],
+        fib_500=fib_levels["fib_500"],
+        fib_618=fib_levels["fib_618"],
+        fib_786=fib_levels["fib_786"],
+        last_expansion_pct=expansion_pct,
+        last_contraction_pct=contraction_pct,
+        expansion_contraction_ratio=exp_cont_ratio,
     )
 
 

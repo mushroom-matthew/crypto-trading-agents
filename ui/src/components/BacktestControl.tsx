@@ -11,8 +11,10 @@ import { CandlestickChart } from './CandlestickChart';
 import { BacktestPlaybackViewer } from './BacktestPlaybackViewer';
 import { LLMInsights } from './LLMInsights';
 import { LiveProgressMonitor } from './LiveProgressMonitor';
-import { BacktestSelector } from './BacktestSelector';
+import { BacktestHistoryPanel } from './BacktestHistoryPanel';
 import { PromptEditor } from './PromptEditor';
+import { AggressiveSettingsPanel } from './AggressiveSettingsPanel';
+import { PlanningSettingsPanel } from './PlanningSettingsPanel';
 
 export function BacktestControl() {
   const defaultConfig: BacktestConfig = {
@@ -252,13 +254,14 @@ export function BacktestControl() {
               </p>
             </div>
 
-            {/* Backtest Selector */}
-            <BacktestSelector
+            {/* Backtest History Panel */}
+            <BacktestHistoryPanel
               selectedRunId={selectedRun}
               onSelect={(runId) => {
                 setSelectedRun(runId);
                 localStorage.setItem('selectedBacktestRunId', runId);
               }}
+              maxItems={15}
             />
 
             {/* Symbols */}
@@ -407,6 +410,20 @@ export function BacktestControl() {
                   </p>
                 )}
               </div>
+            )}
+
+            {/* Advanced Trading Settings (Scalper Mode, Leverage, Walk-Away) */}
+            <AggressiveSettingsPanel
+              config={config}
+              onChange={setConfig}
+              disabled={isRunning}
+            />
+            {config.strategy === 'llm_strategist' && (
+              <PlanningSettingsPanel
+                config={config}
+                onChange={setConfig}
+                disabled={isRunning}
+              />
             )}
 
             {/* Submit Button */}

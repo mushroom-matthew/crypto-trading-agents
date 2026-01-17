@@ -37,18 +37,41 @@ Trigger Composition Requirements:
    - Momentum exits: trail with tight 0.5x ATR stop
    - Time-based: exit if no movement within 4-8 bars
 
-Entry Rule Patterns (use these templates):
-- Quick momentum: "rsi_14 > 60 and rsi_14[-1] < 55 and close > sma_short and macd_hist > 0"
-- Dip buy: "rsi_14 < 35 and close > sma_long and macd > macd[-1]"
-- Breakout chase: "close > bollinger_upper and volume > volume_ma and atr_14 > atr_14[-1]"
-- Fade extreme: "rsi_14 > 75 and close > bollinger_upper * 1.02"
-- Short setup: "trend_state=='downtrend' and close < sma_short and rsi_14 > 55 and rsi_14 < 65"
+VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].
+Use multi-timeframe comparisons (tf_1h_X vs tf_4h_X) or relative indicator relationships instead.
 
-Exit Rule Patterns:
-- Quick profit: "unrealized_pnl_pct > 0.75"
-- Momentum fade: "rsi_14 < rsi_14[-1] and macd_hist < macd_hist[-1]"
-- Trailing tight: "close < highest_close_5 - atr_14 * 0.5"
-- Reversal signal: "close < sma_short and rsi_14 < 50"
+SIMPLE 2-condition triggers (more likely to fire in quiet markets):
+- entry_rule = "rsi_14 < 40 and close > sma_medium"
+- entry_rule = "rsi_14 > 60 and macd_hist > 0"
+- entry_rule = "close > sma_short and macd > macd_signal"
+- entry_rule = "close < bollinger_lower and rsi_14 < 45"
+- entry_rule = "close > bollinger_upper and rsi_14 > 55"
+- entry_rule = "cycle_position < 0.3 and rsi_14 < 45"
+- entry_rule = "close < fib_618 and rsi_14 < 40"
+
+MODERATE 3-condition triggers (balanced selectivity):
+- entry_rule = "rsi_14 < 35 and close > sma_long and macd > macd_signal"
+- entry_rule = "close > bollinger_upper and atr_14 > tf_4h_atr_14 * 0.8 and rsi_14 > 55"
+- entry_rule = "cycle_position < 0.25 and rsi_14 < 40 and close > sma_long"
+- entry_rule = "close between fib_500 and fib_618 and rsi_14 < 45 and trend_state == 'uptrend'"
+
+COMPLEX 4-condition triggers (high conviction, fewer trades):
+- entry_rule = "rsi_14 > 60 and close > sma_short and macd_hist > 0 and tf_1h_rsi_14 > tf_4h_rsi_14"
+- entry_rule = "trend_state=='downtrend' and close < sma_short and rsi_14 > 55 and rsi_14 < 65"
+
+VALID exit_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+NOTE: Do NOT use subscript syntax like indicator[-1]. Use current values and cross-indicator logic.
+
+SIMPLE exits (quick profit-taking):
+- exit_rule = "rsi_14 > 60"
+- exit_rule = "close > sma_short"
+- exit_rule = "macd_hist < 0"
+
+MODERATE exits (with confirmation):
+- exit_rule = "rsi_14 < 50 and macd_hist < 0"
+- exit_rule = "close < sma_short and rsi_14 < 50"
+- exit_rule = "close < sma_short - atr_14 * 0.5"
 
 Risk Management (ACTIVE):
 - Set max_position_risk_pct at 2.0-3.0% (higher for active approach)
@@ -68,5 +91,17 @@ Regime Adaptation:
 - 'bear': Favor shorts 3:1, fade rallies
 - 'range': Equal long/short, mean reversion focus
 - 'high_vol': Reduce position size 50%, wider stops
+
+Trigger Permissiveness (IMPORTANT for active trading):
+- In sideways/low-vol markets, use SIMPLE 2-condition triggers to ensure activity
+- Avoid requiring 4+ conditions in all triggers - most will never fire
+- Mix trigger complexity: some simple (C-grade probes), some complex (A-grade conviction)
+- If recent activity is low, widen RSI bands (35-65 instead of 30-70)
+- When volatility is compressed, reduce ATR thresholds by 20-30%
+
+Position Gating (REQUIRED in all entry_rules):
+- For long entries: include "position != 'long'" (prefer "position == 'flat'")
+- For short entries: include "position != 'short'" (prefer "position == 'flat'")
+- For exit/flat rules: include "position != 'flat'"
 
 Response Format: Valid JSON StrategyPlan with many diverse triggers and aggressive risk parameters.

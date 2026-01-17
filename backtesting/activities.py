@@ -222,9 +222,31 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     timeframes = config.get("timeframes") or [timeframe]
     flatten_positions_daily = config.get("flatten_positions_daily", False)
     flatten_notional_threshold = config.get("flatten_notional_threshold", 0.0)
-    min_hold_hours = config.get("min_hold_hours", 2.0)
-    min_flat_hours = config.get("min_flat_hours", 2.0)
     strategy_prompt = config.get("strategy_prompt")
+
+    # Whipsaw / anti-flip-flop controls (new parameters)
+    min_hold_hours = config.get("min_hold_hours")
+    if min_hold_hours is None:
+        min_hold_hours = 2.0  # Default
+    min_flat_hours = config.get("min_flat_hours")
+    if min_flat_hours is None:
+        min_flat_hours = 2.0  # Default
+    confidence_override_threshold = config.get("confidence_override_threshold", "A")
+
+    # Walk-away threshold
+    walk_away_enabled = config.get("walk_away_enabled", False)
+    walk_away_profit_target_pct = config.get("walk_away_profit_target_pct", 25.0)
+
+    # Trade frequency limits
+    max_trades_per_day = config.get("max_trades_per_day")
+    max_triggers_per_symbol_per_day = config.get("max_triggers_per_symbol_per_day")
+
+    # Debug trigger evaluation sampling
+    debug_trigger_sample_rate = config.get("debug_trigger_sample_rate", 0.0)
+    debug_trigger_max_samples = config.get("debug_trigger_max_samples", 100)
+
+    # Vector store for trigger examples
+    use_trigger_vector_store = config.get("use_trigger_vector_store", False)
 
     logger.info(
         "Running LLM strategist backtest",
@@ -258,8 +280,19 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         flatten_notional_threshold=flatten_notional_threshold,
         min_hold_hours=float(min_hold_hours),
         min_flat_hours=float(min_flat_hours),
+        confidence_override_threshold=confidence_override_threshold,
         initial_allocations=initial_allocations,
         strategy_prompt=strategy_prompt,
+        # Walk-away threshold (passed to backtester for tracking)
+        walk_away_enabled=walk_away_enabled,
+        walk_away_profit_target_pct=walk_away_profit_target_pct,
+        max_trades_per_day=max_trades_per_day,
+        max_triggers_per_symbol_per_day=max_triggers_per_symbol_per_day,
+        # Debug trigger evaluation sampling
+        debug_trigger_sample_rate=debug_trigger_sample_rate,
+        debug_trigger_max_samples=debug_trigger_max_samples,
+        # Vector store for trigger examples
+        use_trigger_vector_store=use_trigger_vector_store,
     )
     result_holder: Dict[str, Any] = {}
     error_holder: Dict[str, Exception] = {}

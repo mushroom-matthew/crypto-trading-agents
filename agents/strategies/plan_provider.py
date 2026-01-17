@@ -10,6 +10,7 @@ from uuid import uuid4
 from datetime import timezone
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,80 @@ def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, math.ceil(len(text) / 4))
+
+
+@lru_cache(maxsize=1)
+def _prompt_catalog() -> dict[str, str]:
+    """Load known prompt templates and return sha256 hashes keyed by template id."""
+    base_dir = Path(__file__).resolve().parents[2] / "prompts"
+    catalog: dict[str, str] = {}
+    base_prompt = base_dir / "llm_strategist_prompt.txt"
+    if base_prompt.exists():
+        catalog["default"] = hashlib.sha256(base_prompt.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    strategies_dir = base_dir / "strategies"
+    if strategies_dir.exists():
+        for path in sorted(strategies_dir.glob("*.txt")):
+            catalog[path.stem] = hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    return catalog
+
+
+@lru_cache(maxsize=1)
+def _schema_prompt() -> str:
+    """Load shared StrategyPlan schema block for all strategist prompts."""
+
+    schema_path = Path(__file__).resolve().parents[2] / "prompts" / "strategy_plan_schema.txt"
+    if schema_path.exists():
+        return schema_path.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _resolve_prompt_template(prompt_template: str | None) -> str:
+    """Resolve the actual prompt template using the same fallback order as LLMClient."""
+    if prompt_template:
+        base = prompt_template
+    else:
+        env_prompt = os.environ.get("LLM_STRATEGIST_PROMPT")
+        if env_prompt:
+            base = env_prompt
+        else:
+            base_prompt = Path(__file__).resolve().parents[2] / "prompts" / "llm_strategist_prompt.txt"
+            base = base_prompt.read_text(encoding="utf-8").strip() if base_prompt.exists() else ""
+    schema = _schema_prompt()
+    if schema and schema not in base:
+        return f"{base}\n\n{schema}"
+    return base
+
+
+def _prompt_metadata(prompt_template: str | None) -> dict[str, object]:
+    """Return prompt template metadata for logging/telemetry."""
+    resolved = _resolve_prompt_template(prompt_template)
+    if not resolved:
+        return {}
+    resolved_hash = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    template_id = None
+    for candidate_id, candidate_hash in _prompt_catalog().items():
+        if candidate_hash == resolved_hash:
+            template_id = candidate_id
+            break
+    return {
+        "prompt_template_id": template_id,
+        "prompt_template_hash": resolved_hash,
+        "prompt_template_chars": len(resolved),
+    }
+
+
+def _context_flags(llm_input: LLMInput) -> dict[str, object]:
+    context = llm_input.global_context or {}
+    return {
+        "has_market_structure": bool(llm_input.market_structure),
+        "has_market_structure_context": bool(context.get("market_structure")),
+        "has_factor_exposures": bool(context.get("factor_exposures")),
+        "has_rpr_comparison": bool(context.get("rpr_comparison")),
+        "has_judge_feedback": bool(context.get("judge_feedback")),
+        "has_strategy_memory": bool(context.get("strategy_memory")),
+        "has_risk_adjustments": bool(context.get("risk_adjustments")),
+        "auto_hedge_mode": context.get("auto_hedge_mode"),
+    }
 
 
 @dataclass
@@ -81,7 +156,14 @@ class StrategyPlanProvider:
             return None
         return StrategyPlan.model_validate_json(path.read_text())
 
-    def get_plan(self, run_id: str, plan_date: datetime, llm_input: LLMInput, prompt_template: str | None = None) -> StrategyPlan:
+    def get_plan(
+        self,
+        run_id: str,
+        plan_date: datetime,
+        llm_input: LLMInput,
+        prompt_template: str | None = None,
+        use_vector_store: bool = False,
+    ) -> StrategyPlan:
         cache_path = self._cache_path(run_id, plan_date, llm_input)
         cached = self._load_cached(cache_path)
         if cached:
@@ -102,14 +184,16 @@ class StrategyPlanProvider:
         date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
             raise RuntimeError(f"LLM call budget exhausted for {date_key[1]}")
+        resolved_prompt = _resolve_prompt_template(prompt_template)
         input_hash = hashlib.sha256(llm_input.to_json().encode("utf-8")).hexdigest()
-        metadata = self._llm_call_metadata(llm_input, plan_date)
+        metadata = self._llm_call_metadata(llm_input, plan_date, prompt_template=resolved_prompt)
         plan = self.llm_client.generate_plan(
             llm_input,
-            prompt_template=prompt_template,
+            prompt_template=resolved_prompt,
             run_id=run_id,
             prompt_hash=input_hash,
             metadata=metadata,
+            use_vector_store=use_vector_store,
         )
         plan = self._enrich_plan(plan, llm_input)
         plan = plan.model_copy(update={"run_id": run_id})
@@ -235,7 +319,12 @@ class StrategyPlanProvider:
                 plan.allowed_trigger_categories.append("other")
         return plan
 
-    def _llm_call_metadata(self, llm_input: LLMInput, plan_date: datetime) -> dict[str, object]:
+    def _llm_call_metadata(
+        self,
+        llm_input: LLMInput,
+        plan_date: datetime,
+        prompt_template: str | None = None,
+    ) -> dict[str, object]:
         symbols = sorted({asset.symbol for asset in llm_input.assets})
         timeframes = sorted(
             {
@@ -252,6 +341,8 @@ class StrategyPlanProvider:
             "timeframes": timeframes,
             "asset_count": len(symbols),
             "timeframe_count": len(timeframes),
+            "context_flags": _context_flags(llm_input),
+            **_prompt_metadata(prompt_template),
         }
 
     def _emit_plan_generated(self, plan: StrategyPlan, llm_input: LLMInput, run_id: str) -> None:
@@ -281,6 +372,7 @@ class StrategyPlanProvider:
                 "min_trades_per_day": plan.min_trades_per_day,
                 "max_triggers_per_symbol_per_day": plan.max_triggers_per_symbol_per_day,
                 "risk_constraints": plan.risk_constraints.model_dump(),
+                "context_flags": _context_flags(llm_input),
                 "source": (self.last_generation_info or {}).get("source"),
                 "llm_meta": self.last_generation_info,
             }

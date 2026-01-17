@@ -56,6 +56,86 @@ class PaperTradingSessionConfig(BaseModel):
         description="LLM model to use (defaults to gpt-4o-mini)"
     )
 
+    # ============================================================================
+    # Risk Engine Parameters
+    # ============================================================================
+    max_position_risk_pct: Optional[float] = Field(
+        default=None, ge=0.1, le=20.0,
+        description="Max risk per trade as % of equity (default: 2%)"
+    )
+    max_symbol_exposure_pct: Optional[float] = Field(
+        default=None, ge=5.0, le=100.0,
+        description="Max notional exposure per symbol as % of equity (default: 25%)"
+    )
+    max_portfolio_exposure_pct: Optional[float] = Field(
+        default=None, ge=10.0, le=500.0,
+        description="Max total portfolio exposure as % of equity (default: 80%, >100% = leverage)"
+    )
+    max_daily_loss_pct: Optional[float] = Field(
+        default=None, ge=1.0, le=50.0,
+        description="Daily loss limit as % of equity - stops trading when hit (default: 3%)"
+    )
+    max_daily_risk_budget_pct: Optional[float] = Field(
+        default=None, ge=1.0, le=50.0,
+        description="Max cumulative risk allocated per day as % of equity"
+    )
+
+    # ============================================================================
+    # Trade Frequency Parameters
+    # ============================================================================
+    max_trades_per_day: Optional[int] = Field(
+        default=None, ge=1, le=200,
+        description="Maximum number of trades per day (default: 10)"
+    )
+    max_triggers_per_symbol_per_day: Optional[int] = Field(
+        default=None, ge=1, le=50,
+        description="Maximum triggers per symbol per day (default: 5)"
+    )
+
+    # ============================================================================
+    # Whipsaw / Anti-Flip-Flop Controls
+    # ============================================================================
+    min_hold_hours: Optional[float] = Field(
+        default=None, ge=0.0, le=24.0,
+        description="Minimum hours to hold position before exit allowed (default: 2.0, 0=disabled)"
+    )
+    min_flat_hours: Optional[float] = Field(
+        default=None, ge=0.0, le=24.0,
+        description="Minimum hours between trades for same symbol (default: 2.0, 0=disabled)"
+    )
+    confidence_override_threshold: Optional[str] = Field(
+        default=None,
+        description="Min confidence grade for entry to override exit: 'A', 'B', 'C', or null (default: 'A')"
+    )
+
+    # ============================================================================
+    # Execution Gating Parameters
+    # ============================================================================
+    min_price_move_pct: Optional[float] = Field(
+        default=None, ge=0.0, le=10.0,
+        description="Minimum price movement % to consider trading (default: 0.5)"
+    )
+
+    # ============================================================================
+    # Walk-Away Threshold
+    # ============================================================================
+    walk_away_enabled: Optional[bool] = Field(
+        default=False,
+        description="Enable walk-away mode - stop trading after hitting profit target"
+    )
+    walk_away_profit_target_pct: Optional[float] = Field(
+        default=25.0, ge=1.0, le=100.0,
+        description="Profit target % to trigger walk-away (default: 25%)"
+    )
+
+    # ============================================================================
+    # Flattening Options
+    # ============================================================================
+    flatten_positions_daily: Optional[bool] = Field(
+        default=False,
+        description="Close all positions at end of each trading day"
+    )
+
 
 class SessionStartResponse(BaseModel):
     """Response when starting a paper trading session."""
@@ -159,6 +239,23 @@ async def start_session(config: PaperTradingSessionConfig):
                     normalized_key = f"{normalized_key}-USD"
                 initial_allocations[normalized_key] = float(value)
 
+        # Build risk_params dict from config
+        risk_params = {}
+        if config.max_position_risk_pct is not None:
+            risk_params["max_position_risk_pct"] = config.max_position_risk_pct
+        if config.max_symbol_exposure_pct is not None:
+            risk_params["max_symbol_exposure_pct"] = config.max_symbol_exposure_pct
+        if config.max_portfolio_exposure_pct is not None:
+            risk_params["max_portfolio_exposure_pct"] = config.max_portfolio_exposure_pct
+        if config.max_daily_loss_pct is not None:
+            risk_params["max_daily_loss_pct"] = config.max_daily_loss_pct
+        if config.max_daily_risk_budget_pct is not None:
+            risk_params["max_daily_risk_budget_pct"] = config.max_daily_risk_budget_pct
+        if config.max_trades_per_day is not None:
+            risk_params["max_trades_per_day"] = config.max_trades_per_day
+        if config.max_triggers_per_symbol_per_day is not None:
+            risk_params["max_triggers_per_symbol_per_day"] = config.max_triggers_per_symbol_per_day
+
         # Build workflow config
         workflow_config = {
             "session_id": session_id,
@@ -170,6 +267,19 @@ async def start_session(config: PaperTradingSessionConfig):
             "enable_symbol_discovery": config.enable_symbol_discovery,
             "min_volume_24h": config.min_volume_24h,
             "llm_model": config.llm_model,
+            # Risk parameters
+            "risk_params": risk_params if risk_params else None,
+            # Whipsaw controls
+            "min_hold_hours": config.min_hold_hours,
+            "min_flat_hours": config.min_flat_hours,
+            "confidence_override_threshold": config.confidence_override_threshold,
+            # Execution gating
+            "min_price_move_pct": config.min_price_move_pct,
+            # Walk-away threshold
+            "walk_away_enabled": config.walk_away_enabled,
+            "walk_away_profit_target_pct": config.walk_away_profit_target_pct,
+            # Flattening
+            "flatten_positions_daily": config.flatten_positions_daily,
         }
 
         # Start workflow

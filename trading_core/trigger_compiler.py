@@ -113,6 +113,7 @@ def _allowed_names_from_trigger(trigger: TriggerCondition) -> Set[str]:
         "trend_state",
         "vol_state",
         "symbol",
+        "position",  # Current position state: 'flat', 'long', or 'short'
         "close",
         "open",
         "high",
@@ -138,6 +139,21 @@ def _allowed_names_from_trigger(trigger: TriggerCondition) -> Set[str]:
         "bollinger_middle",
         "donchian_upper_short",
         "donchian_lower_short",
+        # Cycle indicators (200-bar window)
+        "cycle_high_200",
+        "cycle_low_200",
+        "cycle_range_200",
+        "cycle_position",
+        # Fibonacci retracement levels
+        "fib_236",
+        "fib_382",
+        "fib_500",
+        "fib_618",
+        "fib_786",
+        # Expansion/contraction ratios
+        "last_expansion_pct",
+        "last_contraction_pct",
+        "expansion_contraction_ratio",
     }
     identifiers = _collect_identifiers(trigger.entry_rule) | _collect_identifiers(trigger.exit_rule)
     return base_names | identifiers

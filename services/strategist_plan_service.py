@@ -46,12 +46,13 @@ class StrategistPlanService:
         llm_input: LLMInput,
         plan_date: Optional[datetime] = None,
         prompt_template: str | None = None,
+        use_vector_store: bool = False,
     ) -> StrategyPlan:
         run = self.registry.get_strategy_run(run_id)
         plan_date = plan_date or datetime.now(timezone.utc)
         risk_limits = effective_risk_limits(run)
         llm_input = self._llm_input_with_risk_overrides(llm_input, risk_limits)
-        plan = self.plan_provider.get_plan(run_id, plan_date, llm_input, prompt_template=prompt_template)
+        plan = self.plan_provider.get_plan(run_id, plan_date, llm_input, prompt_template=prompt_template, use_vector_store=use_vector_store)
         plan = plan.model_copy(deep=True)
         # Preserve declared policy caps before any derived-clamp is applied.
         if not hasattr(plan, "_policy_max_trades_per_day"):

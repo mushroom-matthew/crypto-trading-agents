@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -139,6 +139,110 @@ class BacktestConfig(BaseModel):
     strategy_id: Optional[str] = Field(default=None, description="Strategy template ID for LLM strategist")
     strategy_prompt: Optional[str] = Field(default=None, description="Custom strategy prompt for LLM strategist")
 
+    # ============================================================================
+    # Risk Engine Parameters
+    # ============================================================================
+    max_position_risk_pct: Optional[float] = Field(
+        default=None, ge=0.1, le=20.0,
+        description="Max risk per trade as % of equity (default: 2%)"
+    )
+    max_symbol_exposure_pct: Optional[float] = Field(
+        default=None, ge=5.0, le=100.0,
+        description="Max notional exposure per symbol as % of equity (default: 25%)"
+    )
+    max_portfolio_exposure_pct: Optional[float] = Field(
+        default=None, ge=10.0, le=500.0,
+        description="Max total portfolio exposure as % of equity (default: 80%, >100% = leverage)"
+    )
+    max_daily_loss_pct: Optional[float] = Field(
+        default=None, ge=1.0, le=50.0,
+        description="Daily loss limit as % of equity - stops trading when hit (default: 3%)"
+    )
+    max_daily_risk_budget_pct: Optional[float] = Field(
+        default=None, ge=1.0, le=50.0,
+        description="Max cumulative risk allocated per day as % of equity"
+    )
+
+    # ============================================================================
+    # Trade Frequency Parameters
+    # ============================================================================
+    max_trades_per_day: Optional[int] = Field(
+        default=None, ge=1, le=200,
+        description="Maximum number of trades per day (default: 10)"
+    )
+    max_triggers_per_symbol_per_day: Optional[int] = Field(
+        default=None, ge=1, le=50,
+        description="Maximum triggers per symbol per day (default: 5)"
+    )
+    llm_calls_per_day: Optional[int] = Field(
+        default=1, ge=1, le=24,
+        description="Number of LLM strategist calls per day (1=daily, 24=hourly)"
+    )
+
+    # ============================================================================
+    # Whipsaw / Anti-Flip-Flop Controls
+    # ============================================================================
+    min_hold_hours: Optional[float] = Field(
+        default=None, ge=0.0, le=24.0,
+        description="Minimum hours to hold position before exit allowed (default: 2.0, 0=disabled)"
+    )
+    min_flat_hours: Optional[float] = Field(
+        default=None, ge=0.0, le=24.0,
+        description="Minimum hours between trades for same symbol (default: 2.0, 0=disabled)"
+    )
+    confidence_override_threshold: Optional[str] = Field(
+        default=None,
+        description="Min confidence grade for entry to override exit: 'A', 'B', 'C', or null (default: 'A')"
+    )
+
+    # ============================================================================
+    # Execution Gating Parameters
+    # ============================================================================
+    min_price_move_pct: Optional[float] = Field(
+        default=None, ge=0.0, le=10.0,
+        description="Minimum price movement % to consider trading (default: 0.5)"
+    )
+
+    # ============================================================================
+    # Walk-Away Threshold
+    # ============================================================================
+    walk_away_enabled: Optional[bool] = Field(
+        default=False,
+        description="Enable walk-away mode - stop trading after hitting profit target"
+    )
+    walk_away_profit_target_pct: Optional[float] = Field(
+        default=25.0, ge=1.0, le=100.0,
+        description="Profit target % to trigger walk-away (default: 25%)"
+    )
+
+    # ============================================================================
+    # Flattening Options
+    # ============================================================================
+    flatten_positions_daily: Optional[bool] = Field(
+        default=False,
+        description="Close all positions at end of each trading day"
+    )
+
+    # ============================================================================
+    # Debug / Diagnostics
+    # ============================================================================
+    debug_trigger_sample_rate: Optional[float] = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Probability (0.0-1.0) of sampling trigger evaluations for debugging. Set to 0 to disable, 1 to sample all."
+    )
+    debug_trigger_max_samples: Optional[int] = Field(
+        default=100, ge=1, le=1000,
+        description="Maximum number of trigger evaluation samples to collect (default: 100)"
+    )
+
+    # ============================================================================
+    # Vector Store / RAG
+    # ============================================================================
+    use_trigger_vector_store: Optional[bool] = Field(
+        default=False,
+        description="Use vector store to retrieve relevant trigger examples for the LLM strategist"
+    )
+
 
 class BacktestCreateResponse(BaseModel):
     """Response when starting a backtest."""
@@ -158,6 +262,35 @@ class BacktestStatus(BaseModel):
     completed_at: Optional[datetime] = None
     candles_total: Optional[int] = None
     candles_processed: Optional[int] = None
+    error: Optional[str] = None
+
+
+class BacktestListItem(BaseModel):
+    """Extended backtest info for listing with rich metadata."""
+
+    run_id: str
+    status: str
+    progress: float = 0
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    # Configuration metadata
+    symbols: List[str] = Field(default_factory=list, description="Traded symbols")
+    strategy: Optional[str] = Field(default=None, description="Strategy type (baseline/llm_strategist)")
+    strategy_id: Optional[str] = Field(default=None, description="Strategy template name")
+    timeframe: Optional[str] = Field(default=None, description="Primary timeframe")
+    start_date: Optional[str] = Field(default=None, description="Backtest start date")
+    end_date: Optional[str] = Field(default=None, description="Backtest end date")
+    initial_cash: Optional[float] = Field(default=None, description="Starting capital")
+
+    # Performance metrics (for completed backtests)
+    return_pct: Optional[float] = Field(default=None, description="Total return percentage")
+    final_equity: Optional[float] = Field(default=None, description="Final portfolio value")
+    total_trades: Optional[int] = Field(default=None, description="Number of trades executed")
+    sharpe_ratio: Optional[float] = Field(default=None, description="Sharpe ratio")
+    max_drawdown_pct: Optional[float] = Field(default=None, description="Maximum drawdown percentage")
+    win_rate: Optional[float] = Field(default=None, description="Win rate percentage")
+
     error: Optional[str] = None
 
 
@@ -322,6 +455,19 @@ async def start_backtest(config: BacktestConfig):
 
         logger.info("Starting backtest workflow: %s", config.model_dump())
 
+        # Build risk_params dict from config
+        risk_params = {}
+        if config.max_position_risk_pct is not None:
+            risk_params["max_position_risk_pct"] = config.max_position_risk_pct
+        if config.max_symbol_exposure_pct is not None:
+            risk_params["max_symbol_exposure_pct"] = config.max_symbol_exposure_pct
+        if config.max_portfolio_exposure_pct is not None:
+            risk_params["max_portfolio_exposure_pct"] = config.max_portfolio_exposure_pct
+        if config.max_daily_loss_pct is not None:
+            risk_params["max_daily_loss_pct"] = config.max_daily_loss_pct
+        if config.max_daily_risk_budget_pct is not None:
+            risk_params["max_daily_risk_budget_pct"] = config.max_daily_risk_budget_pct
+
         # Start Temporal workflow (non-blocking)
         client = await get_temporal_client()
         await client.start_workflow(
@@ -338,6 +484,28 @@ async def start_backtest(config: BacktestConfig):
                 "initial_allocations": initial_allocations,
                 "strategy": config.strategy or "baseline",
                 "strategy_prompt": config.strategy_prompt,
+                # Risk parameters
+                "risk_params": risk_params if risk_params else None,
+                # Trade frequency
+                "max_trades_per_day": config.max_trades_per_day,
+                "max_triggers_per_symbol_per_day": config.max_triggers_per_symbol_per_day,
+                "llm_calls_per_day": config.llm_calls_per_day or 1,
+                # Whipsaw controls
+                "min_hold_hours": config.min_hold_hours,
+                "min_flat_hours": config.min_flat_hours,
+                "confidence_override_threshold": config.confidence_override_threshold,
+                # Execution gating
+                "min_price_move_pct": config.min_price_move_pct,
+                # Walk-away threshold
+                "walk_away_enabled": config.walk_away_enabled,
+                "walk_away_profit_target_pct": config.walk_away_profit_target_pct,
+                # Flattening
+                "flatten_positions_daily": config.flatten_positions_daily,
+                # Debug / diagnostics
+                "debug_trigger_sample_rate": config.debug_trigger_sample_rate or 0.0,
+                "debug_trigger_max_samples": config.debug_trigger_max_samples or 100,
+                # Vector store
+                "use_trigger_vector_store": config.use_trigger_vector_store or False,
             }],
             id=run_id,
             task_queue=BACKTEST_TASK_QUEUE,
@@ -1062,7 +1230,7 @@ async def get_llm_insights(run_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("", response_model=List[BacktestStatus])
+@router.get("", response_model=List[BacktestListItem])
 async def list_backtests(
     status: Optional[str] = Query(default=None, description="Filter by status"),
     limit: int = Query(default=50, le=200, description="Max backtests to return")
@@ -1070,8 +1238,9 @@ async def list_backtests(
     """
     List all backtests with optional filtering.
 
-    Returns summary of all backtest runs with status and basic info.
+    Returns summary of all backtest runs with rich metadata for display.
     Merges in-memory cache with disk-persisted results.
+    Sorted by completed_at or started_at (newest first).
     """
     try:
         # Merge in-memory cache with disk cache
@@ -1086,7 +1255,7 @@ async def list_backtests(
         all_run_ids.update(disk_run_ids)
 
         backtest_list = []
-        for run_id in sorted(all_run_ids, reverse=True)[:limit]:
+        for run_id in all_run_ids:
             # Try to get from memory or disk
             cached = get_backtest_cached(run_id)
 
@@ -1104,18 +1273,85 @@ async def list_backtests(
             if status and cached_status != status:
                 continue
 
+            # Extract config metadata
+            config = cached.get("config") or {}
+            symbols = config.get("symbols") or []
+            strategy = config.get("strategy")
+            strategy_id = config.get("strategy_id")
+            timeframe = config.get("timeframe")
+            start_date = config.get("start_date") or config.get("requested_start_date")
+            end_date = config.get("end_date") or config.get("requested_end_date")
+            initial_cash = config.get("initial_cash")
+
+            # Extract performance metrics for completed backtests
+            return_pct = None
+            final_equity = None
+            total_trades = None
+            sharpe_ratio = None
+            max_drawdown_pct = None
+            win_rate = None
+
+            if cached_status == "completed":
+                summary = cached.get("summary") or {}
+                return_pct = summary.get("equity_return_pct") or summary.get("return_pct")
+                final_equity = summary.get("final_equity")
+
+                # Try to get from metrics or run_summary
+                run_summary = summary.get("run_summary") or {}
+                metrics = run_summary.get("metrics") or summary.get("metrics") or {}
+                sharpe_ratio = metrics.get("sharpe_ratio")
+                max_drawdown_pct = metrics.get("max_drawdown_pct")
+                win_rate = metrics.get("win_rate")
+
+                # Count trades from fills
+                fills = cached.get("fills") or cached.get("trades") or []
+                if isinstance(fills, list):
+                    total_trades = len(fills)
+
+            # Parse timestamps
+            started_at = None
+            completed_at = None
+            try:
+                if cached.get("started_at"):
+                    started_at = datetime.fromisoformat(str(cached["started_at"]).replace("Z", "+00:00"))
+                if cached.get("completed_at"):
+                    completed_at = datetime.fromisoformat(str(cached["completed_at"]).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                pass
+
             backtest_list.append(
-                BacktestStatus(
+                BacktestListItem(
                     run_id=run_id,
                     status=cached_status,
-                    progress=100.0 if cached_status == "completed" else 0.0,
-                    started_at=cached.get("started_at"),
-                    completed_at=cached.get("completed_at"),
-                    candles_total=cached.get("candles_total"),
-                    candles_processed=cached.get("candles_processed"),
+                    progress=100.0 if cached_status == "completed" else cached.get("progress", 0.0),
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    symbols=symbols,
+                    strategy=strategy,
+                    strategy_id=strategy_id,
+                    timeframe=timeframe,
+                    start_date=start_date,
+                    end_date=end_date,
+                    initial_cash=initial_cash,
+                    return_pct=clean_nan(return_pct),
+                    final_equity=clean_nan(final_equity),
+                    total_trades=total_trades,
+                    sharpe_ratio=clean_nan(sharpe_ratio),
+                    max_drawdown_pct=clean_nan(max_drawdown_pct),
+                    win_rate=clean_nan(win_rate),
                     error=cached.get("error"),
                 )
             )
+
+        # Sort by completed_at or started_at (newest first)
+        def sort_key(item: BacktestListItem):
+            if item.completed_at:
+                return item.completed_at
+            if item.started_at:
+                return item.started_at
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        backtest_list.sort(key=sort_key, reverse=True)
 
         return backtest_list[:limit]
 

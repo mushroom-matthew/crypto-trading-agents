@@ -36,15 +36,16 @@ Trigger Composition Requirements:
    - Take partial profits at 50% reversion, full at mean
    - Tight stops: 1-1.5x ATR (mean reversion fails fast or works quickly)
 
-Entry Rule Patterns (use these templates):
-- Oversold bounce: "rsi_14 < 30 and close < bollinger_lower and close > sma_long and atr_14 < tf_4h_atr_14"
-- Support test: "close between sma_medium * 0.98 and sma_medium and rsi_14 < 40 and macd_hist > macd_hist[-1]"
-- Band touch: "close < bollinger_lower and realized_vol_short < realized_vol_medium and tf_4h_rsi_14 > 40"
+VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].
+- entry_rule = "rsi_14 < 30 and close < bollinger_lower and close > sma_long and atr_14 < tf_4h_atr_14"
+- entry_rule = "close between sma_medium * 0.98 and sma_medium and rsi_14 < 40 and macd_hist > 0"
+- entry_rule = "close < bollinger_lower and realized_vol_short < realized_vol_medium and tf_4h_rsi_14 > 40"
 
-Exit Rule Patterns:
-- Mean reached: "close > sma_medium or rsi_14 > 50"
-- Overbought: "rsi_14 > 70 or close > bollinger_upper"
-- Stop: "close < bollinger_lower * 0.98 or rsi_14 < 20"
+VALID exit_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+- exit_rule = "close > sma_medium or rsi_14 > 50"
+- exit_rule = "rsi_14 > 70 or close > bollinger_upper"
+- exit_rule = "close < bollinger_lower * 0.98 or rsi_14 < 20"
 
 Risk Management:
 - Set max_position_risk_pct at 1.0-1.5% (smaller due to tighter stops)

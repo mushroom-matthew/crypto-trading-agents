@@ -36,18 +36,19 @@ Trigger Composition Requirements:
    - Tactical positions: Fixed 1:1.5 risk-reward targets
    - Probe positions: Quick 1:1 or time-based exit
 
-Entry Rule Patterns (use these templates):
-- Core trend entry: "tf_4h_trend_state=='uptrend' and close > tf_4h_sma_medium and rsi_14 between 45 and 60 and atr_14 < tf_4h_atr_14 * 1.2"
-- Tactical pullback: "trend_state=='uptrend' and close < sma_short and rsi_14 < 45 and close > sma_medium"
-- Range bounce: "vol_state=='low' and rsi_14 < 35 and close > sma_long and bollinger_bandwidth < bollinger_bandwidth_ma"
-- Breakout: "close > donchian_high and atr_14 > atr_14[-5] and volume > volume_ma"
-- Reversal signal: "rsi_14 < 25 and tf_4h_rsi_14 < 35 and macd_hist > macd_hist[-1]"
+VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].
+- entry_rule = "tf_4h_trend_state=='uptrend' and close > tf_4h_sma_medium and rsi_14 between 45 and 60 and atr_14 < tf_4h_atr_14 * 1.2"
+- entry_rule = "trend_state=='uptrend' and close < sma_short and rsi_14 < 45 and close > sma_medium"
+- entry_rule = "vol_state=='low' and rsi_14 < 35 and close > sma_long"
+- entry_rule = "close > donchian_upper_short and atr_14 > tf_4h_atr_14 * 0.8"
+- entry_rule = "rsi_14 < 25 and tf_4h_rsi_14 < 35 and macd_hist > 0"
 
-Exit Rule Patterns:
-- Core exit: "tf_4h_close < tf_4h_sma_medium or tf_4h_rsi_14 < 45"
-- Tactical exit: "unrealized_pnl_pct > 1.5 or close < sma_short"
-- Stop loss: "close < entry_price - atr_14 * 1.5"
-- Volatility exit: "atr_14 > tf_4h_atr_14 * 2 and unrealized_pnl_pct < 0"
+VALID exit_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
+- exit_rule = "tf_4h_close < tf_4h_sma_medium or tf_4h_rsi_14 < 45"
+- exit_rule = "unrealized_pnl_pct > 1.5 or close < sma_short"
+- exit_rule = "close < sma_medium - atr_14 * 1.5"
+- exit_rule = "atr_14 > tf_4h_atr_14 * 2 and unrealized_pnl_pct < 0"
 
 Risk Management (BALANCED):
 - Set max_position_risk_pct at 1.5-2.0%

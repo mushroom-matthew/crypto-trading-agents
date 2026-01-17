@@ -5,6 +5,8 @@ import { paperTradingAPI, promptsAPI, type PaperTradingSessionConfig } from '../
 import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
 import { EventTimeline } from './EventTimeline';
+import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
+import { PlanningSettingsPanel, type PlanningSettings } from './PlanningSettingsPanel';
 
 export function PaperTradingControl() {
   const queryClient = useQueryClient();
@@ -16,6 +18,25 @@ export function PaperTradingControl() {
   const [selectedStrategyId, setSelectedStrategyId] = useState('default');
   const [planIntervalHours, setPlanIntervalHours] = useState(4);
   const [enableDiscovery, setEnableDiscovery] = useState(false);
+
+  // Aggressive settings state (defaults match conservative settings)
+  const [aggressiveSettings, setAggressiveSettings] = useState<AggressiveSettings>({
+    max_position_risk_pct: 2.0,
+    max_symbol_exposure_pct: 25.0,
+    max_portfolio_exposure_pct: 80.0,
+    max_daily_loss_pct: 3.0,
+    min_hold_hours: 2.0,
+    min_flat_hours: 2.0,
+    confidence_override_threshold: 'A',
+    min_price_move_pct: 0.5,
+    walk_away_enabled: false,
+    walk_away_profit_target_pct: 25.0,
+    flatten_positions_daily: false,
+  });
+  const [planningSettings, setPlanningSettings] = useState<PlanningSettings>({
+    max_trades_per_day: 10,
+    max_triggers_per_symbol_per_day: 5,
+  });
 
   // Selected session
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
@@ -111,6 +132,9 @@ export function PaperTradingControl() {
         strategy_prompt: strategyPrompt,
         plan_interval_hours: planIntervalHours,
         enable_symbol_discovery: enableDiscovery,
+        // Aggressive trading settings
+        ...aggressiveSettings,
+        ...planningSettings,
       };
 
       return paperTradingAPI.startSession(config);
@@ -275,6 +299,19 @@ export function PaperTradingControl() {
                 Enable daily symbol discovery (add high-volume pairs automatically)
               </label>
             </div>
+
+            {/* Aggressive Trading Settings */}
+            <AggressiveSettingsPanel
+              config={aggressiveSettings}
+              onChange={setAggressiveSettings}
+              disabled={isRunning}
+            />
+            <PlanningSettingsPanel
+              config={planningSettings}
+              onChange={setPlanningSettings}
+              disabled={isRunning}
+              showLlmCallsPerDay={false}
+            />
 
             {/* Action Buttons */}
             <div className="flex gap-3 pt-4">

@@ -43,6 +43,33 @@ export interface BacktestConfig {
   strategy?: string;
   strategy_id?: string;
   strategy_prompt?: string;
+
+  // Risk Engine Parameters
+  max_position_risk_pct?: number;
+  max_symbol_exposure_pct?: number;
+  max_portfolio_exposure_pct?: number;
+  max_daily_loss_pct?: number;
+  max_daily_risk_budget_pct?: number;
+
+  // Trade Frequency Parameters
+  max_trades_per_day?: number;
+  max_triggers_per_symbol_per_day?: number;
+  llm_calls_per_day?: number;
+
+  // Whipsaw / Anti-Flip-Flop Controls
+  min_hold_hours?: number;
+  min_flat_hours?: number;
+  confidence_override_threshold?: string | null;
+
+  // Execution Gating
+  min_price_move_pct?: number;
+
+  // Walk-Away Threshold
+  walk_away_enabled?: boolean;
+  walk_away_profit_target_pct?: number;
+
+  // Flattening Options
+  flatten_positions_daily?: boolean;
 }
 
 export interface BacktestCreateResponse {
@@ -59,6 +86,30 @@ export interface BacktestStatus {
   completed_at?: string;
   candles_total?: number;
   candles_processed?: number;
+  error?: string;
+}
+
+export interface BacktestListItem {
+  run_id: string;
+  status: string;
+  progress: number;
+  started_at?: string;
+  completed_at?: string;
+  // Configuration metadata
+  symbols: string[];
+  strategy?: string;
+  strategy_id?: string;
+  timeframe?: string;
+  start_date?: string;
+  end_date?: string;
+  initial_cash?: number;
+  // Performance metrics (for completed backtests)
+  return_pct?: number;
+  final_equity?: number;
+  total_trades?: number;
+  sharpe_ratio?: number;
+  max_drawdown_pct?: number;
+  win_rate?: number;
   error?: string;
 }
 
@@ -206,8 +257,8 @@ export const backtestAPI = {
     return response.data;
   },
 
-  // List all backtests
-  list: async (status?: string, limit = 50): Promise<BacktestStatus[]> => {
+  // List all backtests with rich metadata
+  list: async (status?: string, limit = 50): Promise<BacktestListItem[]> => {
     const response = await api.get('/backtests', {
       params: { status, limit },
     });
@@ -257,7 +308,7 @@ export const backtestAPI = {
     return response;
   },
 
-  listBacktests: async (status?: string, limit = 50) => {
+  listBacktests: async (status?: string, limit = 50): Promise<BacktestListItem[]> => {
     const response = await api.get('/backtests', {
       params: { status, limit },
     });
@@ -438,6 +489,33 @@ export interface PaperTradingSessionConfig {
   enable_symbol_discovery?: boolean;
   min_volume_24h?: number;
   llm_model?: string;
+
+  // Risk Engine Parameters
+  max_position_risk_pct?: number;
+  max_symbol_exposure_pct?: number;
+  max_portfolio_exposure_pct?: number;
+  max_daily_loss_pct?: number;
+  max_daily_risk_budget_pct?: number;
+
+  // Trade Frequency Parameters
+  max_trades_per_day?: number;
+  max_triggers_per_symbol_per_day?: number;
+  llm_calls_per_day?: number;
+
+  // Whipsaw / Anti-Flip-Flop Controls
+  min_hold_hours?: number;
+  min_flat_hours?: number;
+  confidence_override_threshold?: string | null;
+
+  // Execution Gating
+  min_price_move_pct?: number;
+
+  // Walk-Away Threshold
+  walk_away_enabled?: boolean;
+  walk_away_profit_target_pct?: number;
+
+  // Flattening Options
+  flatten_positions_daily?: boolean;
 }
 
 export interface PaperTradingSession {
