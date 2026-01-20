@@ -27,6 +27,7 @@ class EventResponse(BaseModel):
 
     event_id: str
     timestamp: datetime
+    emitted_at: Optional[datetime] = None
     source: str
     type: str
     payload: dict
@@ -60,24 +61,22 @@ async def get_events(
     Returns event log with support for multiple filter criteria.
     """
     try:
-        events = _materializer.list_events(limit=limit)
-
-        # Apply filters
-        if type:
-            events = [e for e in events if e.type == type]
-        if source:
-            events = [e for e in events if e.source == source]
-        if run_id:
-            events = [e for e in events if e.run_id == run_id]
-        if correlation_id:
-            events = [e for e in events if e.correlation_id == correlation_id]
-        if since:
-            events = [e for e in events if e.ts >= since]
+        events = _materializer.list_events(
+            limit=limit,
+            event_type=type,
+            source=source,
+            run_id=run_id,
+            correlation_id=correlation_id,
+            since=since,
+            order="desc",
+            order_by="emitted_at",
+        )
 
         return [
             EventResponse(
                 event_id=event.event_id,
                 timestamp=event.ts,
+                emitted_at=event.emitted_at,
                 source=event.source,
                 type=event.type,
                 payload=event.payload,
@@ -101,18 +100,17 @@ async def get_event_chain(correlation_id: str):
     (e.g., intent → plan → decision → block/fill).
     """
     try:
-        events = _materializer.list_events(limit=500)
-
-        # Filter by correlation_id
-        chain_events = [e for e in events if e.correlation_id == correlation_id]
-
-        # Sort by timestamp
-        chain_events.sort(key=lambda e: e.ts)
+        chain_events = _materializer.list_events(
+            limit=500,
+            correlation_id=correlation_id,
+            order="asc",
+        )
 
         return [
             EventResponse(
                 event_id=event.event_id,
                 timestamp=event.ts,
+                emitted_at=event.emitted_at,
                 source=event.source,
                 type=event.type,
                 payload=event.payload,

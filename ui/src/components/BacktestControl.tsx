@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info } from 'lucide-react';
-import { backtestAPI, promptsAPI, type BacktestConfig } from '../lib/api';
+import { backtestAPI, promptsAPI, regimesAPI, type BacktestConfig } from '../lib/api';
 import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
 import { BACKTEST_PRESETS } from '../lib/presets';
 import { MarketTicker } from './MarketTicker';
@@ -24,6 +24,25 @@ export function BacktestControl() {
     end_date: '2024-01-31',
     initial_cash: 10000,
     strategy: 'baseline',
+    use_llm_shim: false,
+    use_judge_shim: false,
+    // Planning settings defaults (trade-friendly)
+    max_trades_per_day: 30,
+    max_triggers_per_symbol_per_day: 10,
+    judge_cadence_hours: 4,
+    // Risk settings defaults
+    max_position_risk_pct: 3.0,
+    max_symbol_exposure_pct: 40.0,
+    max_portfolio_exposure_pct: 100.0,
+    max_daily_loss_pct: 5.0,
+    // Whipsaw defaults (relaxed for more trades)
+    min_hold_hours: 0.5,
+    min_flat_hours: 0.25,
+    // Execution gating (low threshold to allow trades)
+    min_price_move_pct: 0.15,
+    // Debug sampling - enable by default to diagnose trigger issues
+    debug_trigger_sample_rate: 0.1,
+    debug_trigger_max_samples: 100,
   };
   const [config, setConfig] = useState<BacktestConfig>(defaultConfig);
   const [symbolsInput, setSymbolsInput] = useState(defaultConfig.symbols.join(', '));
@@ -36,6 +55,10 @@ export function BacktestControl() {
     // Restore from localStorage on mount
     return localStorage.getItem('selectedBacktestRunId');
   });
+  const clearSelectedRun = () => {
+    setSelectedRun(null);
+    localStorage.removeItem('selectedBacktestRunId');
+  };
 
   // Fetch available strategies
   const { data: strategiesData } = useQuery({
@@ -43,6 +66,13 @@ export function BacktestControl() {
     queryFn: () => promptsAPI.listStrategies(),
   });
   const strategies = strategiesData?.strategies || [];
+
+  // Fetch available market regimes
+  const { data: regimesData } = useQuery({
+    queryKey: ['regimes'],
+    queryFn: () => regimesAPI.list(),
+  });
+  const regimes = regimesData?.regimes || [];
 
   // Load preset configuration
   const loadPreset = (presetId: string) => {
@@ -53,6 +83,18 @@ export function BacktestControl() {
       setSymbolsError(null);
       setAllocationInput('');
       setAllocationError(null);
+    }
+  };
+
+  // Load regime configuration (auto-fill dates)
+  const loadRegime = (regimeId: string) => {
+    const regime = regimes.find((r) => r.id === regimeId);
+    if (regime) {
+      setConfig({
+        ...config,
+        start_date: regime.start_date,
+        end_date: regime.end_date,
+      });
     }
   };
 
@@ -337,6 +379,46 @@ export function BacktestControl() {
               </div>
             </div>
 
+            {/* Market Regime Selector */}
+            <div className="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800">
+              <label className="block text-sm font-medium mb-2 text-amber-800 dark:text-amber-300">
+                Market Regime (Quick Select)
+              </label>
+              <select
+                onChange={(e) => e.target.value && loadRegime(e.target.value)}
+                className="w-full px-3 py-2 border border-amber-300 dark:border-amber-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                disabled={isRunning}
+                defaultValue=""
+              >
+                <option value="">-- Select a market regime --</option>
+                {regimes.map((regime) => (
+                  <option key={regime.id} value={regime.id}>
+                    {regime.name} ({regime.start_date} to {regime.end_date})
+                  </option>
+                ))}
+              </select>
+              {regimes.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-3 text-xs text-amber-600 dark:text-amber-400">
+                  <span className="font-semibold">Legend:</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2 h-2 bg-green-500 rounded-full"></span> Bull
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2 h-2 bg-red-500 rounded-full"></span> Bear
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2 h-2 bg-yellow-500 rounded-full"></span> Volatile
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-2 h-2 bg-gray-400 rounded-full"></span> Ranging
+                  </span>
+                </div>
+              )}
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-2">
+                Selecting a regime will auto-fill the date range above
+              </p>
+            </div>
+
             {/* Initial Cash */}
             <div>
               <label className="block text-sm font-medium mb-2">Initial Cash</label>
@@ -426,6 +508,43 @@ export function BacktestControl() {
               />
             )}
 
+            {config.strategy === 'llm_strategist' && (
+              <div className="p-4 bg-slate-50 dark:bg-slate-900/20 rounded-lg border border-slate-200 dark:border-slate-700">
+                <label className="block text-sm font-medium mb-2">
+                  LLM Shim Mode
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    id="useStrategistShim"
+                    checked={config.use_llm_shim ?? false}
+                    onChange={(e) => setConfig({ ...config, use_llm_shim: e.target.checked })}
+                    className="w-4 h-4 text-blue-600 rounded"
+                    disabled={isRunning}
+                  />
+                  <label htmlFor="useStrategistShim" className="text-sm">
+                    Use strategist LLM shim (canned response)
+                  </label>
+                </div>
+                <div className="flex items-center gap-3 mt-2">
+                  <input
+                    type="checkbox"
+                    id="useJudgeShim"
+                    checked={config.use_judge_shim ?? false}
+                    onChange={(e) => setConfig({ ...config, use_judge_shim: e.target.checked })}
+                    className="w-4 h-4 text-blue-600 rounded"
+                    disabled={isRunning}
+                  />
+                  <label htmlFor="useJudgeShim" className="text-sm">
+                    Use judge shim (canned feedback)
+                  </label>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                  Shim mode skips real LLM calls so you can validate order-of-operations in the backtest flow.
+                </p>
+              </div>
+            )}
+
             {/* Submit Button */}
             <button
               type="submit"
@@ -462,7 +581,18 @@ export function BacktestControl() {
 
         {/* Status Panel */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-          <h2 className="text-xl font-semibold mb-4">Status</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">Status</h2>
+            {selectedRun && (
+              <button
+                type="button"
+                onClick={clearSelectedRun}
+                className="text-xs font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+              >
+                Clear selection
+              </button>
+            )}
+          </div>
 
           {!selectedRun && (
             <div className="text-center py-12 text-gray-500">
@@ -737,7 +867,13 @@ export function BacktestControl() {
         )}
 
         {/* Event Timeline */}
-        <EventTimeline limit={30} runId={selectedRun || undefined} />
+        {selectedRun ? (
+          <EventTimeline limit={30} runId={selectedRun} />
+        ) : (
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 text-sm text-gray-500 dark:text-gray-400">
+            Select a backtest run to view its event timeline.
+          </div>
+        )}
       </div>
     </div>
   );

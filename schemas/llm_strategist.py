@@ -120,6 +120,11 @@ class TriggerCondition(SerializableModel):
     timeframe: str
     entry_rule: str
     exit_rule: str
+    hold_rule: str | None = Field(
+        default=None,
+        description="Optional rule that, when True, suppresses exit_rule to maintain position. "
+        "Use to prevent premature exits from minor fluctuations. Emergency exits still fire."
+    )
     stop_loss_pct: float | None = Field(default=None, ge=0.0)
 
 

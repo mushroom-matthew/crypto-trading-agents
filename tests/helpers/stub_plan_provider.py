@@ -34,7 +34,14 @@ class AlwaysLongPlanProvider:
     def _cache_path(self, run_id: str, plan_date: datetime, llm_input: Any) -> Path:
         return Path(self.cache_dir) / f"{run_id}_{plan_date.date().isoformat()}.json"
 
-    def get_plan(self, run_id: str, plan_date: datetime, llm_input: Any, prompt_template: Optional[str] = None) -> StrategyPlan:
+    def get_plan(
+        self,
+        run_id: str,
+        plan_date: datetime,
+        llm_input: Any,
+        prompt_template: Optional[str] = None,
+        event_ts: Optional[datetime] = None,
+    ) -> StrategyPlan:
         plan = StrategyPlan(
             plan_id=f"plan_{plan_date.isoformat()}",
             run_id=run_id,

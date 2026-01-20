@@ -3,15 +3,120 @@
 from __future__ import annotations
 
 import ast
+import logging
 import re
-from typing import Iterable, List, Set
+from typing import Iterable, List, Optional, Set, Tuple
 
 from schemas.llm_strategist import StrategyPlan, TriggerCondition
 from schemas.compiled_plan import CompiledExpression, CompiledPlan, CompiledTrigger
 
+logger = logging.getLogger(__name__)
+
 
 class TriggerCompilationError(ValueError):
     """Raised when a trigger cannot be compiled deterministically."""
+
+
+class TimeframeMismatchWarning:
+    """Warning about triggers referencing unavailable timeframes."""
+
+    def __init__(self, trigger_id: str, missing_timeframes: Set[str], rule_type: str):
+        self.trigger_id = trigger_id
+        self.missing_timeframes = missing_timeframes
+        self.rule_type = rule_type  # 'entry' or 'exit'
+
+    def __str__(self) -> str:
+        tfs = ", ".join(sorted(self.missing_timeframes))
+        return f"Trigger '{self.trigger_id}' {self.rule_type}_rule references unavailable timeframes: {tfs}"
+
+
+# Pattern to extract timeframe prefixes like tf_4h_, tf_1h_, tf_15m_
+_TIMEFRAME_PREFIX_PATTERN = re.compile(r"tf_(\d+[mhd])_")
+
+
+def extract_referenced_timeframes(expr: str) -> Set[str]:
+    """Extract all timeframe references from an expression.
+
+    Looks for patterns like tf_4h_ema_short, tf_1h_rsi_14, tf_15m_close
+    and extracts the timeframe part (4h, 1h, 15m).
+
+    Args:
+        expr: The trigger rule expression
+
+    Returns:
+        Set of timeframe strings found (e.g., {'4h', '1h', '15m'})
+    """
+    if not expr:
+        return set()
+    return set(_TIMEFRAME_PREFIX_PATTERN.findall(expr))
+
+
+def validate_trigger_timeframes(
+    trigger: TriggerCondition,
+    available_timeframes: Set[str],
+) -> List[TimeframeMismatchWarning]:
+    """Validate that trigger rules only reference available timeframes.
+
+    Args:
+        trigger: The trigger condition to validate
+        available_timeframes: Set of timeframes that are loaded (e.g., {'5m', '1h', '4h'})
+
+    Returns:
+        List of warnings for missing timeframe references
+    """
+    warnings: List[TimeframeMismatchWarning] = []
+
+    # Check entry rule
+    entry_timeframes = extract_referenced_timeframes(trigger.entry_rule)
+    missing_entry = entry_timeframes - available_timeframes
+    if missing_entry:
+        warnings.append(TimeframeMismatchWarning(trigger.id, missing_entry, "entry"))
+
+    # Check exit rule
+    exit_timeframes = extract_referenced_timeframes(trigger.exit_rule)
+    missing_exit = exit_timeframes - available_timeframes
+    if missing_exit:
+        warnings.append(TimeframeMismatchWarning(trigger.id, missing_exit, "exit"))
+
+    return warnings
+
+
+def validate_plan_timeframes(
+    plan: StrategyPlan,
+    available_timeframes: Set[str],
+) -> Tuple[List[TimeframeMismatchWarning], List[str]]:
+    """Validate all triggers in a plan for timeframe compatibility.
+
+    Args:
+        plan: The strategy plan to validate
+        available_timeframes: Set of available timeframes
+
+    Returns:
+        Tuple of (warnings, blocked_trigger_ids)
+        - warnings: All timeframe mismatch warnings
+        - blocked_trigger_ids: IDs of triggers that will be blocked due to missing timeframes
+    """
+    all_warnings: List[TimeframeMismatchWarning] = []
+    blocked_ids: List[str] = []
+
+    for trigger in plan.triggers:
+        warnings = validate_trigger_timeframes(trigger, available_timeframes)
+        all_warnings.extend(warnings)
+
+        # If any warning exists, this trigger will likely fail to fire
+        if warnings:
+            blocked_ids.append(trigger.id)
+            for w in warnings:
+                logger.warning(
+                    "Trigger '%s' references unavailable timeframes %s in %s_rule; "
+                    "trigger may never fire. Available: %s",
+                    trigger.id,
+                    sorted(w.missing_timeframes),
+                    w.rule_type,
+                    sorted(available_timeframes),
+                )
+
+    return all_warnings, blocked_ids
 
 
 _ALLOWED_NODES = (

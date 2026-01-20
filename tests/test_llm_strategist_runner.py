@@ -23,7 +23,7 @@ class StubPlanProvider:
         self.cache_dir = Path(".cache/strategy_plans")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_plan(self, run_id, plan_date, llm_input, prompt_template=None):  # noqa: D401
+    def get_plan(self, run_id, plan_date, llm_input, prompt_template=None, event_ts=None):  # noqa: D401
         return self.plan
 
     def _cache_path(self, run_id, plan_date, llm_input):

@@ -70,6 +70,8 @@ class TriggerEngine:
         trade_cooldown_bars: int = 2,
         debug_sample_rate: float = 0.0,
         debug_max_samples: int = 100,
+        prioritize_by_confidence: bool = True,
+        max_triggers_per_symbol_per_bar: int = 1,
     ) -> None:
         """Initialize the trigger engine.
 
@@ -90,6 +92,10 @@ class TriggerEngine:
             debug_sample_rate: Probability (0.0-1.0) of sampling trigger evaluations for debugging.
                 Set to 0.0 to disable sampling (default). Set to 1.0 to sample all evaluations.
             debug_max_samples: Maximum number of samples to collect (default: 100).
+            prioritize_by_confidence: If True, evaluate triggers in confidence order (A→B→C)
+                and stop evaluating once a trigger fires for a symbol. Prevents competing signals.
+            max_triggers_per_symbol_per_bar: Maximum triggers to fire per symbol per bar (default: 1).
+                Prevents cascade of competing signals.
         """
         self.plan = plan
         self.risk_engine = risk_engine
@@ -98,10 +104,14 @@ class TriggerEngine:
         self.confidence_override_threshold = confidence_override_threshold
         self.min_hold_bars = max(0, min_hold_bars)
         self.trade_cooldown_bars = max(0, trade_cooldown_bars)
+        self.prioritize_by_confidence = prioritize_by_confidence
+        self.max_triggers_per_symbol_per_bar = max(1, max_triggers_per_symbol_per_bar)
         # Store trigger confidence for deduplication
         self._trigger_confidence: dict[str, Literal["A", "B", "C"] | None] = {
             t.id: t.confidence_grade for t in plan.triggers
         }
+        # Pre-sort triggers by confidence for prioritized evaluation
+        self._sorted_triggers = self._sort_triggers_by_confidence(plan.triggers)
         # Track position entry bar index for minimum hold enforcement
         self._position_entry_bar: dict[str, int] = {}
         # Track last trade bar index for cooldown enforcement
@@ -112,6 +122,14 @@ class TriggerEngine:
         self.debug_sample_rate = max(0.0, min(1.0, debug_sample_rate))
         self.debug_max_samples = debug_max_samples
         self.evaluation_samples: List[TriggerEvaluationSample] = []
+
+    def _sort_triggers_by_confidence(self, triggers: Iterable[TriggerCondition]) -> List[TriggerCondition]:
+        """Sort triggers by confidence grade (A first, then B, then C, then None)."""
+        return sorted(
+            triggers,
+            key=lambda t: self.CONFIDENCE_PRIORITY.get(t.confidence_grade, 0),
+            reverse=True,  # Highest priority first
+        )
 
     def _context(
         self,
@@ -275,8 +293,22 @@ class TriggerEngine:
         context = self._context(indicator, asset_state, market_structure, portfolio)
         current_position = self._position_direction(bar.symbol, portfolio)
 
-        for trigger in self.plan.triggers:
+        # Track how many triggers have fired for this symbol this bar
+        # (used for max_triggers_per_symbol_per_bar enforcement)
+        triggers_fired_for_symbol = 0
+
+        # Use sorted triggers if prioritize_by_confidence is enabled
+        trigger_list = self._sorted_triggers if self.prioritize_by_confidence else self.plan.triggers
+
+        for trigger in trigger_list:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
+                continue
+
+            # Early exit if we've hit the max triggers for this symbol
+            if self.prioritize_by_confidence and triggers_fired_for_symbol >= self.max_triggers_per_symbol_per_bar:
+                # Log that we're skipping lower-confidence triggers
+                detail = f"Max triggers ({self.max_triggers_per_symbol_per_bar}) already fired for {bar.symbol}"
+                self._record_block(block_entries, trigger, "SIGNAL_PRIORITY", detail, bar)
                 continue
 
             # Exit rule evaluation
@@ -296,6 +328,22 @@ class TriggerEngine:
                 continue
 
             if exit_fired:
+                # Check if hold_rule suppresses this exit (unless emergency category)
+                if trigger.hold_rule and trigger.category != "emergency_exit":
+                    try:
+                        hold_active = self.evaluator.evaluate(trigger.hold_rule, context)
+                        if hold_active:
+                            # Hold rule active - suppress exit to maintain position
+                            detail = f"Hold rule active ('{trigger.hold_rule}'), suppressing exit"
+                            self._record_block(block_entries, trigger, "HOLD_RULE", detail, bar)
+                            continue
+                    except MissingIndicatorError:
+                        # If hold rule can't evaluate due to missing indicator, allow exit
+                        pass
+                    except RuleSyntaxError:
+                        # If hold rule has syntax error, allow exit
+                        pass
+
                 # Check minimum hold period before allowing exit
                 if self._is_within_hold_period(trigger.symbol):
                     detail = f"Position held for less than {self.min_hold_bars} bars"
@@ -304,6 +352,7 @@ class TriggerEngine:
                 exit_order = self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_exit", block_entries)
                 if exit_order:
                     orders.append(exit_order)
+                    triggers_fired_for_symbol += 1
                     continue
 
             # Entry rule evaluation
@@ -326,6 +375,7 @@ class TriggerEngine:
                 entry = self._entry_order(trigger, indicator, portfolio, bar, block_entries)
                 if entry:
                     orders.append(entry)
+                    triggers_fired_for_symbol += 1
 
         # Deduplicate orders per symbol with EXIT PRIORITY:
         # If both exit and entry orders exist for same symbol, only keep the exit.

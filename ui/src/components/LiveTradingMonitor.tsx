@@ -197,6 +197,7 @@ export function LiveTradingMonitor() {
     queryFn: liveAPI.getBlockReasons,
     refetchInterval: 10000,
   });
+  const liveRunId = blockReasons?.run_id;
 
   // Merge WebSocket data with polling data
   const displayPortfolio = livePortfolio || portfolio;
@@ -456,7 +457,13 @@ export function LiveTradingMonitor() {
       )}
 
         {/* Event Timeline */}
-        <EventTimeline limit={30} />
+        {liveRunId ? (
+          <EventTimeline limit={30} runId={liveRunId} />
+        ) : (
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 text-sm text-gray-500 dark:text-gray-400">
+            Waiting for an active live run to show the event timeline.
+          </div>
+        )}
       </div>
     </div>
   );

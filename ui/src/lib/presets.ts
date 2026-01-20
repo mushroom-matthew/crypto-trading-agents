@@ -96,7 +96,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       // High trade frequency
       max_trades_per_day: 50,
       max_triggers_per_symbol_per_day: 15,
-      llm_calls_per_day: 4,
+      judge_cadence_hours: 4,
       // Whipsaw protection DISABLED for scalping
       min_hold_hours: 0,
       min_flat_hours: 0,
@@ -128,7 +128,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       // High trade frequency
       max_trades_per_day: 30,
       max_triggers_per_symbol_per_day: 10,
-      llm_calls_per_day: 3,
+      judge_cadence_hours: 6,
       // Minimal whipsaw protection
       min_hold_hours: 0.25,  // 15 minutes
       min_flat_hours: 0.25,
@@ -160,7 +160,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       // High trade frequency
       max_trades_per_day: 30,
       max_triggers_per_symbol_per_day: 10,
-      llm_calls_per_day: 3,
+      judge_cadence_hours: 6,
       // Minimal whipsaw protection
       min_hold_hours: 0.25,
       min_flat_hours: 0.25,
@@ -192,7 +192,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       // Low trade frequency
       max_trades_per_day: 10,
       max_triggers_per_symbol_per_day: 5,
-      llm_calls_per_day: 1,
+      judge_cadence_hours: 12,
       // Full whipsaw protection
       min_hold_hours: 2.0,
       min_flat_hours: 2.0,

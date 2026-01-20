@@ -163,8 +163,10 @@ class StrategyPlanProvider:
         llm_input: LLMInput,
         prompt_template: str | None = None,
         use_vector_store: bool = False,
+        event_ts: datetime | None = None,
     ) -> StrategyPlan:
         cache_path = self._cache_path(run_id, plan_date, llm_input)
+        emit_ts = event_ts or plan_date
         cached = self._load_cached(cache_path)
         if cached:
             plan = self._enrich_plan(cached, llm_input)
@@ -179,7 +181,7 @@ class StrategyPlanProvider:
                 "raw_output": None,
             }
             object.__setattr__(plan, "_llm_meta", self.last_generation_info)
-            self._emit_plan_generated(plan, llm_input, run_id)
+            self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
             return plan
         date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
@@ -194,6 +196,7 @@ class StrategyPlanProvider:
             prompt_hash=input_hash,
             metadata=metadata,
             use_vector_store=use_vector_store,
+            event_ts=emit_ts,
         )
         plan = self._enrich_plan(plan, llm_input)
         plan = plan.model_copy(update={"run_id": run_id})
@@ -204,7 +207,7 @@ class StrategyPlanProvider:
         meta = getattr(self.llm_client, "last_generation_info", {}) or {}
         self.last_generation_info = meta
         object.__setattr__(plan, "_llm_meta", meta)
-        self._emit_plan_generated(plan, llm_input, run_id)
+        self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
         return plan
 
     def _enrich_plan(self, plan: StrategyPlan, llm_input: LLMInput) -> StrategyPlan:
@@ -345,7 +348,14 @@ class StrategyPlanProvider:
             **_prompt_metadata(prompt_template),
         }
 
-    def _emit_plan_generated(self, plan: StrategyPlan, llm_input: LLMInput, run_id: str) -> None:
+    def _emit_plan_generated(
+        self,
+        plan: StrategyPlan,
+        llm_input: LLMInput,
+        run_id: str,
+        *,
+        event_ts: datetime | None = None,
+    ) -> None:
         try:
             trigger_summary = [
                 {
@@ -376,9 +386,14 @@ class StrategyPlanProvider:
                 "source": (self.last_generation_info or {}).get("source"),
                 "llm_meta": self.last_generation_info,
             }
+            ts = event_ts
+            if ts is None:
+                ts = plan.generated_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
             event = Event(
                 event_id=str(uuid4()),
-                ts=datetime.now(timezone.utc),
+                ts=ts,
                 source="llm_strategist",
                 type="plan_generated",  # type: ignore[arg-type]
                 payload=payload,

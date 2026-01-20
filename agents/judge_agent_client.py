@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
@@ -185,6 +186,127 @@ class JudgeAgent:
                 "error": str(exc)
             }
     
+    async def collect_strategy_context(self) -> Dict[str, Any]:
+        """Collect strategy configuration context from available workflows."""
+        context = {
+            "strategy_context": "No active strategy configuration found.",
+            "risk_parameters": "No risk parameters configured.",
+            "trigger_summary": "No active triggers.",
+            "execution_settings": "Default execution settings.",
+        }
+
+        try:
+            # Try to get strategy specs from StrategySpecWorkflow
+            try:
+                spec_handle = self.temporal_client.get_workflow_handle("strategy-spec")
+                all_specs = await spec_handle.query("list_strategy_specs")
+                if all_specs:
+                    spec_lines = []
+                    for key, spec in all_specs.items():
+                        spec_lines.append(f"- {key}: mode={spec.get('mode')}, "
+                                        f"entry_conditions={len(spec.get('entry_conditions', []))}, "
+                                        f"exit_conditions={len(spec.get('exit_conditions', []))}")
+                        if spec.get('risk'):
+                            risk = spec['risk']
+                            spec_lines.append(f"  Risk: max_fraction={risk.get('max_fraction_of_balance')}, "
+                                            f"risk_per_trade={risk.get('risk_per_trade_fraction')}, "
+                                            f"max_drawdown={risk.get('max_drawdown_pct')}%")
+                    context["strategy_context"] = "\n".join(spec_lines)
+            except Exception:
+                pass  # Workflow not found
+
+            # Try to get user preferences which may include strategy settings
+            prefs = await self.get_user_preferences()
+            if prefs:
+                pref_lines = [
+                    f"- Risk tolerance: {prefs.get('risk_tolerance', 'moderate')}",
+                    f"- Trading style: {prefs.get('trading_style', 'balanced')}",
+                    f"- Experience level: {prefs.get('experience_level', 'intermediate')}",
+                ]
+                if prefs.get('max_position_risk_pct'):
+                    pref_lines.append(f"- Max position risk: {prefs.get('max_position_risk_pct')}%")
+                if prefs.get('max_daily_loss_pct'):
+                    pref_lines.append(f"- Max daily loss: {prefs.get('max_daily_loss_pct')}%")
+                if prefs.get('min_hold_hours'):
+                    pref_lines.append(f"- Min hold hours: {prefs.get('min_hold_hours')}")
+                if prefs.get('walk_away_profit_target_pct'):
+                    pref_lines.append(f"- Walk-away target: {prefs.get('walk_away_profit_target_pct')}%")
+                context["execution_settings"] = "\n".join(pref_lines)
+
+            # Try to get execution agent state for active triggers/settings
+            try:
+                exec_handle = self.temporal_client.get_workflow_handle("execution-agent")
+                exec_state = await exec_handle.query("get_execution_state")
+                if exec_state:
+                    state_lines = []
+                    if exec_state.get('max_trades_per_day'):
+                        state_lines.append(f"- Max trades/day: {exec_state.get('max_trades_per_day')}")
+                    if exec_state.get('max_triggers_per_symbol_per_day'):
+                        state_lines.append(f"- Max triggers/symbol/day: {exec_state.get('max_triggers_per_symbol_per_day')}")
+                    if exec_state.get('risk_mode'):
+                        state_lines.append(f"- Risk mode: {exec_state.get('risk_mode')}")
+                    if state_lines:
+                        context["risk_parameters"] = "\n".join(state_lines)
+            except Exception:
+                pass  # Workflow not found
+
+        except Exception as exc:
+            logger.warning("Failed to collect strategy context: %s", exc)
+
+        return context
+
+    def _get_fallback_prompt(self) -> str:
+        """Fallback prompt if template file is not found."""
+        return """You are an expert performance judge for a multi-asset crypto strategist.
+
+STRATEGY CONFIGURATION:
+{strategy_context}
+
+RISK PARAMETERS:
+{risk_parameters}
+
+ACTIVE TRIGGERS:
+{trigger_summary}
+
+EXECUTION SETTINGS:
+{execution_settings}
+
+PERFORMANCE SNAPSHOT:
+{performance_summary}
+
+RECENT TRANSACTIONS:
+{transaction_summary}
+
+TRADING STATISTICS:
+- Total transactions: {total_transactions}
+- Buy orders: {buy_count}
+- Sell orders: {sell_count}
+- Symbols traded: {symbols}
+
+Respond with **two sections only**:
+
+NOTES:
+- Provide up to five concise sentences on strategy alignment, risk adherence, and execution quality.
+
+JSON:
+{{
+  "score": <float 0-100>,
+  "constraints": {{
+    "max_trades_per_day": null,
+    "max_triggers_per_symbol_per_day": null,
+    "risk_mode": "normal",
+    "disabled_trigger_ids": [],
+    "disabled_categories": []
+  }},
+  "strategist_constraints": {{
+    "must_fix": [],
+    "vetoes": [],
+    "boost": [],
+    "regime_correction": null,
+    "sizing_adjustments": {{}}
+  }}
+}}"""
+
     async def analyze_decision_quality(self, transaction_history: List[Dict], performance_snapshot: Dict[str, Any]) -> Dict:
         """Use LLM to analyze decision quality from transaction patterns."""
 
@@ -199,6 +321,9 @@ class JudgeAgent:
                 "recommendations": ["Wait for new trades before drawing conclusions"],
             }
 
+        # Collect strategy context for comprehensive evaluation
+        strategy_context = await self.collect_strategy_context()
+
         # Prepare transaction summary for LLM analysis
         recent_transactions = transaction_history[:20]  # Last 20 transactions
         transaction_summary = "\n".join([
@@ -207,7 +332,7 @@ class JudgeAgent:
             f"Cost: ${tx['cost']:.2f}"
             for tx in recent_transactions
         ])
-        
+
         # Calculate basic statistics
         symbols = list(set(tx['symbol'] for tx in transaction_history))
         buy_count = len([tx for tx in transaction_history if tx['side'] == 'BUY'])
@@ -230,61 +355,26 @@ class JudgeAgent:
         ]
         performance_summary = "\n".join(perf_lines)
 
-        analysis_prompt = f"""
-You are an expert performance judge for a multi-asset crypto strategist. Use the factual data below to critique execution quality, trigger discipline, volatility handling, and adaptability.
+        # Load enhanced prompt template
+        prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "llm_judge_prompt.txt"
+        try:
+            prompt_template = prompt_path.read_text()
+        except Exception:
+            # Fallback to embedded prompt if file not found
+            prompt_template = self._get_fallback_prompt()
 
-PERFORMANCE SNAPSHOT:
-{performance_summary}
-
-RECENT TRANSACTIONS:
-{transaction_summary}
-
-TRADING STATISTICS:
-- Total transactions: {len(transaction_history)}
-- Buy orders: {buy_count}
-- Sell orders: {sell_count}
-- Symbols traded: {', '.join(symbols)}
-
-MARKET-STRUCTURE TELEMETRY (DRAFT):
-- When payloads include market_structure (nearest_support/resistance, distances, trend, recent_tests), use it to judge if fills were taken into strength or weakness.
-- Reduce allowed risk or cap triggers when price is mid-range without a reclaim/test edge, or when support/resistance has been tapped repeatedly without resolution.
-- Reward plans that enter near defended support in uptrends or after reclaiming prior resistance; flag chasing into resistance or weak supports as veto candidates.
-
-FACTOR EXPOSURES (DRAFT):
-- When factor_exposures are present (beta_market, beta_eth_beta, idiosyncratic_vol), prefer neutral or diversified beta when risk is elevated.
-- If auto_hedge_mode == "market", nudge sizing toward beta ≈ 0; otherwise, veto piling into high-beta longs without offsets.
-
-Respond with **two sections only**:
-
-NOTES:
-- Provide up to five concise sentences covering momentum/timing, sizing discipline, volatility handling, and any regime corrections needed. Reference concrete metrics above when possible.
-
-JSON:
-{{
-  "score": <float 0-100 representing overall decision quality>,
-  "constraints": {{
-    "max_trades_per_day": <integer or null>,
-    "max_triggers_per_symbol_per_day": <integer or null>,
-    "risk_mode": "normal" | "conservative" | "emergency",
-    "disabled_trigger_ids": ["trigger_id"],
-    "disabled_categories": ["trend_continuation", "reversal", "volatility_breakout", "mean_reversion", "emergency_exit", "other"]
-  }},
-  "strategist_constraints": {{
-    "must_fix": ["text"],
-    "vetoes": ["text"],
-    "boost": ["text"],
-    "regime_correction": "<text or null>",
-    "sizing_adjustments": {{"SYMBOL": "<instruction>"}}
-  }}
-}}
-
-Rules:
-- Always include every key above even if arrays are empty.
-- Use null for unknown numeric limits.
-- disabled_trigger_ids should name concrete trigger IDs observed; leave empty if none.
-- disabled_categories must use the provided category names.
-- Base risk_mode on drawdown/volatility evidence from the snapshot.
-- Keep the JSON compact, valid, and free of commentary after the closing brace."""
+        analysis_prompt = prompt_template.format(
+            strategy_context=strategy_context.get("strategy_context", "No strategy context available."),
+            risk_parameters=strategy_context.get("risk_parameters", "No risk parameters configured."),
+            trigger_summary=strategy_context.get("trigger_summary", "No active triggers."),
+            execution_settings=strategy_context.get("execution_settings", "Default execution settings."),
+            performance_summary=performance_summary,
+            transaction_summary=transaction_summary,
+            total_transactions=len(transaction_history),
+            buy_count=buy_count,
+            sell_count=sell_count,
+            symbols=', '.join(symbols),
+        )
         
         try:
             response = openai_client.chat.completions.create(

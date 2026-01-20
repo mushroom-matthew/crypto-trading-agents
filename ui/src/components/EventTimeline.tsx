@@ -60,7 +60,7 @@ const EVENT_CONFIG: Record<
 interface EventTimelineProps {
   limit?: number;
   showFilter?: boolean;
-  runId?: string;
+  runId: string;
 }
 
 export function EventTimeline({ limit = 50, showFilter = true, runId }: EventTimelineProps) {
@@ -73,10 +73,11 @@ export function EventTimeline({ limit = 50, showFilter = true, runId }: EventTim
     queryFn: () =>
       agentAPI.getEvents({
         type: filterType || undefined,
-        run_id: runId || undefined,
+        run_id: runId,
         limit,
       }),
     refetchInterval: 3000,
+    enabled: !!runId,
   });
 
   const toggleExpanded = (eventId: string) => {
@@ -174,8 +175,13 @@ export function EventTimeline({ limit = 50, showFilter = true, runId }: EventTim
                             </span>
                           </div>
                           <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                            {formatDateTime(event.timestamp)}
+                            Sim: {formatDateTime(event.timestamp)}
                           </div>
+                          {event.emitted_at && (
+                            <div className="text-xs text-gray-400 dark:text-gray-500">
+                              Emitted: {formatDateTime(event.emitted_at)}
+                            </div>
+                          )}
                         </div>
 
                         {/* Expand/Collapse button */}
@@ -213,6 +219,14 @@ export function EventTimeline({ limit = 50, showFilter = true, runId }: EventTim
                                 <span className="text-gray-500">Correlation:</span>{' '}
                                 <span className="text-gray-900 dark:text-gray-100">
                                   {event.correlation_id}
+                                </span>
+                              </div>
+                            )}
+                            {event.emitted_at && (
+                              <div>
+                                <span className="text-gray-500">Emitted:</span>{' '}
+                                <span className="text-gray-900 dark:text-gray-100">
+                                  {formatDateTime(event.emitted_at)}
                                 </span>
                               </div>
                             )}

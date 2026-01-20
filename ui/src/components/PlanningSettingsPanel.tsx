@@ -4,21 +4,21 @@ import { ChevronDown, ChevronUp, Calendar } from 'lucide-react';
 export interface PlanningSettings {
   max_trades_per_day?: number;
   max_triggers_per_symbol_per_day?: number;
-  llm_calls_per_day?: number;
+  judge_cadence_hours?: number;
 }
 
 interface PlanningSettingsPanelProps<T extends PlanningSettings> {
   config: T;
   onChange: (config: T) => void;
   disabled?: boolean;
-  showLlmCallsPerDay?: boolean;
+  showJudgeCadence?: boolean;
 }
 
 export function PlanningSettingsPanel<T extends PlanningSettings>({
   config,
   onChange,
   disabled,
-  showLlmCallsPerDay = true,
+  showJudgeCadence = true,
 }: PlanningSettingsPanelProps<T>) {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -87,16 +87,16 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               />
             </div>
 
-            {showLlmCallsPerDay && (
+            {showJudgeCadence && (
               <div>
                 <label className="block text-sm font-medium mb-1">
-                  LLM Strategy Calls/Day
+                  Judge Cadence (hours)
                 </label>
                 <input
                   type="number"
-                  value={config.llm_calls_per_day ?? 1}
+                  value={config.judge_cadence_hours ?? 4}
                   onChange={(e) =>
-                    onChange({ ...config, llm_calls_per_day: parseInt(e.target.value) })
+                    onChange({ ...config, judge_cadence_hours: parseFloat(e.target.value) })
                   }
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
@@ -104,6 +104,9 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                   step={1}
                   disabled={disabled}
                 />
+                <p className="text-xs text-slate-400 mt-1">
+                  How often judge evaluates strategy quality
+                </p>
               </div>
             )}
           </div>

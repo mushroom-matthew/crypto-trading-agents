@@ -43,6 +43,8 @@ export interface BacktestConfig {
   strategy?: string;
   strategy_id?: string;
   strategy_prompt?: string;
+  use_llm_shim?: boolean;
+  use_judge_shim?: boolean;
 
   // Risk Engine Parameters
   max_position_risk_pct?: number;
@@ -54,7 +56,7 @@ export interface BacktestConfig {
   // Trade Frequency Parameters
   max_trades_per_day?: number;
   max_triggers_per_symbol_per_day?: number;
-  llm_calls_per_day?: number;
+  judge_cadence_hours?: number;
 
   // Whipsaw / Anti-Flip-Flop Controls
   min_hold_hours?: number;
@@ -70,6 +72,10 @@ export interface BacktestConfig {
 
   // Flattening Options
   flatten_positions_daily?: boolean;
+
+  // Debug/Diagnostic Options
+  debug_trigger_sample_rate?: number;
+  debug_trigger_max_samples?: number;
 }
 
 export interface BacktestCreateResponse {
@@ -154,6 +160,7 @@ export interface MarketTick {
 export interface AgentEvent {
   event_id: string;
   timestamp: string;
+  emitted_at?: string;
   source: string;
   type: string;
   payload: Record<string, any>;
@@ -425,6 +432,20 @@ export interface StrategiesListResponse {
   strategies: StrategyInfo[];
 }
 
+// Regime types for market period selection
+export interface RegimeInfo {
+  id: string;
+  name: string;
+  description: string;
+  character: 'bull' | 'bear' | 'volatile' | 'ranging' | 'unknown';
+  start_date: string;
+  end_date: string;
+}
+
+export interface RegimesListResponse {
+  regimes: RegimeInfo[];
+}
+
 export const promptsAPI = {
   // List available prompts
   list: async (): Promise<PromptListResponse> => {
@@ -475,6 +496,14 @@ export const promptsAPI = {
   },
 };
 
+export const regimesAPI = {
+  // List available market regimes
+  list: async (): Promise<RegimesListResponse> => {
+    const response = await api.get('/regimes/');
+    return response.data;
+  },
+};
+
 // ============================================================================
 // Paper Trading Types
 // ============================================================================
@@ -500,7 +529,7 @@ export interface PaperTradingSessionConfig {
   // Trade Frequency Parameters
   max_trades_per_day?: number;
   max_triggers_per_symbol_per_day?: number;
-  llm_calls_per_day?: number;
+  judge_cadence_hours?: number;
 
   // Whipsaw / Anti-Flip-Flop Controls
   min_hold_hours?: number;

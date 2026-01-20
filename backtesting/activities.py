@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -202,6 +203,7 @@ def run_simulation_chunk_activity(
 def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     """Run LLM strategist backtest for the full range (no chunking)."""
     from agents.strategies.llm_client import LLMClient
+    from backtesting.llm_shim import make_strategist_shim_transport
     from backtesting.llm_strategist_runner import LLMStrategistBacktester
     from backtesting.dataset import load_ohlcv
     from data_loader.utils import ensure_utc
@@ -215,8 +217,17 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     initial_cash = config.get("initial_cash", 10000.0)
     initial_allocations = config.get("initial_allocations")
     fee_rate = config.get("fee_rate", 0.001)
-    llm_calls_per_day = int(config.get("llm_calls_per_day", 1))
+    # Adaptive judge workflow parameters
+    # In adaptive mode, judge evaluates at judge_cadence_hours interval
+    # Each judge eval can trigger a strategy update (replan) if score is below threshold
+    judge_cadence_hours = float(config.get("judge_cadence_hours", 4.0))
+    # Number of judge evaluations per day
+    judge_evals_per_day = int(24 / max(1, judge_cadence_hours))
+    # LLM budget = 1 (initial plan) + possible replans (one per judge eval in worst case)
+    llm_calls_per_day = 1 + judge_evals_per_day
     llm_model = config.get("llm_model")
+    use_llm_shim = bool(config.get("use_llm_shim"))
+    use_judge_shim = bool(config.get("use_judge_shim"))
     llm_cache_dir = config.get("llm_cache_dir", ".cache/strategy_plans")
     risk_params = config.get("risk_params")
     timeframes = config.get("timeframes") or [timeframe]
@@ -248,12 +259,32 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     # Vector store for trigger examples
     use_trigger_vector_store = config.get("use_trigger_vector_store", False)
 
+    # Adaptive judge workflow - remaining parameters
+    adaptive_replanning = config.get("adaptive_replanning", True)  # Default: enabled
+    judge_replan_threshold = config.get("judge_replan_threshold", 40.0)
+    judge_check_after_trades = config.get("judge_check_after_trades", 3)
+
     logger.info(
         "Running LLM strategist backtest",
-        extra={"symbols": symbols, "start": start.isoformat(), "end": end.isoformat(), "timeframes": timeframes},
+        extra={
+            "symbols": symbols,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "timeframes": timeframes,
+            "adaptive_replanning": adaptive_replanning,
+            "judge_cadence_hours": judge_cadence_hours,
+            "llm_budget": llm_calls_per_day,
+        },
     )
 
-    llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
+    if use_llm_shim:
+        llm_client = LLMClient(
+            transport=make_strategist_shim_transport(),
+            model=llm_model or "shim-strategist",
+            allow_fallback=False,
+        )
+    else:
+        llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
     market_data: Dict[str, Dict[str, pd.DataFrame]] = {}
     for symbol in symbols:
         df = load_ohlcv(symbol, start, end, timeframe=timeframe)
@@ -263,6 +294,16 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
 
     trade_start = ensure_utc(datetime.fromisoformat(config.get("requested_start_date", config["start_date"])))
     trade_end = ensure_utc(datetime.fromisoformat(config.get("requested_end_date", config["end_date"])))
+
+    # Calculate total candles upfront for accurate progress tracking
+    all_timestamps = sorted({
+        ts for pair_data in market_data.values()
+        for df in pair_data.values()
+        for ts in df.index
+        if trade_start <= ts <= trade_end
+    })
+    total_candles = len(all_timestamps)
+    logger.info("Total candles to process: %d", total_candles)
 
     backtester = LLMStrategistBacktester(
         pairs=symbols,
@@ -293,7 +334,76 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         debug_trigger_max_samples=debug_trigger_max_samples,
         # Vector store for trigger examples
         use_trigger_vector_store=use_trigger_vector_store,
+        # Adaptive judge workflow
+        adaptive_replanning=adaptive_replanning,
+        judge_cadence_hours=judge_cadence_hours,
+        judge_replan_threshold=judge_replan_threshold,
+        judge_check_after_trades=judge_check_after_trades,
+        use_judge_shim=use_judge_shim,
     )
+
+    from temporalio.client import Client
+
+    # Thread-safe progress state for heartbeats
+    progress_state: Dict[str, Any] = {
+        "candles_processed": 0,
+        "candles_total": total_candles,
+        "progress_pct": 0.0,
+        "current_timestamp": None,
+        "recent_events": [],
+    }
+    progress_signal_enabled = True
+    signal_loop: asyncio.AbstractEventLoop | None = None
+    signal_client: Client | None = None
+    signal_handle = None
+    last_signal_payload: Dict[str, Any] = {}
+
+    def _init_progress_signal() -> None:
+        nonlocal signal_loop, signal_client, signal_handle, progress_signal_enabled
+        if not progress_signal_enabled or signal_handle is not None:
+            return
+        try:
+            info = activity.info()
+            temporal_address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+            temporal_namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
+            signal_loop = asyncio.new_event_loop()
+            signal_client = signal_loop.run_until_complete(
+                Client.connect(temporal_address, namespace=temporal_namespace)
+            )
+            signal_handle = signal_client.get_workflow_handle(info.workflow_id)
+        except Exception as exc:
+            progress_signal_enabled = False
+            logger.debug("Progress signal setup failed: %s", exc)
+
+    def _signal_progress() -> None:
+        nonlocal last_signal_payload
+        _init_progress_signal()
+        if not signal_handle or not signal_loop:
+            return
+        raw_pct = progress_state.get("progress_pct", 0.0) or 0.0
+        scaled_progress = 20.0 + min(max(raw_pct, 0.0), 100.0) * 0.75
+        payload = {
+            "progress": scaled_progress,
+            "candles_processed": progress_state.get("candles_processed", 0),
+            "candles_total": progress_state.get("candles_total", total_candles),
+            "timestamp": progress_state.get("current_timestamp"),
+            "current_phase": "Simulating (LLM)",
+        }
+        if payload == last_signal_payload:
+            return
+        last_signal_payload = payload.copy()
+        try:
+            signal_loop.run_until_complete(signal_handle.signal("update_progress", payload))
+        except Exception as exc:
+            logger.debug("Progress signal failed: %s", exc)
+
+    def progress_callback(progress: Dict[str, Any]) -> None:
+        """Update progress state from backtester (thread-safe)."""
+        progress_state.update(progress)
+
+    # Attach progress callback to backtester
+    backtester.progress_callback = progress_callback
+
     result_holder: Dict[str, Any] = {}
     error_holder: Dict[str, Exception] = {}
 
@@ -307,18 +417,36 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     worker_thread.start()
 
     try:
+        _signal_progress()
         while worker_thread.is_alive():
             try:
-                activity.heartbeat({"phase": "llm_backtest", "status": "running"})
+                # Send heartbeat with real progress info
+                activity.heartbeat({
+                    "phase": "llm_backtest",
+                    "status": "running",
+                    "candles_processed": progress_state.get("candles_processed", 0),
+                    "candles_total": progress_state.get("candles_total", total_candles),
+                    "progress_pct": progress_state.get("progress_pct", 0.0),
+                    "current_timestamp": progress_state.get("current_timestamp"),
+                    "current_day": progress_state.get("current_day"),
+                    "recent_events": progress_state.get("recent_events", [])[-5:],
+                })
+                _signal_progress()
             except Exception as exc:
                 logger.warning("LLM backtest heartbeat failed: %s", exc)
-            time.sleep(10)
+            time.sleep(5)  # More frequent heartbeats for better progress updates
         worker_thread.join()
         if error_holder.get("error"):
             raise error_holder["error"]
         result = result_holder["result"]
     finally:
         worker_thread.join(timeout=1)
+        if signal_loop:
+            if signal_client is not None:
+                close_client = getattr(signal_client, "close", None)
+                if callable(close_client):
+                    signal_loop.run_until_complete(close_client())
+            signal_loop.close()
 
     equity_curve = [
         {"timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts), "equity": float(val)}
@@ -356,7 +484,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         "equity_curve": equity_curve,
         "trades": trades,
         "candles_processed": candles_processed,
-        "candles_total": candles_processed,
+        "candles_total": total_candles,  # Use actual total, not processed count
         "has_more": False,
         "summary": summary,
         "llm_data": llm_data,

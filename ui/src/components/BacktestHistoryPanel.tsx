@@ -12,7 +12,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { backtestAPI, type BacktestListItem } from '../lib/api';
-import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
+import { cn, formatPercent, formatDateTime } from '../lib/utils';
 
 export interface BacktestHistoryPanelProps {
   selectedRunId: string | null;
@@ -86,7 +86,13 @@ export function BacktestHistoryPanel({ selectedRunId, onSelect, maxItems = 10 }:
       const response = await backtestAPI.listBacktests(undefined, maxItems);
       return response;
     },
-    refetchInterval: 5000, // Auto-refresh every 5 seconds
+    // Only auto-refresh if there's a running/queued backtest, and less frequently
+    refetchInterval: (query) => {
+      const hasActiveBacktest = query.state.data?.some(
+        (b: BacktestListItem) => b.status === 'running' || b.status === 'queued'
+      );
+      return hasActiveBacktest ? 10000 : false; // 10s when active, disabled otherwise
+    },
   });
 
   if (isLoading) {

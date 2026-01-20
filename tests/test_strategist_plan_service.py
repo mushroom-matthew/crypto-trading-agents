@@ -77,7 +77,7 @@ class StubPlanProvider:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.last_llm_input: LLMInput | None = None
 
-    def get_plan(self, run_id, plan_date, llm_input, prompt_template=None):
+    def get_plan(self, run_id, plan_date, llm_input, prompt_template=None, event_ts=None):
         self.last_llm_input = llm_input
         return self.plan.model_copy(deep=True)
 

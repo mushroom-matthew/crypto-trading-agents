@@ -70,6 +70,10 @@ export default defineConfig({
         target: 'http://localhost:8081',
         changeOrigin: true,
       },
+      '/regimes': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
     },
   },
 });

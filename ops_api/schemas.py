@@ -24,6 +24,7 @@ EventType = Literal[
 class Event(BaseModel):
     event_id: str
     ts: datetime
+    emitted_at: Optional[datetime] = None
     source: str
     type: EventType
     payload: Dict[str, Any]

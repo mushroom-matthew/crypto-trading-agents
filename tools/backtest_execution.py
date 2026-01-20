@@ -9,7 +9,7 @@ Provides durable, fault-tolerant backtest execution with:
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from temporalio import workflow
@@ -229,6 +229,20 @@ class BacktestWorkflow:
         """Run the LLM strategist backtest in a single activity call."""
         self.current_phase = "Simulating (LLM)"
         self.progress = 20.0
+        if self.candles_total == 0:
+            try:
+                from data_loader.utils import ensure_utc, timeframe_to_seconds
+
+                start = config.get("requested_start_date") or config.get("start_date")
+                end = config.get("requested_end_date") or config.get("end_date")
+                timeframe = self._config.get("timeframe", "1h")
+                if start and end and timeframe:
+                    start_dt = ensure_utc(datetime.fromisoformat(start))
+                    end_dt = ensure_utc(datetime.fromisoformat(end))
+                    tf_seconds = timeframe_to_seconds(timeframe)
+                    self.candles_total = int((end_dt - start_dt).total_seconds() // tf_seconds) + 1
+            except Exception as exc:
+                workflow.logger.debug("Failed to estimate candles_total: %s", exc)
 
         result = await workflow.execute_activity(
             run_llm_backtest_activity,
@@ -347,9 +361,18 @@ class BacktestWorkflow:
         Args:
             progress_data: Dict with progress, candles_processed, timestamp, etc.
         """
-        self.progress = progress_data.get("progress", self.progress)
+        progress = progress_data.get("progress")
+        if progress is None:
+            progress = progress_data.get("progress_pct")
+        if progress is not None:
+            self.progress = progress
         self.candles_processed = progress_data.get("candles_processed", self.candles_processed)
-        self.current_timestamp = progress_data.get("timestamp", "")
+        candles_total = progress_data.get("candles_total")
+        if candles_total:
+            self.candles_total = candles_total
+        timestamp = progress_data.get("timestamp") or progress_data.get("current_timestamp")
+        if timestamp:
+            self.current_timestamp = timestamp
         self.current_phase = progress_data.get("current_phase", self.current_phase)
 
     @workflow.query
@@ -371,6 +394,11 @@ class BacktestWorkflow:
             "completed_at": self.completed_at,
             "error": self.error,
             "strategy": self._config.get("strategy"),
+            "timeframe": self._config.get("timeframe"),
+            "start_date": self._config.get("start_date"),
+            "end_date": self._config.get("end_date"),
+            "requested_start_date": self._config.get("requested_start_date"),
+            "requested_end_date": self._config.get("requested_end_date"),
         }
 
     @workflow.query

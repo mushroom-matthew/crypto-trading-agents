@@ -121,13 +121,17 @@ class LLMClient:
         prompt_hash: str | None = None,
         metadata: Dict[str, Any] | None = None,
         use_vector_store: bool = False,
+        event_ts: datetime | None = None,
     ) -> StrategyPlan:
         def _emit_llm_event(payload: Dict[str, Any]) -> None:
             try:
                 store = EventStore()
+                ts = event_ts or datetime.now(timezone.utc)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
                 event = Event(
                     event_id=str(uuid4()),
-                    ts=datetime.now(timezone.utc),
+                    ts=ts,
                     source="llm_client",
                     type="llm_call",  # type: ignore[arg-type]
                     payload=payload,

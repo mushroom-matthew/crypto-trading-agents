@@ -11,12 +11,21 @@ Data usage rules:
 - Do not reference repository files or assume access to external documents.
 - IMPORTANT: All indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1] or indicator[0]. To compare across timeframes, use the tf_<timeframe>_<field> aliases instead.
 
+CRITICAL - Available timeframes constraint:
+- The input includes an "available_timeframes" field listing which timeframes are loaded (e.g., ["5m", "1h", "4h"]).
+- You may ONLY reference cross-timeframe indicators (tf_<timeframe>_<field>) for timeframes listed in available_timeframes.
+- Triggers that reference unavailable timeframes will be BLOCKED and will never fire.
+- Example: If available_timeframes=["5m"], do NOT use tf_4h_ema_short or tf_1h_rsi_14 - only use 5m indicators directly.
+- Example: If available_timeframes=["1h", "4h"], you may use tf_4h_sma_medium and tf_1h_rsi_14, but NOT tf_15m_close.
+- When only a single timeframe is available, omit cross-timeframe confirmations and focus on single-timeframe signals.
+
 Multi-layer synthesis requirements:
-1. Multi-timeframe context: every trigger must reference
-   - 1h structure for signal generation,
-   - 4h confirmation of the prevailing trend or reversal,
-   - optional 15m refinement when tighter timing adds value.
-   Multi-timeframe values are exposed via helper aliases tf_<timeframe>_<field> (e.g., tf_4h_sma_medium, tf_1h_rsi_14, tf_15m_bollinger_upper).
+1. Multi-timeframe context (when available): If multiple timeframes are in available_timeframes, triggers should reference:
+   - The base timeframe for signal generation,
+   - Higher timeframe confirmation (e.g., 4h for trend context when available),
+   - Optional lower timeframe refinement for tighter timing (when available).
+   Multi-timeframe values are exposed via helper aliases tf_<timeframe>_<field> (e.g., tf_4h_sma_medium, tf_1h_rsi_14).
+   NOTE: If only a single timeframe is available, skip cross-timeframe requirements and build triggers using only that timeframe's indicators.
 2. Mandatory volatility gating: include at least one ATR, realized volatility, Donchian channel width, or Bollinger bandwidth comparison in every trigger. Match the gate to the trigger category (low-vol for ranges, high-vol for breakouts, etc.).
 3. Trigger diversity: emit at least five triggers that cover these categories exactly once per asset set:
    - trend_continuation
@@ -29,7 +38,12 @@ Multi-layer synthesis requirements:
 5. Composite logic: each trigger must combine at least two indicators into a conceptual condition (example: pullback inside uptrend while MACD histogram stays positive and ATR contracts).
 6. Confidence grading: set confidence_grade per trigger to A, B, or C to drive sizing tiers (A = max allowable risk, B = half of A, C = minimal probe). Reflect the grade in your entry/exit rationale.
 7. Position gating: every entry_rule must include a position filter. For long entries require position != 'long' (prefer position == 'flat'); for short entries require position != 'short' (prefer position == 'flat'). For exit/flat rules require position != 'flat'.
-8. Regime discipline and trigger budgets:
+8. Hold rules (optional): Use hold_rule to prevent premature exits from minor fluctuations. When hold_rule evaluates to True, the exit_rule is suppressed and the position is maintained. Emergency exits ALWAYS fire regardless of hold_rule. Use hold_rule when:
+   - A trend-following position should ride minor pullbacks (e.g., hold_rule="tf_4h_close > tf_4h_sma_medium and rsi_14 > 40")
+   - Volatility is temporarily elevated but structure intact (e.g., hold_rule="close > sma_short and vol_state != 'extreme'")
+   - The trade thesis remains valid despite short-term noise
+   Do NOT use hold_rule for emergency_exit triggers - they must always be able to fire.
+9. Regime discipline and trigger budgets:
    - State a dominant regime per symbol inside global_view (trend, mean-reversion, volatility-breakout, or defensive) so downstream components can align.
    - Populate max_triggers_per_symbol_per_day with a number between 4 and 8 describing how many distinct triggers each symbol may expose per session.
    - When certain symbols need bespoke budgets, set trigger_budgets like {"BTC-USD": 5, "ETH-USD": 3}.
@@ -71,13 +85,18 @@ Global requirements:
 Trimmed input example:
 {
   "portfolio": {"timestamp": "2024-06-01T00:00:00Z", "equity": 150000, "...": "..."},
+  "global_context": {
+    "available_timeframes": ["1h", "4h"],
+    "...": "..."
+  },
   "assets": [
     {
       "symbol": "BTC-USD",
       "trend_state": "uptrend",
       "vol_state": "normal",
       "indicators": [
-        {"timeframe": "1h", "close": 68000, "sma_short": 67500, "sma_medium": 66000, "rsi_14": 62, "atr_14": 950, "realized_vol_short": 0.45, "bollinger_upper": 68500, "bollinger_lower": 66500}
+        {"timeframe": "1h", "close": 68000, "sma_short": 67500, "sma_medium": 66000, "rsi_14": 62, "atr_14": 950, "realized_vol_short": 0.45, "bollinger_upper": 68500, "bollinger_lower": 66500},
+        {"timeframe": "4h", "close": 67800, "sma_short": 67000, "sma_medium": 65500, "rsi_14": 58, "atr_14": 1200, "...": "..."}
       ]
     }
   ],
@@ -104,7 +123,8 @@ Trimmed output example:
       "direction": "long",
       "timeframe": "1h",
       "entry_rule": "timeframe=='1h' and trend_state=='uptrend' and close > sma_medium and tf_4h_close > tf_4h_sma_medium and tf_1h_rsi_14 between 48 and 62 and atr_14 < tf_4h_atr_14 and macd_hist > 0",
-      "exit_rule": "close < sma_medium or tf_4h_rsi_14 < 50 or realized_vol_short > tf_4h_realized_vol_medium"
+      "exit_rule": "close < sma_medium or tf_4h_rsi_14 < 50 or realized_vol_short > tf_4h_realized_vol_medium",
+      "hold_rule": "tf_4h_close > tf_4h_sma_medium and rsi_14 > 40 and vol_state != 'extreme'"
     },
     {
       "id": "eth_emergency_exit",

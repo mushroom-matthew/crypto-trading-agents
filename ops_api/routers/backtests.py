@@ -48,11 +48,16 @@ def save_backtest_to_disk(run_id: str, data: Dict[str, Any]):
     logger.info(f"Saved backtest {run_id} to disk")
 
 def _normalize_cached_backtest(cached: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize cached backtest data for API consumers."""
+    """Normalize cached backtest data for API consumers.
+
+    Only normalizes status if it's missing or empty. Preserves running/queued
+    status to avoid incorrect progress reporting.
+    """
     if not isinstance(cached, dict):
         return cached
     status = cached.get("status")
-    if status not in ("completed", "failed"):
+    # Only normalize if status is missing or empty (not for running/queued)
+    if not status:
         cached = dict(cached)
         cached["status"] = "completed"
     return cached
@@ -174,9 +179,25 @@ class BacktestConfig(BaseModel):
         default=None, ge=1, le=50,
         description="Maximum triggers per symbol per day (default: 5)"
     )
+    judge_cadence_hours: Optional[float] = Field(
+        default=4.0, ge=0.5, le=24.0,
+        description="Minimum hours between judge evaluations (default: 4.0)"
+    )
     llm_calls_per_day: Optional[int] = Field(
         default=1, ge=1, le=24,
         description="Number of LLM strategist calls per day (1=daily, 24=hourly)"
+    )
+
+    # ============================================================================
+    # LLM Shim Options
+    # ============================================================================
+    use_llm_shim: Optional[bool] = Field(
+        default=False,
+        description="Use deterministic strategist shim instead of calling a real LLM"
+    )
+    use_judge_shim: Optional[bool] = Field(
+        default=False,
+        description="Use deterministic judge shim instead of LLM/deterministic judge feedback"
     )
 
     # ============================================================================
@@ -490,6 +511,7 @@ async def start_backtest(config: BacktestConfig):
                 "max_trades_per_day": config.max_trades_per_day,
                 "max_triggers_per_symbol_per_day": config.max_triggers_per_symbol_per_day,
                 "llm_calls_per_day": config.llm_calls_per_day or 1,
+                "judge_cadence_hours": config.judge_cadence_hours,
                 # Whipsaw controls
                 "min_hold_hours": config.min_hold_hours,
                 "min_flat_hours": config.min_flat_hours,
@@ -506,6 +528,9 @@ async def start_backtest(config: BacktestConfig):
                 "debug_trigger_max_samples": config.debug_trigger_max_samples or 100,
                 # Vector store
                 "use_trigger_vector_store": config.use_trigger_vector_store or False,
+                # LLM shim flags
+                "use_llm_shim": bool(config.use_llm_shim),
+                "use_judge_shim": bool(config.use_judge_shim),
             }],
             id=run_id,
             task_queue=BACKTEST_TASK_QUEUE,
@@ -1142,6 +1167,7 @@ async def get_backtest_progress(run_id: str):
     try:
         from ops_api.temporal_client import get_temporal_client
         from temporalio.service import RPCError
+        from ops_api.event_store import EventStore
 
         client = await get_temporal_client()
 
@@ -1168,17 +1194,117 @@ async def get_backtest_progress(run_id: str):
                 "strategy": cached_strategy,
             }
 
+        def _parse_dt(value: Any) -> datetime | None:
+            if not value:
+                return None
+            if isinstance(value, datetime):
+                return value
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        def _format_event_message(event: Any) -> str:
+            payload = event.payload or {}
+            if event.type == "plan_generated":
+                trigger_count = payload.get("num_triggers")
+                if trigger_count is None:
+                    trigger_count = len(payload.get("triggers") or [])
+                return f"Plan generated ({trigger_count} triggers)"
+            if event.type == "plan_judged":
+                score = payload.get("score") or payload.get("overall_score")
+                return f"Plan judged (score {score})" if score is not None else "Plan judged"
+            if event.type == "fill":
+                side = payload.get("side", "trade")
+                symbol = payload.get("symbol", "unknown")
+                qty = payload.get("qty")
+                if qty is not None:
+                    return f"Fill {side} {symbol} qty {qty}"
+                return f"Fill {side} {symbol}"
+            if event.type == "trade_blocked":
+                reason = payload.get("reason", "unknown")
+                return f"Trade blocked ({reason})"
+            if event.type == "llm_call":
+                model = payload.get("model", "llm")
+                return f"LLM call ({model})"
+            return event.type.replace("_", " ").title()
+
+        events = EventStore().list_events(limit=500)
+        run_events = [event for event in events if event.run_id == run_id]
+        run_events.sort(key=lambda event: event.ts)
+        plans_generated = sum(1 for event in run_events if event.type == "plan_generated")
+        llm_calls_made = sum(1 for event in run_events if event.type == "llm_call")
+        latest_plan_ts = next(
+            (event.ts for event in reversed(run_events) if event.type == "plan_generated"),
+            None,
+        )
+        latest_llm_ts = next(
+            (event.ts for event in reversed(run_events) if event.type == "llm_call"),
+            None,
+        )
+
+        timeframe = status_data.get("timeframe")
+        requested_start = status_data.get("requested_start_date") or status_data.get("start_date")
+        requested_end = status_data.get("requested_end_date") or status_data.get("end_date")
+        start_dt = _parse_dt(requested_start)
+        end_dt = _parse_dt(requested_end)
+        total_candles = status_data.get("candles_total") or 0
+        processed_candles = status_data.get("candles_processed") or 0
+        current_timestamp = status_data.get("current_timestamp")
+        current_ts = _parse_dt(current_timestamp) if current_timestamp else None
+
+        if not current_timestamp:
+            current_timestamp = latest_plan_ts.isoformat() if latest_plan_ts else None
+            if not current_timestamp and latest_llm_ts:
+                current_timestamp = latest_llm_ts.isoformat()
+            current_ts = _parse_dt(current_timestamp) if current_timestamp else None
+
+        if timeframe and start_dt and end_dt and not total_candles:
+            try:
+                tf_seconds = timeframe_to_seconds(timeframe)
+                total_candles = int((end_dt - start_dt).total_seconds() // tf_seconds) + 1
+            except ValueError:
+                total_candles = 0
+
+        if timeframe and start_dt and total_candles and not processed_candles:
+            latest_ts = current_ts
+            if not latest_ts and status_data.get("status") != "running":
+                latest_ts = latest_plan_ts or latest_llm_ts
+            if latest_ts:
+                try:
+                    tf_seconds = timeframe_to_seconds(timeframe)
+                except ValueError:
+                    tf_seconds = None
+                if tf_seconds:
+                    elapsed = (latest_ts - start_dt).total_seconds()
+                    if elapsed >= 0:
+                        processed_candles = int(elapsed // tf_seconds) + 1
+
+        if total_candles and processed_candles:
+            processed_candles = max(0, min(processed_candles, total_candles))
+
+        progress_pct = status_data.get("progress", 0.0) or 0.0
+        if total_candles and processed_candles:
+            progress_pct = max(progress_pct, (processed_candles / total_candles) * 100.0)
+        if status_data.get("status") == "completed":
+            progress_pct = 100.0
+
+        latest_logs = [
+            {"timestamp": event.ts.isoformat(), "message": _format_event_message(event)}
+            for event in run_events[-8:]
+        ]
+
         return {
             "run_id": run_id,
             "status": status_data.get("status", "running"),
-            "progress_pct": status_data.get("progress", 0.0),
+            "progress_pct": progress_pct,
             "current_phase": status_data.get("current_phase", "Initializing"),
-            "current_timestamp": status_data.get("current_timestamp"),
-            "total_candles": status_data.get("candles_total"),
-            "processed_candles": status_data.get("candles_processed"),
-            "plans_generated": 0,
-            "llm_calls_made": 0,
-            "latest_logs": [],
+            "current_timestamp": current_timestamp,
+            "total_candles": total_candles or None,
+            "processed_candles": processed_candles or None,
+            "plans_generated": plans_generated,
+            "llm_calls_made": llm_calls_made,
+            "latest_logs": latest_logs,
             "strategy": status_data.get("strategy", "baseline"),
         }
 

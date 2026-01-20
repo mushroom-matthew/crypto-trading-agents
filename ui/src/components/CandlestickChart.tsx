@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import {
   ComposedChart,
   Line,
@@ -10,7 +10,9 @@ import {
   Legend,
   ResponsiveContainer,
   ReferenceLine,
+  Brush,
 } from 'recharts';
+import { ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 import { formatCurrency, formatDateTime } from '../lib/utils';
 import type { CandleWithIndicators, BacktestTrade } from '../lib/api';
 
@@ -28,6 +30,9 @@ export function CandlestickChart({
   currentIndex,
 }: CandlestickChartProps) {
   const [selectedOverlays, setSelectedOverlays] = useState<OverlayType[]>(['sma_20', 'sma_50']);
+
+  // Zoom state - indices into chartData
+  const [zoomRange, setZoomRange] = useState<{ startIndex: number; endIndex: number } | null>(null);
 
   // Transform candle data for Recharts (workaround for no native candlestick)
   const chartData = useMemo(() => {
@@ -84,6 +89,64 @@ export function CandlestickChart({
     );
   };
 
+  // Zoom control handlers
+  const handleBrushChange = useCallback((range: { startIndex?: number; endIndex?: number }) => {
+    if (range.startIndex !== undefined && range.endIndex !== undefined) {
+      setZoomRange({ startIndex: range.startIndex, endIndex: range.endIndex });
+    }
+  }, []);
+
+  const handleZoomIn = useCallback(() => {
+    const total = chartData.length;
+    if (total === 0) return;
+
+    const currentStart = zoomRange?.startIndex ?? 0;
+    const currentEnd = zoomRange?.endIndex ?? total - 1;
+    const visibleCount = currentEnd - currentStart + 1;
+
+    // Zoom in by 25% on each side (minimum 20 candles visible)
+    const zoomAmount = Math.max(1, Math.floor(visibleCount * 0.125));
+    const newStart = Math.min(currentStart + zoomAmount, currentEnd - 19);
+    const newEnd = Math.max(currentEnd - zoomAmount, newStart + 19);
+
+    setZoomRange({ startIndex: newStart, endIndex: newEnd });
+  }, [chartData.length, zoomRange]);
+
+  const handleZoomOut = useCallback(() => {
+    const total = chartData.length;
+    if (total === 0) return;
+
+    const currentStart = zoomRange?.startIndex ?? 0;
+    const currentEnd = zoomRange?.endIndex ?? total - 1;
+    const visibleCount = currentEnd - currentStart + 1;
+
+    // Zoom out by 25% on each side
+    const zoomAmount = Math.max(1, Math.floor(visibleCount * 0.25));
+    const newStart = Math.max(0, currentStart - zoomAmount);
+    const newEnd = Math.min(total - 1, currentEnd + zoomAmount);
+
+    // If we're at full range, clear zoom
+    if (newStart === 0 && newEnd === total - 1) {
+      setZoomRange(null);
+    } else {
+      setZoomRange({ startIndex: newStart, endIndex: newEnd });
+    }
+  }, [chartData.length, zoomRange]);
+
+  const handleResetZoom = useCallback(() => {
+    setZoomRange(null);
+  }, []);
+
+  // Compute visible range info for display
+  const zoomInfo = useMemo(() => {
+    const total = chartData.length;
+    const visibleStart = zoomRange?.startIndex ?? 0;
+    const visibleEnd = zoomRange?.endIndex ?? total - 1;
+    const visibleCount = visibleEnd - visibleStart + 1;
+    const zoomPercent = total > 0 ? Math.round((visibleCount / total) * 100) : 100;
+    return { total, visibleCount, zoomPercent };
+  }, [chartData.length, zoomRange]);
+
   const overlayConfig = {
     sma_20: { color: '#3b82f6', name: 'SMA 20' },
     sma_50: { color: '#8b5cf6', name: 'SMA 50' },
@@ -118,41 +181,76 @@ export function CandlestickChart({
 
   return (
     <div className="space-y-4">
-      {/* Overlay Selector */}
-      <div className="flex items-center gap-4 flex-wrap">
-        <span className="text-sm text-gray-500">Overlays:</span>
-        {Object.entries(overlayConfig).map(([key, config]) => (
-          <label key={key} className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={selectedOverlays.includes(key as OverlayType)}
-              onChange={() => toggleOverlay(key as OverlayType)}
-              className="rounded border-gray-300 text-blue-500 focus:ring-blue-500"
-            />
-            <span className="text-sm flex items-center gap-1">
-              <span
-                className="w-3 h-3 rounded"
-                style={{ backgroundColor: config.color }}
+      {/* Control Bar */}
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        {/* Overlay Selector */}
+        <div className="flex items-center gap-4 flex-wrap">
+          <span className="text-sm text-gray-500">Overlays:</span>
+          {Object.entries(overlayConfig).map(([key, config]) => (
+            <label key={key} className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={selectedOverlays.includes(key as OverlayType)}
+                onChange={() => toggleOverlay(key as OverlayType)}
+                className="rounded border-gray-300 text-blue-500 focus:ring-blue-500"
               />
-              {config.name}
-            </span>
-          </label>
-        ))}
+              <span className="text-sm flex items-center gap-1">
+                <span
+                  className="w-3 h-3 rounded"
+                  style={{ backgroundColor: config.color }}
+                />
+                {config.name}
+              </span>
+            </label>
+          ))}
+        </div>
+
+        {/* Zoom Controls */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">
+            {zoomInfo.visibleCount} / {zoomInfo.total} candles ({zoomInfo.zoomPercent}%)
+          </span>
+          <div className="flex items-center gap-1 border border-gray-300 dark:border-gray-600 rounded-lg p-1">
+            <button
+              onClick={handleZoomIn}
+              className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Zoom In (show fewer candles)"
+              disabled={zoomInfo.visibleCount <= 20}
+            >
+              <ZoomIn className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleZoomOut}
+              className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Zoom Out (show more candles)"
+              disabled={zoomInfo.zoomPercent >= 100}
+            >
+              <ZoomOut className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleResetZoom}
+              className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Reset Zoom (show all candles)"
+              disabled={!zoomRange}
+            >
+              <Maximize2 className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Chart */}
-      <ResponsiveContainer width="100%" height={400}>
+      <ResponsiveContainer width="100%" height={450}>
         <ComposedChart
           data={chartData}
-          margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
+          margin={{ top: 10, right: 30, left: 0, bottom: 40 }}
         >
           <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
           <XAxis
-            dataKey="index"
+            dataKey="timestamp"
             tickFormatter={(value) => {
-              const candle = chartData[value];
-              if (!candle) return '';
-              const date = new Date(candle.timestamp);
+              if (!value) return '';
+              const date = new Date(value);
               return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
             }}
             stroke="#6b7280"
@@ -298,16 +396,17 @@ export function CandlestickChart({
 
           {/* Trade Markers */}
           {visibleTrades.map((trade, idx) => {
-            const candleIndex = chartData.findIndex(
+            // Find the candle in chartData that matches the trade time
+            const matchingCandle = chartData.find(
               (c) => new Date(c.timestamp).getTime() >= new Date(trade.timestamp).getTime()
             );
 
-            if (candleIndex === -1) return null;
+            if (!matchingCandle) return null;
 
             return (
               <ReferenceLine
                 key={`trade-${idx}`}
-                x={candleIndex}
+                x={matchingCandle.timestamp}
                 stroke={trade.side === 'BUY' ? '#10b981' : '#ef4444'}
                 strokeWidth={2}
                 strokeDasharray="3 3"
@@ -320,8 +419,28 @@ export function CandlestickChart({
               />
             );
           })}
+
+          {/* Brush for zooming (drag to select range) */}
+          <Brush
+            dataKey="timestamp"
+            height={30}
+            stroke="#8884d8"
+            startIndex={zoomRange?.startIndex ?? 0}
+            endIndex={zoomRange?.endIndex ?? chartData.length - 1}
+            onChange={handleBrushChange}
+            tickFormatter={(value) => {
+              if (!value) return '';
+              const date = new Date(value);
+              return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+            }}
+          />
         </ComposedChart>
       </ResponsiveContainer>
+
+      {/* Zoom Instructions */}
+      <p className="text-xs text-gray-400 text-center">
+        Drag the slider below the chart to zoom into a specific time range, or use the zoom buttons above.
+      </p>
     </div>
   );
 }

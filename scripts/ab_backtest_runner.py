@@ -9,22 +9,10 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Sequence
 
+from backtesting.regimes import REGIMES
+
 
 BASE_CMD = ["uv", "run", "python", "-m", "backtesting.cli"]
-
-
-REGIMES: Dict[str, tuple[str, str]] = {
-    "bull_2020_2021": ("2020-10-01", "2021-04-14"),
-    "late_bull_2021": ("2021-07-20", "2021-11-10"),
-    "bear_2018": ("2018-01-01", "2018-12-15"),
-    "covid_crash": ("2020-02-20", "2020-03-15"),
-    "bear_2022": ("2022-04-01", "2022-11-10"),
-    "range_2019": ("2019-01-01", "2019-10-01"),
-    "mid_2021_consolidation": ("2021-05-01", "2021-07-20"),
-    "late_2023_consolidation": ("2023-06-01", "2023-10-01"),
-    "vol_china_elon": ("2021-05-01", "2021-06-01"),
-    "ftx_collapse": ("2022-11-01", "2022-11-20"),
-}
 
 
 def _scenario(

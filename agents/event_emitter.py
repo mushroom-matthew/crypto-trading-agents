@@ -28,6 +28,7 @@ async def _broadcast_to_websocket(event: Event) -> None:
     message = {
         "event_id": event.event_id,
         "timestamp": event.ts.isoformat(),
+        "emitted_at": (event.emitted_at or event.ts).isoformat(),
         "source": event.source,
         "type": event.type,
         "payload": event.payload,

@@ -30,7 +30,29 @@ class Materializer:
     def __init__(self, store: EventStore | None = None) -> None:
         self.store = store or EventStore()
 
-    def list_events(self, limit: int = 500) -> List[Event]:
+    def list_events(
+        self,
+        limit: int = 500,
+        *,
+        event_type: str | None = None,
+        source: str | None = None,
+        run_id: str | None = None,
+        correlation_id: str | None = None,
+        since: datetime | None = None,
+        order: str = "desc",
+        order_by: str = "ts",
+    ) -> List[Event]:
+        if any([event_type, source, run_id, correlation_id, since]):
+            return self.store.list_events_filtered(
+                limit=limit,
+                event_type=event_type,
+                source=source,
+                run_id=run_id,
+                correlation_id=correlation_id,
+                since=since,
+                order=order,
+                order_by=order_by,
+            )
         return self.store.list_events(limit=limit)
 
     def block_reasons(self, run_id: str | None = None, limit: int = 1000) -> BlockReasonsAggregate:

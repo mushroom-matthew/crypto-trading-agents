@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { PlayCircle, StopCircle, Loader2, RefreshCw, TrendingUp, TrendingDown, Activity, Zap } from 'lucide-react';
+import { PlayCircle, StopCircle, Loader2, RefreshCw, Activity, Zap } from 'lucide-react';
 import { paperTradingAPI, promptsAPI, type PaperTradingSessionConfig } from '../lib/api';
-import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
+import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
 import { EventTimeline } from './EventTimeline';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
@@ -51,14 +51,14 @@ export function PaperTradingControl() {
   const strategies = strategiesData?.strategies || [];
 
   // Fetch session list
-  const { data: sessionsData, refetch: refetchSessions } = useQuery({
+  const { data: sessionsData } = useQuery({
     queryKey: ['paper-trading-sessions'],
     queryFn: () => paperTradingAPI.listSessions(undefined, 20),
     refetchInterval: 10000,
   });
 
   // Fetch selected session status
-  const { data: session, isLoading: sessionLoading } = useQuery({
+  const { data: session } = useQuery({
     queryKey: ['paper-trading-session', selectedSessionId],
     queryFn: () => paperTradingAPI.getSession(selectedSessionId!),
     enabled: !!selectedSessionId,
@@ -310,7 +310,6 @@ export function PaperTradingControl() {
               config={planningSettings}
               onChange={setPlanningSettings}
               disabled={isRunning}
-              showLlmCallsPerDay={false}
             />
 
             {/* Action Buttons */}
@@ -512,7 +511,13 @@ export function PaperTradingControl() {
       <PromptEditor />
 
       {/* Event Timeline - Shows paper trading events */}
-      <EventTimeline limit={30} runId={selectedSessionId || undefined} />
+      {selectedSessionId ? (
+        <EventTimeline limit={30} runId={selectedSessionId} />
+      ) : (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 text-sm text-gray-500 dark:text-gray-400">
+          Select a paper trading session to view its event timeline.
+        </div>
+      )}
     </div>
   );
 }
