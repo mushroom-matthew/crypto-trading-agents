@@ -52,23 +52,23 @@ NOTES:
 - Reference concrete metrics and trigger IDs when possible.
 
 JSON:
-{
+{{
   "score": <float 0-100 representing overall strategy execution quality>,
-  "constraints": {
+  "constraints": {{
     "max_trades_per_day": <integer or null>,
     "max_triggers_per_symbol_per_day": <integer or null>,
     "risk_mode": "normal" | "conservative" | "emergency",
     "disabled_trigger_ids": ["trigger_id"],
     "disabled_categories": ["trend_continuation", "reversal", "volatility_breakout", "mean_reversion", "emergency_exit", "other"]
-  },
-  "strategist_constraints": {
+  }},
+  "strategist_constraints": {{
     "must_fix": ["text - specific issues with strategy execution"],
     "vetoes": ["text - behaviors to stop immediately"],
     "boost": ["text - working well, continue doing"],
     "regime_correction": "<text or null - if market regime doesn't match strategy>",
-    "sizing_adjustments": {"SYMBOL": "<instruction>"}
-  }
-}
+    "sizing_adjustments": {{"SYMBOL": "<instruction>"}}
+  }}
+}}
 
 Rules:
 - Always include every key above even if arrays are empty.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+import time
 from typing import Callable
 
 import ccxt
@@ -82,7 +83,7 @@ class CCXTAPILoader(MarketDataBackend):
         end_ms = int(end.timestamp() * 1000)
         rows: list[list[float]] = []
         while since < end_ms:
-            batch = client.fetch_ohlcv(symbol, granularity, since=since)
+            batch = self._fetch_with_retry(client, symbol, granularity, since)
             if not batch:
                 break
             rows.extend(batch)
@@ -104,6 +105,27 @@ class CCXTAPILoader(MarketDataBackend):
             end.isoformat(),
         )
         return frame
+
+    def _fetch_with_retry(
+        self, client: ccxt.Exchange, symbol: str, granularity: str, since: int
+    ) -> list[list[float]]:
+        delay = 1.0
+        for attempt in range(1, 4):
+            try:
+                return client.fetch_ohlcv(symbol, granularity, since=since)
+            except ccxt.NetworkError as exc:
+                if attempt >= 3:
+                    raise
+                logger.warning(
+                    "Transient network error fetching %s %s (attempt %d/3): %s",
+                    symbol,
+                    granularity,
+                    attempt,
+                    exc,
+                )
+                time.sleep(delay)
+                delay *= 2
+        return []
 
 
 __all__ = ["CCXTAPILoader"]
