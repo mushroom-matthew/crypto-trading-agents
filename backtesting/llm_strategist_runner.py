@@ -1948,6 +1948,7 @@ class LLMStrategistBacktester:
                         event_ts=ts,
                         prompt_template=self.prompt_template,
                         use_vector_store=self.use_trigger_vector_store,
+                        emit_events=False,
                     )
                     current_plan = current_plan.model_copy(
                         update={

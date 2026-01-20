@@ -1,10 +1,5 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BacktestControl } from './components/BacktestControl';
-import { LiveTradingMonitor } from './components/LiveTradingMonitor';
-import { PaperTradingControl } from './components/PaperTradingControl';
-import WalletReconciliation from './components/WalletReconciliation';
-import { AgentInspector } from './components/AgentInspector';
 import { BarChart3, Activity, Wallet, Brain, PlayCircle } from 'lucide-react';
 import { cn } from './lib/utils';
 
@@ -17,6 +12,28 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+const BacktestControl = lazy(() =>
+  import('./components/BacktestControl').then((module) => ({
+    default: module.BacktestControl,
+  }))
+);
+const PaperTradingControl = lazy(() =>
+  import('./components/PaperTradingControl').then((module) => ({
+    default: module.PaperTradingControl,
+  }))
+);
+const LiveTradingMonitor = lazy(() =>
+  import('./components/LiveTradingMonitor').then((module) => ({
+    default: module.LiveTradingMonitor,
+  }))
+);
+const AgentInspector = lazy(() =>
+  import('./components/AgentInspector').then((module) => ({
+    default: module.AgentInspector,
+  }))
+);
+const WalletReconciliation = lazy(() => import('./components/WalletReconciliation'));
 
 type Tab = 'backtest' | 'paper' | 'live' | 'wallets' | 'agents';
 
@@ -96,11 +113,13 @@ function App() {
 
         {/* Tab Content */}
         <div className="max-w-7xl mx-auto px-6 py-6">
-          {activeTab === 'backtest' && <BacktestControl />}
-          {activeTab === 'paper' && <PaperTradingControl />}
-          {activeTab === 'live' && <LiveTradingMonitor />}
-          {activeTab === 'agents' && <AgentInspector />}
-          {activeTab === 'wallets' && <WalletReconciliation />}
+          <Suspense fallback={<div className="text-sm text-gray-500">Loading...</div>}>
+            {activeTab === 'backtest' && <BacktestControl />}
+            {activeTab === 'paper' && <PaperTradingControl />}
+            {activeTab === 'live' && <LiveTradingMonitor />}
+            {activeTab === 'agents' && <AgentInspector />}
+            {activeTab === 'wallets' && <WalletReconciliation />}
+          </Suspense>
         </div>
       </div>
     </QueryClientProvider>

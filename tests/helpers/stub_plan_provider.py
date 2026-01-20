@@ -41,6 +41,7 @@ class AlwaysLongPlanProvider:
         llm_input: Any,
         prompt_template: Optional[str] = None,
         event_ts: Optional[datetime] = None,
+        emit_events: bool = True,
     ) -> StrategyPlan:
         plan = StrategyPlan(
             plan_id=f"plan_{plan_date.isoformat()}",

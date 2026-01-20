@@ -48,6 +48,7 @@ class StrategistPlanService:
         event_ts: Optional[datetime] = None,
         prompt_template: str | None = None,
         use_vector_store: bool = False,
+        emit_events: bool = True,
     ) -> StrategyPlan:
         run = self.registry.get_strategy_run(run_id)
         plan_date = plan_date or datetime.now(timezone.utc)
@@ -60,6 +61,7 @@ class StrategistPlanService:
             prompt_template=prompt_template,
             use_vector_store=use_vector_store,
             event_ts=event_ts,
+            emit_events=emit_events,
         )
         plan = plan.model_copy(deep=True)
         # Preserve declared policy caps before any derived-clamp is applied.

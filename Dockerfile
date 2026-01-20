@@ -30,9 +30,6 @@ RUN uv sync --frozen --no-dev
 # ---- Now copy source code ----
 COPY . .
 
-# Re-run sync in case local editable packages are present
-RUN uv sync --frozen --no-dev
-
 # Default port for the MCP/FastAPI server
 EXPOSE 8080
 

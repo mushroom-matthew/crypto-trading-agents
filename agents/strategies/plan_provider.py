@@ -164,6 +164,7 @@ class StrategyPlanProvider:
         prompt_template: str | None = None,
         use_vector_store: bool = False,
         event_ts: datetime | None = None,
+        emit_events: bool = True,
     ) -> StrategyPlan:
         cache_path = self._cache_path(run_id, plan_date, llm_input)
         emit_ts = event_ts or plan_date
@@ -181,7 +182,8 @@ class StrategyPlanProvider:
                 "raw_output": None,
             }
             object.__setattr__(plan, "_llm_meta", self.last_generation_info)
-            self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
+            if emit_events:
+                self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
             return plan
         date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
@@ -207,7 +209,8 @@ class StrategyPlanProvider:
         meta = getattr(self.llm_client, "last_generation_info", {}) or {}
         self.last_generation_info = meta
         object.__setattr__(plan, "_llm_meta", meta)
-        self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
+        if emit_events:
+            self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
         return plan
 
     def _enrich_plan(self, plan: StrategyPlan, llm_input: LLMInput) -> StrategyPlan:
