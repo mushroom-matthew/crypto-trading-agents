@@ -1,8 +1,20 @@
 # Intraday Judge Context Wiring Analysis
 
+> **Status**: Most gaps addressed as of 2026-01-20. See [IMPLEMENTATION_REVIEW.md](./IMPLEMENTATION_REVIEW.md) for details.
+
 ## Executive Summary
 
-The intraday judge in the backtest system has **incomplete visibility** into executed trades and trigger state. This document identifies the specific gaps in context wiring and their impact on judge effectiveness.
+~~The intraday judge in the backtest system has **incomplete visibility** into executed trades and trigger state.~~
+
+**UPDATE**: All identified gaps have been addressed:
+- ✅ Fill details (individual fills with timestamps, prices, trigger IDs, P&L)
+- ✅ Active triggers (full definitions including entry/exit rules)
+- ✅ Trigger attempt statistics (attempted/executed/blocked with reasons)
+- ✅ Plan diff on replan (added/removed/changed triggers)
+- ✅ Risk budget utilization (budget %, used %, per-symbol usage and blocks)
+- ✅ Prompt interpretation guidance (tells LLM how to use each section)
+
+This document identifies the original gaps and serves as a reference for the implemented solutions.
 
 ---
 
@@ -41,16 +53,17 @@ summary = {
 }
 ```
 
-### Gap Analysis
+### Gap Analysis (Updated - All Addressed)
 
-| What's Needed | What's Provided | Gap |
-|--------------|-----------------|-----|
-| Positions opened since last judge | `trade_count` (aggregate only) | No individual fill details |
-| Position close details | `winning_trades`/`losing_trades` counts | No P&L per trade |
-| Trigger definitions | NOT PROVIDED | Judge can't see what should fire |
-| Blocked trigger attempts | NOT PROVIDED | Judge doesn't know WHY no trades |
-| Market conditions at trade time | NOT PROVIDED | Only end-of-evaluation prices |
-| Risk budget utilization | NOT PROVIDED | No visibility into capacity |
+| What's Needed | Status | Implementation |
+|--------------|--------|----------------|
+| Positions opened since last judge | ✅ FIXED | `fills_since_last_judge` with full details |
+| Position close details | ✅ FIXED | Individual P&L per fill included |
+| Trigger definitions | ✅ FIXED | `active_triggers` with entry/exit rules |
+| Blocked trigger attempts | ✅ FIXED | `trigger_attempts` with block reasons |
+| Market conditions at trade time | ✅ FIXED | `market_structure_entry` in fills |
+| Risk budget utilization | ✅ FIXED | `risk_state` with budget %, used %, per-symbol |
+| Prompt guidance | ✅ FIXED | `INTERPRETATION GUIDANCE` section added |
 
 ---
 

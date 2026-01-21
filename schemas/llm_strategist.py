@@ -29,6 +29,8 @@ class IndicatorSnapshot(SerializableModel):
     timeframe: str
     as_of: datetime
     close: float
+    volume: float | None = None
+    volume_multiple: float | None = None
     sma_short: float | None = None
     sma_medium: float | None = None
     sma_long: float | None = None
@@ -88,16 +90,6 @@ class PortfolioState(SerializableModel):
     profit_factor_30d: float
 
 
-class LLMInput(SerializableModel):
-    """Structured payload that is serialized and sent to the LLM strategist."""
-
-    portfolio: PortfolioState
-    assets: List[AssetState]
-    risk_params: Dict[str, Any]
-    global_context: Dict[str, Any] = Field(default_factory=dict)
-    market_structure: Dict[str, Any] = Field(default_factory=dict)
-
-
 TriggerDirection = Literal["long", "short", "flat", "exit", "flat_exit"]
 TriggerCategory = Literal[
     "trend_continuation",
@@ -107,6 +99,32 @@ TriggerCategory = Literal[
     "emergency_exit",
     "other",
 ]
+
+
+class TriggerSummary(SerializableModel):
+    """Compact trigger payload for continuity across replans."""
+
+    id: str
+    symbol: str
+    timeframe: str
+    direction: TriggerDirection
+    category: TriggerCategory | None = Field(default=None)
+    confidence_grade: Literal["A", "B", "C"] | None = Field(default=None)
+    entry_rule: str
+    exit_rule: str
+    hold_rule: str | None = Field(default=None)
+    stop_loss_pct: float | None = Field(default=None, ge=0.0)
+
+
+class LLMInput(SerializableModel):
+    """Structured payload that is serialized and sent to the LLM strategist."""
+
+    portfolio: PortfolioState
+    assets: List[AssetState]
+    risk_params: Dict[str, Any]
+    global_context: Dict[str, Any] = Field(default_factory=dict)
+    market_structure: Dict[str, Any] = Field(default_factory=dict)
+    previous_triggers: List[TriggerSummary] = Field(default_factory=list)
 
 
 class TriggerCondition(SerializableModel):

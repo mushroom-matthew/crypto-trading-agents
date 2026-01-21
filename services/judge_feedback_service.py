@@ -464,14 +464,91 @@ class JudgeFeedbackService:
         # Format transaction summary (empty for backtest context)
         transaction_summary = "See trade metrics above for summary."
 
+        def _truncate(text: str, limit: int = 160) -> str:
+            if len(text) <= limit:
+                return text
+            return text[: limit - 3] + "..."
+
+        fills_since_last_judge = summary.get("fills_since_last_judge") or []
+        if fills_since_last_judge:
+            fill_lines = []
+            for fill in fills_since_last_judge[:20]:
+                fill_lines.append(
+                    "- {timestamp} {symbol} {side} qty={qty} price={price} trigger={trigger_id} pnl={pnl}".format(
+                        timestamp=fill.get("timestamp"),
+                        symbol=fill.get("symbol"),
+                        side=fill.get("side"),
+                        qty=fill.get("qty"),
+                        price=fill.get("price"),
+                        trigger_id=fill.get("trigger_id"),
+                        pnl=fill.get("pnl"),
+                    )
+                )
+            fill_details = "\n".join(fill_lines)
+        else:
+            fill_details = "No fills since last judge."
+
+        trigger_attempts = summary.get("trigger_attempts") or {}
+        if trigger_attempts:
+            attempt_lines = []
+            ranked = sorted(
+                trigger_attempts.items(),
+                key=lambda item: (item[1].get("attempted", 0), item[1].get("blocked", 0)),
+                reverse=True,
+            )
+            for trigger_id, stats in ranked[:20]:
+                reasons = stats.get("blocked_by_reason") or {}
+                reason_str = ", ".join(f"{key}:{val}" for key, val in list(reasons.items())[:5])
+                attempt_lines.append(
+                    f"- {trigger_id}: attempted={stats.get('attempted', 0)} "
+                    f"executed={stats.get('executed', 0)} blocked={stats.get('blocked', 0)}"
+                    + (f" reasons={reason_str}" if reason_str else "")
+                )
+            trigger_attempts_text = "\n".join(attempt_lines)
+        else:
+            trigger_attempts_text = "No trigger attempts recorded."
+
+        active_triggers = summary.get("active_triggers") or []
+        if active_triggers:
+            trigger_lines = []
+            for trigger in active_triggers[:20]:
+                entry_rule = _truncate(str(trigger.get("entry_rule", "")))
+                exit_rule = _truncate(str(trigger.get("exit_rule", "")))
+                trigger_lines.append(
+                    "- {id} {symbol} {timeframe} {direction} {category} "
+                    "conf={confidence} entry={entry_rule} exit={exit_rule}".format(
+                        id=trigger.get("id"),
+                        symbol=trigger.get("symbol"),
+                        timeframe=trigger.get("timeframe"),
+                        direction=trigger.get("direction"),
+                        category=trigger.get("category"),
+                        confidence=trigger.get("confidence"),
+                        entry_rule=entry_rule,
+                        exit_rule=exit_rule,
+                    )
+                )
+            active_triggers_text = "\n".join(trigger_lines)
+        else:
+            active_triggers_text = "No active triggers provided."
+
+        trigger_summary = (
+            f"{len(active_triggers)} active triggers; {len(trigger_attempts)} trigger attempts since last judge."
+            if active_triggers or trigger_attempts
+            else "No trigger data available."
+        )
+
         # Build the analysis prompt
         analysis_prompt = prompt_template.format(
             strategy_context=json.dumps(strategy_context, indent=2) if strategy_context else "No strategy context available.",
             risk_parameters=strategy_context.get("risk_params", "No risk parameters configured.") if strategy_context else "No risk parameters configured.",
-            trigger_summary="See strategy context for trigger information.",
+            trigger_summary=trigger_summary,
             execution_settings="Default execution settings.",
             performance_summary=performance_summary,
             transaction_summary=transaction_summary,
+            fill_details=fill_details,
+            trigger_attempts=trigger_attempts_text,
+            active_triggers=active_triggers_text,
+            risk_state=json.dumps(summary.get("risk_state", {}), indent=2) if summary.get("risk_state") else "No risk state provided.",
             total_transactions=summary.get("trade_count", 0),
             buy_count=summary.get("buy_count", 0),
             sell_count=summary.get("sell_count", 0),

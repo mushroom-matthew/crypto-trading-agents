@@ -205,6 +205,7 @@ def compute_indicator_snapshot(
     close = prepared["close"]
     high = prepared["high"]
     low = prepared["low"]
+    volume_series = prepared["volume"] if "volume" in prepared.columns else None
 
     sma_short = _result_to_value(tech.sma(prepared, period=window.short_window))
     sma_medium = _result_to_value(tech.sma(prepared, period=window.medium_window))
@@ -223,6 +224,12 @@ def compute_indicator_snapshot(
     roc_medium = _roc(close, window.roc_medium)
     realized_short = _realized_vol(close, window.realized_vol_short)
     realized_medium = _realized_vol(close, window.realized_vol_medium)
+    volume_val = _latest(volume_series) if volume_series is not None else None
+    volume_multiple = None
+    if volume_series is not None and len(volume_series) >= window.short_window:
+        mean_volume = float(volume_series.tail(window.short_window).mean())
+        if mean_volume and not np.isnan(mean_volume):
+            volume_multiple = float(volume_val / mean_volume) if volume_val is not None else None
 
     # Cycle indicators (200-bar window for cyclical analysis)
     cycle_high, cycle_low, cycle_range, cycle_position = _cycle_indicators(
@@ -243,6 +250,8 @@ def compute_indicator_snapshot(
         timeframe=timeframe,
         as_of=as_of,
         close=float(close.iloc[-1]),
+        volume=volume_val,
+        volume_multiple=volume_multiple,
         sma_short=sma_short,
         sma_medium=sma_medium,
         sma_long=sma_long,

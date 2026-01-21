@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Literal, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .llm_strategist import SerializableModel
 
@@ -29,6 +29,30 @@ class JudgeConstraints(SerializableModel):
     disabled_trigger_ids: List[str] = Field(default_factory=list)
     disabled_categories: List[str] = Field(default_factory=list)
     risk_mode: Literal["normal", "conservative", "emergency"] = "normal"
+
+    @field_validator("disabled_categories")
+    @classmethod
+    def validate_disabled_categories(cls, values: List[str]) -> List[str]:
+        entry_categories = {
+            "trend_continuation",
+            "reversal",
+            "volatility_breakout",
+            "mean_reversion",
+        }
+        all_categories = entry_categories | {"emergency_exit", "other"}
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for value in values or []:
+            if value in all_categories and value not in seen:
+                cleaned.append(value)
+                seen.add(value)
+        disabled_entry = entry_categories & set(cleaned)
+        if disabled_entry == entry_categories:
+            for value in list(reversed(cleaned)):
+                if value in entry_categories:
+                    cleaned.remove(value)
+                    break
+        return cleaned
 
 
 class JudgeFeedback(SerializableModel):

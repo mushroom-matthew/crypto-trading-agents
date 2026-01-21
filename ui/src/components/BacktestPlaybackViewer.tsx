@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { backtestAPI } from '../lib/api';
 import { TimelinePlayer } from './TimelinePlayer';
@@ -38,6 +38,17 @@ export function BacktestPlaybackViewer({
     queryFn: () => backtestAPI.getTrades(runId, 1000),
     staleTime: Infinity,
   });
+
+  useEffect(() => {
+    setCurrentIndex(0);
+  }, [symbol]);
+
+  const filteredTrades = useMemo(() => {
+    if (!symbol) {
+      return trades;
+    }
+    return trades.filter((trade) => trade.symbol === symbol);
+  }, [symbol, trades]);
 
   // Get current timestamp based on mode and index
   const currentTimestamp = useMemo(() => {
@@ -96,7 +107,7 @@ export function BacktestPlaybackViewer({
             </h3>
             <CandlestickChart
               candles={candles}
-              trades={trades}
+              trades={filteredTrades}
               currentIndex={currentIndex}
             />
           </div>

@@ -116,6 +116,8 @@ class TriggerEngine:
         self._position_entry_bar: dict[str, int] = {}
         # Track last trade bar index for cooldown enforcement
         self._last_trade_bar: dict[str, int] = {}
+        # Track last entry timestamp to prevent same-bar emergency exits
+        self._last_entry_timestamp: dict[str, datetime] = {}
         # Current bar counter
         self._bar_counter: int = 0
         # Debug sampling configuration
@@ -328,6 +330,12 @@ class TriggerEngine:
                 continue
 
             if exit_fired:
+                if trigger.category == "emergency_exit":
+                    last_entry_ts = self._last_entry_timestamp.get(trigger.symbol)
+                    if last_entry_ts and last_entry_ts == bar.timestamp:
+                        detail = "Emergency exit blocked on same bar as entry"
+                        self._record_block(block_entries, trigger, "SAME_BAR_ENTRY", detail, bar)
+                        continue
                 # Check if hold_rule suppresses this exit (unless emergency category)
                 if trigger.hold_rule and trigger.category != "emergency_exit":
                     try:
@@ -404,7 +412,7 @@ class TriggerEngine:
         bars_held = self._bar_counter - entry_bar
         return bars_held < self.min_hold_bars
 
-    def record_fill(self, symbol: str, is_entry: bool) -> None:
+    def record_fill(self, symbol: str, is_entry: bool, timestamp: datetime) -> None:
         """Record a fill for cooldown and hold period tracking.
 
         Call this after an order is filled to update tracking state.
@@ -412,10 +420,12 @@ class TriggerEngine:
         Args:
             symbol: The symbol that was traded
             is_entry: True if this was an entry (new position), False if exit
+            timestamp: The execution timestamp for the fill
         """
         self._last_trade_bar[symbol] = self._bar_counter
         if is_entry:
             self._position_entry_bar[symbol] = self._bar_counter
+            self._last_entry_timestamp[symbol] = timestamp
         else:
             # Clear entry bar when position is closed
             self._position_entry_bar.pop(symbol, None)

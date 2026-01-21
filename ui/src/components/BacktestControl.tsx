@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info } from 'lucide-react';
@@ -50,6 +50,7 @@ export function BacktestControl() {
   const [allocationInput, setAllocationInput] = useState('');
   const [allocationError, setAllocationError] = useState<string | null>(null);
   const [selectedStrategyId, setSelectedStrategyId] = useState<string>('default');
+  const [selectedSymbol, setSelectedSymbol] = useState<string>(defaultConfig.symbols[0] ?? '');
 
   const [selectedRun, setSelectedRun] = useState<string | null>(() => {
     // Restore from localStorage on mount
@@ -118,6 +119,19 @@ export function BacktestControl() {
     },
   });
 
+  const { data: backtests = [] } = useQuery({
+    queryKey: ['backtests-list'],
+    queryFn: () => backtestAPI.listBacktests(undefined, 15),
+    staleTime: 10000,
+  });
+
+  const selectedRunMeta = useMemo(() => {
+    if (!selectedRun) {
+      return null;
+    }
+    return backtests.find((item) => item.run_id === selectedRun) ?? null;
+  }, [backtests, selectedRun]);
+
   // Query equity curve when complete
   const { data: equity } = useQuery({
     queryKey: ['equity', selectedRun],
@@ -138,11 +152,48 @@ export function BacktestControl() {
     enabled: backtest?.status === 'completed',
   });
 
+  const symbolsFromTrades = useMemo(() => {
+    const unique = new Set(trades.map((trade) => trade.symbol).filter(Boolean));
+    return Array.from(unique).sort();
+  }, [trades]);
+
+  const availableSymbols = useMemo(() => {
+    if (selectedRunMeta?.symbols?.length) {
+      return selectedRunMeta.symbols;
+    }
+    if (symbolsFromTrades.length) {
+      return symbolsFromTrades;
+    }
+    return config.symbols;
+  }, [config.symbols, selectedRunMeta, symbolsFromTrades]);
+
+  useEffect(() => {
+    if (!availableSymbols.length) {
+      if (selectedSymbol) {
+        setSelectedSymbol('');
+      }
+      return;
+    }
+    if (!selectedSymbol || !availableSymbols.includes(selectedSymbol)) {
+      setSelectedSymbol(availableSymbols[0]);
+    }
+  }, [availableSymbols, selectedSymbol]);
+
+  const activeSymbol = selectedSymbol || availableSymbols[0] || '';
+  const showSymbolPicker = availableSymbols.length > 1;
+
   const { data: candles = [] } = useQuery({
-    queryKey: ['candles', selectedRun, config.symbols[0]],
-    queryFn: () => backtestAPI.getPlaybackCandles(selectedRun!, config.symbols[0], 0, 2000),
-    enabled: backtest?.status === 'completed' && !!config.symbols[0],
+    queryKey: ['candles', selectedRun, activeSymbol],
+    queryFn: () => backtestAPI.getPlaybackCandles(selectedRun!, activeSymbol, 0, 2000),
+    enabled: backtest?.status === 'completed' && !!activeSymbol,
   });
+
+  const chartTrades = useMemo(() => {
+    if (!activeSymbol) {
+      return trades;
+    }
+    return trades.filter((trade) => trade.symbol === activeSymbol);
+  }, [activeSymbol, trades]);
 
   const parseAllocations = (
     value: string,
@@ -783,13 +834,33 @@ export function BacktestControl() {
           {/* Price Chart with Market Data */}
           {candles.length > 0 && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-              <h2 className="text-xl font-semibold mb-4">Market Price Action</h2>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                Candlestick chart showing price movements, technical indicators, and trade executions
-              </p>
+              <div className="flex flex-wrap items-start justify-between gap-4 mb-4">
+                <div>
+                  <h2 className="text-xl font-semibold">Market Price Action</h2>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Candlestick chart showing price movements, technical indicators, and trade executions
+                  </p>
+                </div>
+                {showSymbolPicker && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-gray-500 dark:text-gray-400">Symbol</span>
+                    <select
+                      value={activeSymbol}
+                      onChange={(e) => setSelectedSymbol(e.target.value)}
+                      className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                    >
+                      {availableSymbols.map((symbol) => (
+                        <option key={symbol} value={symbol}>
+                          {symbol}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
               <CandlestickChart
                 candles={candles}
-                trades={trades}
+                trades={chartTrades}
                 currentIndex={candles.length - 1}
               />
             </div>
@@ -854,14 +925,32 @@ export function BacktestControl() {
         )}
 
         {/* Interactive Playback Viewer */}
-        {isComplete && selectedRun && (
+        {isComplete && selectedRun && activeSymbol && (
           <div className="mt-6">
-            <h2 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100">
-              Interactive Playback
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-gray-100">
+                Interactive Playback
+              </h2>
+              {showSymbolPicker && (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500 dark:text-gray-400">Symbol</span>
+                  <select
+                    value={activeSymbol}
+                    onChange={(e) => setSelectedSymbol(e.target.value)}
+                    className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                  >
+                    {availableSymbols.map((symbol) => (
+                      <option key={symbol} value={symbol}>
+                        {symbol}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
             <BacktestPlaybackViewer
               runId={selectedRun}
-              symbol={config.symbols[0]}
+              symbol={activeSymbol}
             />
           </div>
         )}

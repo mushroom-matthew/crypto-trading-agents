@@ -18,6 +18,23 @@ PERFORMANCE SNAPSHOT:
 RECENT TRANSACTIONS:
 {transaction_summary}
 
+FILL DETAILS SINCE LAST JUDGE:
+{fill_details}
+
+TRIGGER ATTEMPTS SINCE LAST JUDGE:
+{trigger_attempts}
+
+ACTIVE TRIGGERS:
+{active_triggers}
+
+RISK STATE:
+{risk_state}
+
+INTERPRETATION GUIDANCE:
+- Use fills_since_last_judge to assess trade quality, trigger adherence, and timing. If trades are sparse, check trigger_attempts to see if signals were blocked.
+- Use trigger_attempts to identify triggers that frequently fire but are blocked (risk limits, cooldowns, missing indicators). Recommend specific trigger adjustments or constraint changes.
+- Use risk_state to interpret whether the system is capacity-constrained (budget or trade caps). If budget is near exhaustion, recommend conservative adjustments or reduced trigger load.
+
 TRADING STATISTICS:
 - Total transactions: {total_transactions}
 - Buy orders: {buy_count}
@@ -69,6 +86,15 @@ JSON:
     "sizing_adjustments": {{"SYMBOL": "<instruction>"}}
   }}
 }}
+
+CONSTRAINT LIMITS:
+- NEVER disable all entry categories. At least ONE of these must remain enabled:
+  - trend_continuation
+  - reversal
+  - volatility_breakout
+  - mean_reversion
+- If all categories are performing poorly, keep the BEST-performing entry category enabled and recommend adjustments.
+- The emergency_exit category should almost never be disabled; it is a safety mechanism.
 
 Rules:
 - Always include every key above even if arrays are empty.

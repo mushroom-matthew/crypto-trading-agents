@@ -275,7 +275,12 @@ class StrategyPlanProvider:
                 raise ValueError(f"Unsupported trigger direction '{trigger.direction}' for trigger {trigger.id}")
             if direction == "exit":
                 exit_present = True
-            normalized_triggers.append(trigger.model_copy(update={"direction": direction}))
+            confidence = trigger.confidence_grade
+            if confidence is None:
+                confidence = "A" if trigger.category == "emergency_exit" else "B"
+            normalized_triggers.append(
+                trigger.model_copy(update={"direction": direction, "confidence_grade": confidence})
+            )
         plan.triggers = normalized_triggers
         # Prune triggers that would be blocked by allowed_directions immediately.
         plan.triggers = [tr for tr in plan.triggers if tr.direction in valid_directions]
