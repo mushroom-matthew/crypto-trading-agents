@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Literal
 
 from schemas.llm_strategist import IndicatorSnapshot, PortfolioState, PositionSizingRule, RiskConstraint
 
@@ -145,6 +145,7 @@ class RiskEngine:
         stop_distance: float | None = None,
         archetype: str | None = None,
         hour: int | None = None,
+        side: Literal["long", "short"] | None = None,
     ) -> float:
         self.last_block_reason = None
         if price <= 0:
@@ -161,16 +162,38 @@ class RiskEngine:
             return 0.0
 
         # Derive a stop-distance proxy (true stop preferred; fallback to ATR).
-        if stop_distance is None and indicator.atr_14 is not None:
+        explicit_stop = stop_distance is not None and stop_distance > 0
+        if explicit_stop:
+            stop_distance = float(stop_distance)
+        elif indicator.atr_14 is not None and indicator.atr_14 > 0:
             stop_distance = float(indicator.atr_14)
+        else:
+            stop_distance = None
+
+        if side == "short" and not explicit_stop:
+            self.last_block_reason = "short_stop_required"
+            return 0.0
 
         # Compute per-trade risk cap in notional terms; if a stop exists, convert allowed loss to notional.
         risk_cap_abs = portfolio.equity * self._scaled_fraction(self.constraints.max_position_risk_pct, symbol, archetype, hour)
-        if stop_distance and price > 0:
-            qty_cap = risk_cap_abs / max(stop_distance, 1e-9)
+        existing_qty = portfolio.positions.get(symbol, 0.0)
+        side_sign = 1.0 if side == "long" else -1.0 if side == "short" else 0.0
+        scale_in = bool(side_sign and existing_qty * side_sign > 0)
+        existing_qty_abs = abs(existing_qty) if scale_in else 0.0
+        existing_notional = existing_qty_abs * price
+        if stop_distance is not None and price > 0:
+            existing_risk_abs = existing_qty_abs * stop_distance
+        else:
+            existing_risk_abs = existing_notional
+        remaining_risk_abs = risk_cap_abs - existing_risk_abs if scale_in else risk_cap_abs
+        if remaining_risk_abs <= 0:
+            self.last_block_reason = "aggregate_risk_cap" if scale_in else "max_position_risk_pct"
+            return 0.0
+        if stop_distance is not None and price > 0:
+            qty_cap = remaining_risk_abs / max(stop_distance, 1e-9)
             position_cap = qty_cap * price
         else:
-            position_cap = risk_cap_abs
+            position_cap = remaining_risk_abs
 
         caps = {
             "max_position_risk_pct": position_cap,
@@ -195,18 +218,26 @@ class RiskEngine:
             return 0.0
         quantity = max(0.0, final / price)
         actual_risk = None
-        if stop_distance and price > 0 and quantity > 0:
+        if stop_distance is not None and price > 0 and quantity > 0:
             actual_risk = quantity * stop_distance
+        incremental_risk = actual_risk if actual_risk is not None else (final if quantity > 0 else None)
+        combined_risk = (existing_risk_abs + incremental_risk) if (incremental_risk is not None and scale_in) else incremental_risk
         self.last_risk_snapshot = {
             "equity": portfolio.equity,
             "stop_distance": stop_distance,
             "risk_cap_abs": risk_cap_abs,
             "risk_cap_notional": position_cap,
+            "risk_cap_remaining_abs": remaining_risk_abs,
             "desired_notional": desired_notional,
             "final_notional": final,
             "allocated_risk_pct": self.constraints.max_position_risk_pct,
             "allocated_risk_abs": risk_cap_abs,
             "actual_risk_abs": actual_risk,
+            "incremental_risk_abs": incremental_risk,
+            "combined_risk_abs": combined_risk,
+            "existing_qty": existing_qty,
+            "existing_notional": existing_notional if scale_in else 0.0,
+            "existing_risk_abs": existing_risk_abs if scale_in else 0.0,
             "archetype": archetype,
             "hour": hour,
             "profile_multiplier": multiplier,

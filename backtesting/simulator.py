@@ -33,6 +33,30 @@ class PortfolioBacktestResult:
     summary: Dict[str, Any]
     per_pair: Dict[str, BacktestResult]
 
+def _sanitize_stop_distance(value: float | None) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    try:
+        dist = float(value)
+    except (TypeError, ValueError):
+        return None
+    return dist if dist > 0 else None
+
+
+def _risk_usage(
+    qty: float,
+    price: float,
+    cap: float | None,
+    stop_distance: float | None,
+) -> tuple[float, float]:
+    notional = qty * price
+    if stop_distance is not None and stop_distance > 0:
+        actual_risk = qty * stop_distance
+    else:
+        actual_risk = notional
+    risk_used = min(actual_risk, cap) if cap is not None else actual_risk
+    return risk_used, actual_risk
+
 
 def _apply_intents(
     intents: List[Intent],
@@ -40,6 +64,7 @@ def _apply_intents(
     cost_basis: Dict[str, float],
     price: float,
     fee_rate: float,
+    stop_distance: float | None = None,
     risk_limits: "RiskLimitSettings | None" = None,
 ) -> List[Dict[str, Any]]:
     fills: List[Dict[str, Any]] = []
@@ -66,8 +91,7 @@ def _apply_intents(
             portfolio.positions[symbol] = portfolio.positions.get(symbol, 0.0) + qty
             cost_basis[symbol] = cost_basis.get(symbol, 0.0) + total_cost
             cap = _per_trade_cap(portfolio.equity)
-            notional = qty * price
-            risk_used = min(notional, cap) if cap is not None else notional
+            risk_used, actual_risk = _risk_usage(qty, price, cap, stop_distance)
             fills.append({
                 "symbol": symbol,
                 "side": "BUY",
@@ -76,7 +100,7 @@ def _apply_intents(
                 "fee": fee,
                 "pnl": 0.0,
                 "risk_used_abs": risk_used,
-                "actual_risk_at_stop": risk_used,
+                "actual_risk_at_stop": actual_risk,
                 "trigger_id": "baseline_strategy",
                 "timeframe": "1h",
             })
@@ -100,8 +124,7 @@ def _apply_intents(
                 portfolio.positions[symbol] = new_qty
                 cost_basis[symbol] = max(0.0, basis_total - basis_portion)
             cap = _per_trade_cap(portfolio.equity)
-            notional = qty_to_sell * price
-            risk_used = min(notional, cap) if cap is not None else notional
+            risk_used, actual_risk = _risk_usage(qty_to_sell, price, cap, stop_distance)
             fills.append({
                 "symbol": symbol,
                 "side": "SELL",
@@ -110,7 +133,7 @@ def _apply_intents(
                 "fee": fee,
                 "pnl": pnl,
                 "risk_used_abs": risk_used,
-                "actual_risk_at_stop": risk_used,
+                "actual_risk_at_stop": actual_risk,
                 "trigger_id": "baseline_strategy",
                 "timeframe": "1h",
             })
@@ -123,6 +146,7 @@ def _apply_intents_multi(
     cost_basis: Dict[str, float],
     prices: Dict[str, float],
     fee_rate: float,
+    stop_distances: Dict[str, float] | None = None,
     risk_limits: "RiskLimitSettings | None" = None,
 ) -> List[Dict[str, Any]]:
     fills: List[Dict[str, Any]] = []
@@ -140,6 +164,7 @@ def _apply_intents_multi(
         price = prices.get(symbol)
         if price is None or price <= 0:
             continue
+        stop_distance = stop_distances.get(symbol) if stop_distances else None
         if intent.action == "BUY":
             allocation = portfolio.cash * max(0.0, min(intent.size_hint, 1.0))
             if allocation <= 0:
@@ -153,8 +178,7 @@ def _apply_intents_multi(
             portfolio.positions[symbol] = portfolio.positions.get(symbol, 0.0) + qty
             cost_basis[symbol] = cost_basis.get(symbol, 0.0) + total_cost
             cap = _per_trade_cap(portfolio.equity)
-            notional = qty * price
-            risk_used = min(notional, cap) if cap is not None else notional
+            risk_used, actual_risk = _risk_usage(qty, price, cap, stop_distance)
             fills.append({
                 "symbol": symbol,
                 "side": "BUY",
@@ -163,7 +187,7 @@ def _apply_intents_multi(
                 "fee": fee,
                 "pnl": 0.0,
                 "risk_used_abs": risk_used,
-                "actual_risk_at_stop": risk_used,
+                "actual_risk_at_stop": actual_risk,
                 "trigger_id": "baseline_strategy",
                 "timeframe": "1h",
             })
@@ -187,8 +211,7 @@ def _apply_intents_multi(
                 portfolio.positions[symbol] = new_qty
                 cost_basis[symbol] = max(0.0, basis_total - basis_portion)
             cap = _per_trade_cap(portfolio.equity)
-            notional = qty_to_sell * price
-            risk_used = min(notional, cap) if cap is not None else notional
+            risk_used, actual_risk = _risk_usage(qty_to_sell, price, cap, stop_distance)
             fills.append({
                 "symbol": symbol,
                 "side": "SELL",
@@ -197,7 +220,7 @@ def _apply_intents_multi(
                 "fee": fee,
                 "pnl": pnl,
                 "risk_used_abs": risk_used,
-                "actual_risk_at_stop": risk_used,
+                "actual_risk_at_stop": actual_risk,
                 "trigger_id": "baseline_strategy",
                 "timeframe": "1h",
             })
@@ -211,6 +234,7 @@ def _flatten_positions(
     timestamp: pd.Timestamp | None,
     fee_rate: float,
     trades: List[Dict[str, Any]],
+    stop_distances: Dict[str, float] | None = None,
     risk_limits: "RiskLimitSettings | None" = None,
 ) -> None:
     if timestamp is None:
@@ -232,7 +256,8 @@ def _flatten_positions(
             pct = getattr(risk_limits, "max_position_risk_pct", None) or 0.0
             if pct > 0:
                 cap = portfolio.equity * (pct / 100.0)
-        risk_used = min(notional, cap) if cap is not None else notional
+        stop_distance = stop_distances.get(symbol) if stop_distances else None
+        risk_used, actual_risk = _risk_usage(abs(qty), price, cap, stop_distance)
         if side == "SELL":
             portfolio.cash += notional - fee
         else:
@@ -245,7 +270,7 @@ def _flatten_positions(
             "fee": fee,
             "pnl": pnl,
             "risk_used_abs": risk_used,
-            "actual_risk_at_stop": risk_used,
+            "actual_risk_at_stop": actual_risk,
             "trigger_id": "baseline_strategy",
             "timeframe": "1h",
             "time": timestamp,
@@ -264,6 +289,7 @@ def _flatten_positions_multi(
     timestamp: pd.Timestamp | None,
     fee_rate: float,
     trades: List[Dict[str, Any]],
+    stop_distances: Dict[str, float] | None = None,
     risk_limits: "RiskLimitSettings | None" = None,
 ) -> None:
     _flatten_positions(
@@ -273,6 +299,7 @@ def _flatten_positions_multi(
         timestamp,
         fee_rate,
         trades,
+        stop_distances=stop_distances,
         risk_limits=risk_limits,
     )
 
@@ -431,6 +458,7 @@ def run_backtest(
     last_day: datetime.date | None = None
     last_timestamp: pd.Timestamp | None = None
     last_prices: Dict[str, float] = {pair: initial_price}
+    last_stop_distances: Dict[str, float] = {}
 
     features_window = features[(features.index >= trade_start) & (features.index <= trade_end)]
     if features_window.empty:
@@ -442,8 +470,20 @@ def run_backtest(
             progress_callback(idx, total_rows, ts.isoformat())
         day = ts.date()
         if flatten_positions_daily and last_day and day != last_day:
-            _flatten_positions(portfolio, cost_basis, last_prices, last_timestamp, fee_rate, trades, risk_limits=risk_limits)
+            _flatten_positions(
+                portfolio,
+                cost_basis,
+                last_prices,
+                last_timestamp,
+                fee_rate,
+                trades,
+                stop_distances=last_stop_distances,
+                risk_limits=risk_limits,
+            )
         price = float(row["close"])
+        stop_distance = _sanitize_stop_distance(row.get("atr"))
+        if stop_distance is not None:
+            last_stop_distances[pair] = stop_distance
         feature_vector = {
             "symbol": pair,
             "time": ts,
@@ -455,7 +495,15 @@ def run_backtest(
             "volume_multiple": float(row["volume_multiple"]),
         }
         intents = strategy.decide(feature_vector, portfolio)
-        fills = _apply_intents(intents, portfolio, cost_basis, price, fee_rate, risk_limits=risk_limits)
+        fills = _apply_intents(
+            intents,
+            portfolio,
+            cost_basis,
+            price,
+            fee_rate,
+            stop_distance=stop_distance,
+            risk_limits=risk_limits,
+        )
         trades.extend({"time": ts, **fill} for fill in fills)
 
         equity = portfolio.cash
@@ -470,7 +518,15 @@ def run_backtest(
         last_prices[pair] = price
 
     if flatten_positions_daily:
-        _flatten_positions(portfolio, cost_basis, last_prices, last_timestamp, fee_rate, trades)
+        _flatten_positions(
+            portfolio,
+            cost_basis,
+            last_prices,
+            last_timestamp,
+            fee_rate,
+            trades,
+            stop_distances=last_stop_distances,
+        )
 
     equity_series = pd.Series(equity_points, index=equity_index)
     trades_df = pd.DataFrame(trades)
@@ -525,6 +581,7 @@ def run_multi_asset_backtest(
     last_day: datetime.date | None = None
     last_timestamp: pd.Timestamp | None = None
     last_prices: Dict[str, float] = dict(initial_prices)
+    last_stop_distances: Dict[str, float] = {}
 
     total_rows = len(timestamps)
     for idx, ts in enumerate(timestamps):
@@ -539,6 +596,7 @@ def run_multi_asset_backtest(
                 last_timestamp,
                 fee_rate,
                 trades,
+                stop_distances=last_stop_distances,
                 risk_limits=risk_limits,
             )
 
@@ -550,6 +608,9 @@ def run_multi_asset_backtest(
             row = features.loc[ts]
             price = float(row["close"])
             last_prices[pair] = price
+            stop_distance = _sanitize_stop_distance(row.get("atr"))
+            if stop_distance is not None:
+                last_stop_distances[pair] = stop_distance
             feature_vector = {
                 "symbol": pair,
                 "time": ts,
@@ -562,7 +623,15 @@ def run_multi_asset_backtest(
             }
             intents.extend(strategy.decide(feature_vector, portfolio))
 
-        fills = _apply_intents_multi(intents, portfolio, cost_basis, last_prices, fee_rate, risk_limits=risk_limits)
+        fills = _apply_intents_multi(
+            intents,
+            portfolio,
+            cost_basis,
+            last_prices,
+            fee_rate,
+            stop_distances=last_stop_distances,
+            risk_limits=risk_limits,
+        )
         trades.extend({"time": ts, **fill} for fill in fills)
 
         equity = portfolio.cash
@@ -587,6 +656,7 @@ def run_multi_asset_backtest(
             last_timestamp,
             fee_rate,
             trades,
+            stop_distances=last_stop_distances,
             risk_limits=risk_limits,
         )
 

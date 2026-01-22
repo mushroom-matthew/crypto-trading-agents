@@ -39,6 +39,11 @@ class StrategistPlanService:
         )
         self.min_trade_hint_cap = int(os.environ.get("STRATEGIST_PLAN_MIN_TRADE_CAP", "3"))
         self.strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
+        self.legacy_cap_floor = os.environ.get("STRATEGIST_PLAN_LEGACY_DERIVED_CAP_FLOOR", "false").lower() == "true"
+        try:
+            self.min_cap_floor = int(os.environ.get("STRATEGIST_PLAN_DERIVED_CAP_MIN_FLOOR", "8"))
+        except ValueError:
+            self.min_cap_floor = 8
 
     def generate_plan_for_run(
         self,
@@ -78,22 +83,30 @@ class StrategistPlanService:
             if not self.strict_fixed_caps:
                 plan.max_trades_per_day = derived_cap
         elif plan.risk_constraints.max_daily_risk_budget_pct is not None and plan.risk_constraints.max_position_risk_pct > 0:
-            fallback_cap = max(
-                8,
-                math.ceil(plan.risk_constraints.max_daily_risk_budget_pct / plan.risk_constraints.max_position_risk_pct),
+            per_trade_risk = plan.risk_constraints.max_position_risk_pct
+            if plan.sizing_rules:
+                risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
+                if risks:
+                    per_trade_risk = min(risks)
+            budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
+            per_trade_risk_for_cap = min(per_trade_risk, budget_pct) if budget_pct else per_trade_risk
+            fallback_cap = self._derive_trade_cap(
+                budget_pct,
+                per_trade_risk_for_cap,
             )
-            if not self.strict_fixed_caps:
-                plan.max_trades_per_day = fallback_cap
-            object.__setattr__(plan, "_derived_trade_cap", fallback_cap)
-            object.__setattr__(plan, "_derived_trigger_cap", fallback_cap)
-            cap_inputs = getattr(plan, "_cap_inputs", None) or {}
-            if plan.risk_constraints.max_daily_risk_budget_pct and plan.risk_constraints.max_position_risk_pct:
-                cap_inputs = {
-                    "risk_budget_pct": plan.risk_constraints.max_daily_risk_budget_pct,
-                    "per_trade_risk_pct": plan.risk_constraints.max_position_risk_pct,
-                }
-            if cap_inputs:
-                object.__setattr__(plan, "_cap_inputs", cap_inputs)
+            if fallback_cap is not None:
+                if not self.strict_fixed_caps:
+                    plan.max_trades_per_day = fallback_cap
+                object.__setattr__(plan, "_derived_trade_cap", fallback_cap)
+                object.__setattr__(plan, "_derived_trigger_cap", fallback_cap)
+                cap_inputs = getattr(plan, "_cap_inputs", None) or {}
+                if budget_pct and per_trade_risk_for_cap:
+                    cap_inputs = {
+                        "risk_budget_pct": budget_pct,
+                        "per_trade_risk_pct": per_trade_risk_for_cap,
+                    }
+                if cap_inputs:
+                    object.__setattr__(plan, "_cap_inputs", cap_inputs)
         plan.run_id = run.run_id
         combined_symbols = sorted({*(run.config.symbols or []), *(asset.symbol for asset in llm_input.assets)})
         if not plan.allowed_symbols:
@@ -192,6 +205,18 @@ class StrategistPlanService:
                 cleaned[symbol] = val
         return cleaned
 
+    def _derive_trade_cap(self, budget_pct: float | None, per_trade_risk: float | None) -> int | None:
+        if not budget_pct or not per_trade_risk:
+            return None
+        if budget_pct <= 0 or per_trade_risk <= 0:
+            return None
+        if self.legacy_cap_floor:
+            return max(self.min_cap_floor, math.ceil(budget_pct / per_trade_risk))
+        cap = max(1, math.floor(budget_pct / per_trade_risk))
+        if self.min_cap_floor > 0 and self.min_cap_floor * per_trade_risk <= budget_pct:
+            cap = max(cap, self.min_cap_floor)
+        return cap
+
     def _enforce_derived_trade_cap(self, plan: StrategyPlan) -> StrategyPlan:
         """Ensure plans with a daily risk budget enforce the derived trade cap."""
 
@@ -208,10 +233,11 @@ class StrategistPlanService:
             if per_trade_risk is None or per_trade_risk <= 0:
                 per_trade_risk = plan.risk_constraints.max_position_risk_pct
             if per_trade_risk and per_trade_risk > 0 and budget_pct and budget_pct > 0:
-                derived_cap = max(8, math.ceil(budget_pct / per_trade_risk))
+                per_trade_risk_for_cap = min(per_trade_risk, budget_pct)
+                derived_cap = self._derive_trade_cap(budget_pct, per_trade_risk_for_cap)
             cap_inputs = getattr(plan, "_cap_inputs", None) or {}
             if budget_pct and per_trade_risk:
-                cap_inputs = {"risk_budget_pct": budget_pct, "per_trade_risk_pct": per_trade_risk}
+                cap_inputs = {"risk_budget_pct": budget_pct, "per_trade_risk_pct": per_trade_risk_for_cap}
             if cap_inputs:
                 object.__setattr__(plan, "_cap_inputs", cap_inputs)
         if not derived_cap:

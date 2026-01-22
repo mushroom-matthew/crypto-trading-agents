@@ -225,6 +225,11 @@ class StrategyPlanProvider:
         default_max_trades = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRADES", "10"))
         default_max_triggers = int(os.environ.get("STRATEGIST_PLAN_DEFAULT_MAX_TRIGGERS_PER_SYMBOL", str(default_max_trades)))
         strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
+        legacy_cap_floor = os.environ.get("STRATEGIST_PLAN_LEGACY_DERIVED_CAP_FLOOR", "false").lower() == "true"
+        try:
+            min_cap_floor = int(os.environ.get("STRATEGIST_PLAN_DERIVED_CAP_MIN_FLOOR", "8"))
+        except ValueError:
+            min_cap_floor = 8
 
         if plan.max_trades_per_day is None:
             plan.max_trades_per_day = default_max_trades
@@ -248,20 +253,28 @@ class StrategyPlanProvider:
             if plan.risk_constraints.max_position_risk_pct < budget_pct:
                 boosted = min(budget_pct, plan.risk_constraints.max_position_risk_pct * 6)
                 plan.risk_constraints.max_position_risk_pct = boosted
+            # Ensure sizing rules reflect the boosted per-trade risk cap so trades consume more budget.
+            for rule in plan.sizing_rules:
+                if not rule.target_risk_pct or rule.target_risk_pct < plan.risk_constraints.max_position_risk_pct:
+                    rule.target_risk_pct = plan.risk_constraints.max_position_risk_pct
             # Use the smallest non-zero sizing target as per-trade risk proxy; fall back to max_position_risk_pct.
             target_risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
             per_trade_risk = min(target_risks) if target_risks else plan.risk_constraints.max_position_risk_pct
+            if plan.risk_constraints.max_position_risk_pct > 0:
+                per_trade_risk = min(per_trade_risk, plan.risk_constraints.max_position_risk_pct)
             if per_trade_risk and per_trade_risk > 0:
-                derived_cap = max(8, math.ceil(budget_pct / per_trade_risk))
+                per_trade_risk_for_cap = min(per_trade_risk, budget_pct) if budget_pct else per_trade_risk
+                if legacy_cap_floor:
+                    derived_cap = max(min_cap_floor, math.ceil(budget_pct / per_trade_risk_for_cap))
+                else:
+                    derived_cap = max(1, math.floor(budget_pct / per_trade_risk_for_cap))
+                    if min_cap_floor > 0 and min_cap_floor * per_trade_risk_for_cap <= budget_pct:
+                        derived_cap = max(derived_cap, min_cap_floor)
                 derived_trigger_cap = derived_cap
-                cap_inputs = {"risk_budget_pct": budget_pct, "per_trade_risk_pct": per_trade_risk}
+                cap_inputs = {"risk_budget_pct": budget_pct, "per_trade_risk_pct": per_trade_risk_for_cap}
                 if not strict_fixed_caps:
                     plan.max_trades_per_day = min(plan.max_trades_per_day or derived_cap, derived_cap)
                     plan.max_triggers_per_symbol_per_day = min(plan.max_triggers_per_symbol_per_day or derived_trigger_cap, derived_trigger_cap)
-        # Ensure sizing rules reflect the boosted per-trade risk cap so trades consume more budget.
-        for rule in plan.sizing_rules:
-            if not rule.target_risk_pct or rule.target_risk_pct < plan.risk_constraints.max_position_risk_pct:
-                rule.target_risk_pct = plan.risk_constraints.max_position_risk_pct
         if not plan.allowed_symbols:
             plan.allowed_symbols = universe
         normalized_triggers = []
