@@ -78,6 +78,9 @@ uv run python -c "from trading_core import trade_quality; from agents.analytics 
 git commit -m "Metrics: live parity, leverage, win rate, sharpe"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

@@ -64,6 +64,9 @@ uv run pytest -k llm_strategist_runner -vv
 git commit -m "Policy pivot: no-change replan guard"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

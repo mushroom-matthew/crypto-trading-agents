@@ -147,6 +147,7 @@ Required behavior
 - Do not commit until:
   1) tests listed in the runbook pass or the user provides explicit test output, AND
   2) Human Verification Evidence is filled in (when required).
+- Update the runbook Change Log section with a dated summary of changes and files touched.
 - If a test can’t be run, ask the human for pasted output and record it in the runbook.
 - Keep changes isolated to the runbook’s files; avoid conflicts with other branches.
 
@@ -154,6 +155,7 @@ Deliverables
 - Implement the runbook scope.
 - Run the runbook tests and paste output into the runbook’s Test Evidence section.
 - Request human verification when required and paste the human feedback into the runbook’s Human Verification Evidence section.
+- Update the runbook Change Log section.
 - Commit using the message specified in the runbook.
 
 Report format

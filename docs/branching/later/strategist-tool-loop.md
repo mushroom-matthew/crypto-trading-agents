@@ -79,6 +79,9 @@ uv run pytest -k paper_trading -vv
 git commit -m "Strategist: read-only tool loop"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

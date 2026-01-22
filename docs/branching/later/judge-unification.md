@@ -73,6 +73,9 @@ uv run python -c "from services import judge_feedback_service"
 git commit -m "Judge: unify heuristics and LLM feedback"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

@@ -84,6 +84,9 @@ uv run pytest -k trigger_engine -vv
 git commit -m "Scalper mode: aggressive configs and comparison tooling"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

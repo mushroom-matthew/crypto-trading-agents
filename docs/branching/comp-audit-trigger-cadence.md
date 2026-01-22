@@ -69,6 +69,9 @@ uv run pytest -k llm_strategist_runner -vv
 git commit -m "Trigger cadence: scalper min-hold and signal serialization"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

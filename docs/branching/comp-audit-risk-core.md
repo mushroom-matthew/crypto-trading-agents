@@ -79,6 +79,9 @@ uv run python -c "from agents.strategies import risk_engine; from backtesting im
 git commit -m "Risk: enforce daily budget and aggregate stop risk"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

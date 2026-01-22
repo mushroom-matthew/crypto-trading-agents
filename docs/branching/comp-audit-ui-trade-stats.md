@@ -71,6 +71,9 @@ uv run pytest -k live -vv
 git commit -m "UI: trade-level risk and performance stats"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

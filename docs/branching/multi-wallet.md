@@ -98,6 +98,9 @@ uv run python -c "from app.wallets import factory"
 git commit -m "Wallets: multi-provider support and Phantom reconciliation"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

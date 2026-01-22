@@ -67,6 +67,9 @@ uv run pytest -k ops_api -vv
 git commit -m "UI: optional unification enhancements"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

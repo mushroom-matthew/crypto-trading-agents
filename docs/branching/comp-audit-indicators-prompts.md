@@ -75,6 +75,9 @@ uv run python -c "from agents.analytics import indicator_snapshots; from metrics
 git commit -m "Indicators: fast presets, Donchian highs/lows, optimized compute"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

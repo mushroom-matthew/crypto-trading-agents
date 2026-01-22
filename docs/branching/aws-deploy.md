@@ -74,6 +74,9 @@ cd infra/terraform && terraform validate
 git commit -m "AWS deploy: ECS, Terraform, secrets, CI/CD"
 ```
 
+## Change Log (update during implementation)
+- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
 ## Test Evidence (append results before commit)
 
 ## Human Verification Evidence (append results before commit when required)

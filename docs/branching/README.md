@@ -30,3 +30,6 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 
 ## Human Verification Evidence
 - Follow the Human Verification section in each runbook and paste your observations into the Human Verification Evidence section before committing.
+
+## Change Log
+- Each runbook includes a Change Log section. Agents must update it with a brief summary of changes and files touched before committing.
