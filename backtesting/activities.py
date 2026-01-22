@@ -255,6 +255,8 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     # Debug trigger evaluation sampling
     debug_trigger_sample_rate = config.get("debug_trigger_sample_rate", 0.0)
     debug_trigger_max_samples = config.get("debug_trigger_max_samples", 100)
+    indicator_debug_mode = config.get("indicator_debug_mode")
+    indicator_debug_keys = config.get("indicator_debug_keys")
 
     # Vector store for trigger examples
     use_trigger_vector_store = config.get("use_trigger_vector_store", False)
@@ -332,6 +334,8 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         # Debug trigger evaluation sampling
         debug_trigger_sample_rate=debug_trigger_sample_rate,
         debug_trigger_max_samples=debug_trigger_max_samples,
+        indicator_debug_mode=indicator_debug_mode,
+        indicator_debug_keys=indicator_debug_keys,
         # Vector store for trigger examples
         use_trigger_vector_store=use_trigger_vector_store,
         # Adaptive judge workflow
@@ -478,7 +482,14 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         "bar_decisions": result.bar_decisions,
         "final_cash": result.final_cash,
         "final_positions": result.final_positions,
+        "intraday_judge_history": result.intraday_judge_history,
+        "judge_triggered_replans": result.judge_triggered_replans,
     }
+    if isinstance(result.summary, dict):
+        if result.summary.get("trigger_evaluation_samples") is not None:
+            llm_data["trigger_evaluation_samples"] = result.summary["trigger_evaluation_samples"]
+        if result.summary.get("trigger_evaluation_sample_count") is not None:
+            llm_data["trigger_evaluation_sample_count"] = result.summary["trigger_evaluation_sample_count"]
 
     run_id = config.get("run_id", "llm-backtest")
     full_payload = {
@@ -529,13 +540,42 @@ async def persist_results_activity(
 
     logger.info(f"Persisting backtest results for {run_id}")
 
+    results_payload = results
+    llm_data = results.get("llm_data") or {}
+    artifact_path = llm_data.get("artifact_path") if isinstance(llm_data, dict) else None
+    if artifact_path:
+        try:
+            from ops_api.routers.backtests import load_backtest_from_disk
+
+            disk_payload = load_backtest_from_disk(run_id)
+        except Exception as exc:
+            logger.warning("Failed to load artifact payload for %s: %s", run_id, exc)
+            disk_payload = None
+        if disk_payload:
+            results_payload = dict(disk_payload)
+            for key in (
+                "run_id",
+                "status",
+                "started_at",
+                "completed_at",
+                "candles_total",
+                "candles_processed",
+                "config",
+                "strategy",
+            ):
+                if results.get(key) is not None:
+                    results_payload[key] = results[key]
+            if isinstance(results_payload.get("llm_data"), dict):
+                results_payload["llm_data"].setdefault("artifact_path", artifact_path)
+                results_payload["llm_data"].setdefault("stored", True)
+
     try:
-        await persist_backtest_results(run_id, results)
+        await persist_backtest_results(run_id, results_payload)
     except Exception as exc:
         logger.warning("Failed to persist backtest %s to DB: %s", run_id, exc)
 
     # Write to disk cache unless artifacts were already stored in the activity.
-    llm_data = results.get("llm_data") or {}
+    llm_data = results_payload.get("llm_data") or {}
     artifact_path = llm_data.get("artifact_path") if isinstance(llm_data, dict) else None
     if artifact_path:
         logger.info("Skipping disk write for %s; artifacts already stored at %s", run_id, artifact_path)

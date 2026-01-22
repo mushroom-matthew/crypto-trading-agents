@@ -6,6 +6,10 @@ export interface PlanningSettings {
   max_triggers_per_symbol_per_day?: number;
   judge_cadence_hours?: number;
   judge_check_after_trades?: number;
+  debug_trigger_sample_rate?: number;
+  debug_trigger_max_samples?: number;
+  indicator_debug_mode?: string;
+  indicator_debug_keys?: string[];
 }
 
 interface PlanningSettingsPanelProps<T extends PlanningSettings> {
@@ -133,6 +137,92 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                 </p>
               </div>
             )}
+
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Trigger Debug Sample Rate
+              </label>
+              <input
+                type="number"
+                value={config.debug_trigger_sample_rate ?? 0}
+                onChange={(e) =>
+                  onChange({ ...config, debug_trigger_sample_rate: parseFloat(e.target.value) })
+                }
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                min={0}
+                max={1}
+                step={0.05}
+                disabled={disabled}
+              />
+              <p className="text-xs text-slate-400 mt-1">
+                Fraction of trigger evaluations to trace (0-1)
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Trigger Debug Sample Max
+              </label>
+              <input
+                type="number"
+                value={config.debug_trigger_max_samples ?? 100}
+                onChange={(e) =>
+                  onChange({ ...config, debug_trigger_max_samples: parseInt(e.target.value) })
+                }
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                min={1}
+                max={1000}
+                step={1}
+                disabled={disabled}
+              />
+              <p className="text-xs text-slate-400 mt-1">
+                Max trigger traces to store per run
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Indicator Debug Mode
+              </label>
+              <select
+                value={config.indicator_debug_mode ?? 'off'}
+                onChange={(e) =>
+                  onChange({ ...config, indicator_debug_mode: e.target.value })
+                }
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                disabled={disabled}
+              >
+                <option value="off">Off</option>
+                <option value="full">Full Snapshot</option>
+                <option value="keys">Key List</option>
+              </select>
+              <p className="text-xs text-slate-400 mt-1">
+                Capture indicators per bar for debugging
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Indicator Debug Keys
+              </label>
+              <input
+                type="text"
+                value={(config.indicator_debug_keys ?? []).join(', ')}
+                onChange={(e) => {
+                  const keys = e.target.value
+                    .split(',')
+                    .map((entry) => entry.trim())
+                    .filter(Boolean);
+                  onChange({ ...config, indicator_debug_keys: keys });
+                }}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                placeholder="rsi_14, ema_short, ema_long"
+                disabled={disabled || (config.indicator_debug_mode ?? 'off') !== 'keys'}
+              />
+              <p className="text-xs text-slate-400 mt-1">
+                Comma-separated keys (used when mode = keys)
+              </p>
+            </div>
           </div>
         </div>
       )}

@@ -97,6 +97,26 @@ class PaperTradingSessionConfig(BaseModel):
     )
 
     # ============================================================================
+    # Debug / Diagnostics
+    # ============================================================================
+    debug_trigger_sample_rate: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Probability (0.0-1.0) of sampling trigger evaluations for debugging."
+    )
+    debug_trigger_max_samples: Optional[int] = Field(
+        default=None, ge=1, le=1000,
+        description="Maximum number of trigger evaluation samples to collect (default: 100)"
+    )
+    indicator_debug_mode: Optional[str] = Field(
+        default=None,
+        description="Indicator debug mode: off, full, keys"
+    )
+    indicator_debug_keys: Optional[List[str]] = Field(
+        default=None,
+        description="Indicator keys to capture when indicator_debug_mode=keys"
+    )
+
+    # ============================================================================
     # Whipsaw / Anti-Flip-Flop Controls
     # ============================================================================
     min_hold_hours: Optional[float] = Field(

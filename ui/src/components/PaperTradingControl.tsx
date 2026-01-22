@@ -37,6 +37,7 @@ export function PaperTradingControl() {
     max_trades_per_day: 10,
     max_triggers_per_symbol_per_day: 5,
     judge_check_after_trades: 3,
+    indicator_debug_mode: 'off',
   });
 
   // Selected session

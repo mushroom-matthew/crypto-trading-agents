@@ -325,6 +325,8 @@ class StrategistBacktestResult:
     final_positions: Dict[str, float]
     daily_reports: List[Dict[str, Any]]
     bar_decisions: Dict[str, List[Dict[str, Any]]]
+    intraday_judge_history: List[Dict[str, Any]] = field(default_factory=list)
+    judge_triggered_replans: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class LLMStrategistBacktester:
@@ -366,6 +368,8 @@ class LLMStrategistBacktester:
         debug_trigger_max_samples: int = 100,
         use_trigger_vector_store: bool = False,
         progress_callback: Callable[[Dict[str, Any]], None] | None = None,
+        indicator_debug_mode: str | None = None,
+        indicator_debug_keys: Sequence[str] | None = None,
         # Adaptive judge workflow parameters
         judge_cadence_hours: float = 4.0,  # Minimum hours between judge evaluations
         judge_replan_threshold: float = 40.0,  # Score below which to trigger immediate replan
@@ -439,6 +443,10 @@ class LLMStrategistBacktester:
         self._event_store = EventStore()
         self.window_configs = {tf: IndicatorWindowConfig(timeframe=tf) for tf in self.timeframes}
         self.indicator_frames = self._precompute_indicator_frames()
+        self.indicator_debug_mode = (indicator_debug_mode or "off").strip().lower()
+        self.indicator_debug_keys = [key for key in (indicator_debug_keys or []) if key]
+        if self.indicator_debug_mode in {"none", "off"}:
+            self.indicator_debug_mode = ""
         if isinstance(risk_params, RiskLimitSettings):
             self.base_risk_limits = risk_params
         else:
@@ -470,6 +478,8 @@ class LLMStrategistBacktester:
         self.bar_decisions_by_day: Dict[str, List[Dict[str, Any]]] = {}
         self.trigger_activity_by_day: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         self.skipped_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.replans_by_day: Dict[str, int] = defaultdict(int)
+        self.no_change_replan_suppressed_by_day: Dict[str, int] = defaultdict(int)
         self.current_day_key: str | None = None
         self.latest_daily_summary: Dict[str, Any] | None = None
         self.last_slot_report: Dict[str, Any] | None = None
@@ -984,11 +994,23 @@ class LLMStrategistBacktester:
                 metadata["timeframe_trigger_caps"] = self.timeframe_trigger_caps
             if self.flatten_policy:
                 metadata["flatten_policy"] = self.flatten_policy
+            if self.debug_trigger_sample_rate > 0:
+                metadata["debug_trigger_sample_rate"] = self.debug_trigger_sample_rate
+            if self.debug_trigger_max_samples:
+                metadata["debug_trigger_max_samples"] = self.debug_trigger_max_samples
+            if self.indicator_debug_mode:
+                metadata["indicator_debug_mode"] = self.indicator_debug_mode
+            if self.indicator_debug_keys:
+                metadata["indicator_debug_keys"] = list(self.indicator_debug_keys)
             config = StrategyRunConfig(
                 symbols=self.pairs,
                 timeframes=self.timeframes,
                 history_window_days=history_days,
                 plan_cadence_hours=cadence_hours,
+                debug_trigger_sample_rate=self.debug_trigger_sample_rate or None,
+                debug_trigger_max_samples=self.debug_trigger_max_samples or None,
+                indicator_debug_mode=self.indicator_debug_mode or None,
+                indicator_debug_keys=list(self.indicator_debug_keys),
                 risk_limits=self.base_risk_limits,
                 metadata=metadata,
             )
@@ -1000,6 +1022,22 @@ class LLMStrategistBacktester:
                 run.config.metadata["timeframe_trigger_caps"] = self.timeframe_trigger_caps
             if self.flatten_policy and not run.config.metadata.get("flatten_policy"):
                 run.config.metadata["flatten_policy"] = self.flatten_policy
+            if self.debug_trigger_sample_rate > 0 and not run.config.metadata.get("debug_trigger_sample_rate"):
+                run.config.metadata["debug_trigger_sample_rate"] = self.debug_trigger_sample_rate
+            if self.debug_trigger_max_samples and not run.config.metadata.get("debug_trigger_max_samples"):
+                run.config.metadata["debug_trigger_max_samples"] = self.debug_trigger_max_samples
+            if self.indicator_debug_mode and not run.config.metadata.get("indicator_debug_mode"):
+                run.config.metadata["indicator_debug_mode"] = self.indicator_debug_mode
+            if self.indicator_debug_keys and not run.config.metadata.get("indicator_debug_keys"):
+                run.config.metadata["indicator_debug_keys"] = list(self.indicator_debug_keys)
+            if run.config.debug_trigger_sample_rate is None and self.debug_trigger_sample_rate:
+                run.config.debug_trigger_sample_rate = self.debug_trigger_sample_rate
+            if run.config.debug_trigger_max_samples is None and self.debug_trigger_max_samples:
+                run.config.debug_trigger_max_samples = self.debug_trigger_max_samples
+            if run.config.indicator_debug_mode is None and self.indicator_debug_mode:
+                run.config.indicator_debug_mode = self.indicator_debug_mode
+            if not run.config.indicator_debug_keys and self.indicator_debug_keys:
+                run.config.indicator_debug_keys = list(self.indicator_debug_keys)
             run = self.run_registry.update_strategy_run(run)
         self._refresh_risk_state_from_run(run)
 
@@ -1240,6 +1278,57 @@ class LLMStrategistBacktester:
             "removed_ids": removed_ids[:limit],
             "changed_ids": changed_ids[:limit],
         }
+
+    @staticmethod
+    def _plan_constraints_signature(plan: StrategyPlan) -> tuple:
+        risk = plan.risk_constraints
+        trigger_budgets = tuple(sorted((plan.trigger_budgets or {}).items()))
+        sizing_rules = tuple(
+            sorted(
+                (
+                    rule.symbol,
+                    rule.sizing_mode,
+                    rule.target_risk_pct,
+                    rule.vol_target_annual,
+                    rule.notional,
+                )
+                for rule in plan.sizing_rules
+            )
+        )
+        return (
+            risk.max_position_risk_pct,
+            risk.max_symbol_exposure_pct,
+            risk.max_portfolio_exposure_pct,
+            risk.max_daily_loss_pct,
+            risk.max_daily_risk_budget_pct,
+            plan.max_trades_per_day,
+            plan.min_trades_per_day,
+            plan.max_triggers_per_symbol_per_day,
+            tuple(sorted(plan.allowed_symbols or [])),
+            tuple(sorted(plan.allowed_directions or [])),
+            tuple(sorted(plan.allowed_trigger_categories or [])),
+            trigger_budgets,
+            sizing_rules,
+        )
+
+    def _is_no_change_replan(
+        self,
+        previous_plan: StrategyPlan | None,
+        current_plan: StrategyPlan,
+        trigger_diff: Dict[str, Any] | None,
+    ) -> bool:
+        if previous_plan is None or trigger_diff is None:
+            return False
+        triggers_unchanged = (
+            trigger_diff.get("added", 0) == 0
+            and trigger_diff.get("removed", 0) == 0
+            and trigger_diff.get("changed", 0) == 0
+            and trigger_diff.get("unchanged", 0) == len(previous_plan.triggers)
+            and len(current_plan.triggers) == len(previous_plan.triggers)
+        )
+        if not triggers_unchanged:
+            return False
+        return self._plan_constraints_signature(previous_plan) == self._plan_constraints_signature(current_plan)
 
     def _assess_risk_limits(self, order: Order, portfolio_state: PortfolioState) -> List[str]:
         """Check a proposed order against the configured risk knobs."""
@@ -2207,6 +2296,7 @@ class LLMStrategistBacktester:
                     plan_budget_exhausted = True
 
                 plan_rebuild = True
+                replan_suppressed = False
                 if plan_budget_exhausted:
                     if current_plan is None:
                         raise RuntimeError(f"LLM call budget exhausted for {date_key[1]} with no existing plan")
@@ -2248,9 +2338,21 @@ class LLMStrategistBacktester:
                     current_plan = self._apply_plan_overrides(current_plan)
                     current_plan = self._apply_trigger_budget(current_plan)
                     trigger_diff = self._diff_plan_triggers(previous_plan, current_plan)
+                    if judge_triggered_replan and self._is_no_change_replan(previous_plan, current_plan, trigger_diff):
+                        replan_suppressed = True
+                        self.no_change_replan_suppressed_by_day[day_key] += 1
+                        llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
+                        self.llm_generation_by_day[day_key].append(llm_meta)
+                        logger.info("Suppressed judge-triggered replan at %s (no material change).", ts.isoformat())
+                        if previous_plan is not None:
+                            run = self.run_registry.get_strategy_run(run_id)
+                            run.current_plan_id = previous_plan.plan_id
+                            self.run_registry.update_strategy_run(run)
+                            current_plan = previous_plan
+                        plan_rebuild = False
                     # Only reset judge timing on initial plan or judge-triggered replan
                     # NOT on day-boundary replans (to avoid resetting the clock each day)
-                    if is_initial_plan or judge_triggered_replan:
+                    if not replan_suppressed and (is_initial_plan or judge_triggered_replan):
                         self.last_judge_time = ts
                         self.next_judge_time = ts + self.judge_cadence
                         self.trades_since_last_judge = 0
@@ -2264,6 +2366,8 @@ class LLMStrategistBacktester:
                             ts.isoformat(), self.next_judge_time.isoformat() if self.next_judge_time else "unset"
                         )
                 if plan_rebuild:
+                    if not is_initial_plan:
+                        self.replans_by_day[day_key] += 1
                     sizing_targets = {
                         rule.symbol: (rule.target_risk_pct or self.active_risk_limits.max_position_risk_pct)
                         for rule in current_plan.sizing_rules
@@ -2296,7 +2400,7 @@ class LLMStrategistBacktester:
                     # Collect samples from previous trigger engine before creating new one
                     if trigger_engine is not None and self.debug_trigger_sample_rate > 0:
                         samples = trigger_engine.get_evaluation_samples_summary()
-                        self._all_trigger_evaluation_samples.extend(samples)
+                        self._append_trigger_evaluation_samples(samples)
                     trigger_engine = TriggerEngine(
                         current_plan,
                         risk_engine,
@@ -2422,6 +2526,9 @@ class LLMStrategistBacktester:
             slot_orders: List[Dict[str, Any]] = []
             market_structure_briefs: Dict[str, Any] = {}
             indicator_briefs = self._indicator_briefs(active_assets)
+            indicator_debug: Dict[str, Dict[str, Any]] | None = None
+            if self.indicator_debug_mode:
+                indicator_debug = {}
             # Update latest prices FIRST so portfolio valuation reflects current bar
             for pair in self.pairs:
                 base_tf = self.timeframes[0]
@@ -2441,6 +2548,9 @@ class LLMStrategistBacktester:
                     indicator = self._indicator_snapshot(pair, timeframe, ts)
                     if indicator is None:
                         continue
+                    if indicator_debug is not None:
+                        symbol_debug = indicator_debug.setdefault(pair, {})
+                        symbol_debug[timeframe] = self._format_indicator_debug(indicator)
                     portfolio_state = self.portfolio.portfolio_state(ts)
                     asset_state = active_assets.get(pair)
                     logger.debug(
@@ -2507,6 +2617,8 @@ class LLMStrategistBacktester:
                 "market_structure": market_structure_briefs,
                 "factor_exposures": self.latest_factor_exposures,
             }
+            if indicator_debug is not None:
+                slot_report["indicator_debug"] = indicator_debug
             self.slot_reports_by_day[day_key].append(slot_report)
             self.last_slot_report = slot_report
 
@@ -2526,7 +2638,7 @@ class LLMStrategistBacktester:
         # Collect samples from final trigger engine
         if trigger_engine is not None and self.debug_trigger_sample_rate > 0:
             samples = trigger_engine.get_evaluation_samples_summary()
-            self._all_trigger_evaluation_samples.extend(samples)
+            self._append_trigger_evaluation_samples(samples)
 
         equity_df = pd.DataFrame(self.portfolio.equity_records)
         equity_curve = (
@@ -2578,6 +2690,8 @@ class LLMStrategistBacktester:
             final_positions=dict(self.portfolio.positions),
             daily_reports=daily_reports,
             bar_decisions=dict(self.bar_decisions_by_day),
+            intraday_judge_history=list(self.intraday_judge_history),
+            judge_triggered_replans=list(self.judge_triggered_replans),
         )
 
     def _indicator_briefs(self, asset_states: Dict[str, AssetState]) -> Dict[str, Dict[str, Any]]:
@@ -2597,6 +2711,16 @@ class LLMStrategistBacktester:
                 "sma_relation": relation,
             }
         return briefs
+
+    def _format_indicator_debug(self, snapshot: IndicatorSnapshot) -> Dict[str, Any]:
+        payload = snapshot.model_dump()
+        if self.indicator_debug_mode == "full":
+            return payload
+        if self.indicator_debug_mode == "keys":
+            if not self.indicator_debug_keys:
+                return {}
+            return {key: payload.get(key) for key in self.indicator_debug_keys}
+        return {}
 
     def _apply_trigger_budget(self, plan: StrategyPlan) -> StrategyPlan:
         resolved_cap = getattr(plan, "_resolved_trigger_cap", None)
@@ -2954,6 +3078,17 @@ class LLMStrategistBacktester:
         if self.progress_callback and event_type in ("trade", "plan_generated", "trigger_blocked", "intraday_judge"):
             self._report_progress()
 
+    def _append_trigger_evaluation_samples(self, samples: List[Dict[str, Any]]) -> None:
+        if not samples:
+            return
+        if not self.debug_trigger_max_samples or self.debug_trigger_max_samples <= 0:
+            self._all_trigger_evaluation_samples.extend(samples)
+            return
+        remaining = self.debug_trigger_max_samples - len(self._all_trigger_evaluation_samples)
+        if remaining <= 0:
+            return
+        self._all_trigger_evaluation_samples.extend(samples[:remaining])
+
     def _finalize_day(self, day_key: str, daily_dir: Path, run_id: str) -> Dict[str, Any] | None:
         reports = self.slot_reports_by_day.pop(day_key, [])
         self.bar_decisions_by_day[day_key] = list(reports)
@@ -3004,6 +3139,8 @@ class LLMStrategistBacktester:
                 llm_failure_reason = entry.get("llm_failure_reason")
                 break
         llm_data_quality = "fallback" if (llm_failed_parse or fallback_used) else "ok"
+        replans_count = self.replans_by_day.pop(day_key, 0)
+        suppressed_replans = self.no_change_replan_suppressed_by_day.pop(day_key, 0)
         allocated_risk_abs = 0.0
         actual_risk_abs = 0.0
         for evt in risk_usage_events:
@@ -3018,6 +3155,10 @@ class LLMStrategistBacktester:
         archetype_load_blocks = int(risk_breakdown.get("archetype_load", 0))
         trigger_load_blocks = int(risk_breakdown.get("trigger_load", 0))
         symbol_cap_blocks = int(risk_breakdown.get("max_symbol_exposure_pct", 0))
+        intraday_judge_entries = [
+            entry for entry in self.intraday_judge_history
+            if entry.get("timestamp", "").startswith(day_key)
+        ]
         summary = {
             "date": day_key,
             "start_equity": start_equity,
@@ -3035,6 +3176,7 @@ class LLMStrategistBacktester:
             "indicator_context": indicator_context,
             "market_structure": market_structure_context,
             "factor_exposures": self.latest_factor_exposures,
+            "intraday_judge_history": intraday_judge_entries,
             "top_triggers": top_triggers,
             "skipped_due_to_limits": skipped_limits,
             "attempted_triggers": limit_entry["trades_attempted"],
@@ -3066,6 +3208,8 @@ class LLMStrategistBacktester:
             "fallback_plan_used": fallback_used,
             "llm_failure_reason": llm_failure_reason,
             "llm_data_quality": llm_data_quality,
+            "replan_rate_per_day": replans_count,
+            "no_change_replan_suppressed_count": suppressed_replans,
         }
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
@@ -4063,6 +4207,11 @@ class LLMStrategistBacktester:
                 }
                 for trigger in current_plan.triggers
             ]
+            if self.last_slot_report:
+                summary["indicator_context"] = self.last_slot_report.get("indicator_context", {}) or {}
+                summary["market_structure"] = self.last_slot_report.get("market_structure", {}) or {}
+            if self.latest_factor_exposures:
+                summary["factor_exposures"] = self.latest_factor_exposures
             risk_budget = self._risk_budget_summary(day_key) or {}
             if not risk_budget:
                 risk_budget = self._risk_budget_fallback(

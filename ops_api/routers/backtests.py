@@ -330,6 +330,14 @@ class BacktestConfig(BaseModel):
         default=100, ge=1, le=1000,
         description="Maximum number of trigger evaluation samples to collect (default: 100)"
     )
+    indicator_debug_mode: Optional[str] = Field(
+        default=None,
+        description="Indicator debug mode: off, full, keys"
+    )
+    indicator_debug_keys: Optional[List[str]] = Field(
+        default=None,
+        description="Indicator keys to capture when indicator_debug_mode=keys"
+    )
 
     # ============================================================================
     # Vector Store / RAG
@@ -618,6 +626,8 @@ async def start_backtest(config: BacktestConfig):
                 # Debug / diagnostics
                 "debug_trigger_sample_rate": config.debug_trigger_sample_rate or 0.0,
                 "debug_trigger_max_samples": config.debug_trigger_max_samples or 100,
+                "indicator_debug_mode": config.indicator_debug_mode,
+                "indicator_debug_keys": config.indicator_debug_keys,
                 # Vector store
                 "use_trigger_vector_store": config.use_trigger_vector_store or False,
                 # LLM shim flags

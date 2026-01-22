@@ -77,6 +77,8 @@ export interface BacktestConfig {
   // Debug/Diagnostic Options
   debug_trigger_sample_rate?: number;
   debug_trigger_max_samples?: number;
+  indicator_debug_mode?: string;
+  indicator_debug_keys?: string[];
 }
 
 export interface BacktestCreateResponse {
@@ -547,6 +549,12 @@ export interface PaperTradingSessionConfig {
 
   // Flattening Options
   flatten_positions_daily?: boolean;
+
+  // Debug/Diagnostic Options
+  debug_trigger_sample_rate?: number;
+  debug_trigger_max_samples?: number;
+  indicator_debug_mode?: string;
+  indicator_debug_keys?: string[];
 }
 
 export interface PaperTradingSession {

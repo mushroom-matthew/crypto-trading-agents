@@ -27,6 +27,15 @@ TRIGGER ATTEMPTS SINCE LAST JUDGE:
 ACTIVE TRIGGERS:
 {active_triggers}
 
+POSITION QUALITY:
+{position_quality}
+
+MARKET STRUCTURE:
+{market_structure}
+
+FACTOR EXPOSURES:
+{factor_exposures}
+
 RISK STATE:
 {risk_state}
 

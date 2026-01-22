@@ -19,7 +19,7 @@ This plan sequences correctness and observability fixes before introducing a con
 Status:
 - A) Emergency-exit semantics: complete (tests: `tests/test_trigger_engine.py`, `tests/test_execution_engine.py`)
 - B) Backtest persistence: complete (DB persistence + block_events + DB-first Ops API reads)
-- C) No-change replan guard: not started
+- C) No-change replan guard: in progress
 
 ### A) Emergency-exit semantics (unambiguous)
 

@@ -69,6 +69,23 @@ class StrategyRunConfig(SerializableModel):
     history_window_days: int = Field(default=30, ge=1)
     plan_cadence_hours: int = Field(default=24, ge=1)
     notes: Optional[str] = None
+    debug_trigger_sample_rate: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Probability (0.0-1.0) of sampling trigger evaluations for debugging.",
+    )
+    debug_trigger_max_samples: int | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="Maximum number of trigger evaluation samples to collect.",
+    )
+    indicator_debug_mode: Optional[str] = Field(
+        default=None,
+        description="Indicator debug mode: off, full, keys",
+    )
+    indicator_debug_keys: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     risk_limits: RiskLimitSettings = Field(default_factory=RiskLimitSettings)
 

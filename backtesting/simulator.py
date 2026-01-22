@@ -353,9 +353,9 @@ def _compute_metrics_summary(
             {
                 "timestamp": int(row["time"].timestamp()),
                 "symbol": row["symbol"],
-                "side": row["side"],
-                "quantity": row["qty"],
-                "fill_price": row["price"],
+                "side": str(row.get("side", "")).upper(),
+                "quantity": float(row.get("qty", 0.0) or 0.0),
+                "fill_price": float(row.get("price", 0.0) or 0.0),
             }
             for _, row in trades.iterrows()
         ]

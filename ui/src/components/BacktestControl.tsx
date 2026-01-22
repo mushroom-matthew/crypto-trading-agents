@@ -44,6 +44,7 @@ export function BacktestControl() {
     // Debug sampling - enable by default to diagnose trigger issues
     debug_trigger_sample_rate: 0.1,
     debug_trigger_max_samples: 100,
+    indicator_debug_mode: 'off',
   };
   const [config, setConfig] = useState<BacktestConfig>(defaultConfig);
   const [symbolsInput, setSymbolsInput] = useState(defaultConfig.symbols.join(', '));

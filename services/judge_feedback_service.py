@@ -531,6 +531,35 @@ class JudgeFeedbackService:
         else:
             active_triggers_text = "No active triggers provided."
 
+        position_quality = summary.get("position_quality") or []
+        if position_quality:
+            position_lines = []
+            for entry in position_quality[:10]:
+                position_lines.append(
+                    "- {symbol}: pnl={pnl:+.2f}% hold={hold:.1f}h risk={risk:.0f} underwater={underwater}".format(
+                        symbol=entry.get("symbol"),
+                        pnl=float(entry.get("unrealized_pnl_pct", 0.0)),
+                        hold=float(entry.get("hold_hours", 0.0)),
+                        risk=float(entry.get("risk_score", 0.0)),
+                        underwater=bool(entry.get("is_underwater")),
+                    )
+                )
+            position_quality_text = "\n".join(position_lines)
+        else:
+            position_quality_text = "No open positions."
+
+        market_structure = summary.get("market_structure") or {}
+        if market_structure:
+            market_structure_text = json.dumps(market_structure, indent=2, default=str)
+        else:
+            market_structure_text = "No market structure provided."
+
+        factor_exposures = summary.get("factor_exposures") or {}
+        if factor_exposures:
+            factor_exposures_text = json.dumps(factor_exposures, indent=2, default=str)
+        else:
+            factor_exposures_text = "No factor exposures provided."
+
         trigger_summary = (
             f"{len(active_triggers)} active triggers; {len(trigger_attempts)} trigger attempts since last judge."
             if active_triggers or trigger_attempts
@@ -548,6 +577,9 @@ class JudgeFeedbackService:
             fill_details=fill_details,
             trigger_attempts=trigger_attempts_text,
             active_triggers=active_triggers_text,
+            position_quality=position_quality_text,
+            market_structure=market_structure_text,
+            factor_exposures=factor_exposures_text,
             risk_state=json.dumps(summary.get("risk_state", {}), indent=2) if summary.get("risk_state") else "No risk state provided.",
             total_transactions=summary.get("trade_count", 0),
             buy_count=summary.get("buy_count", 0),
