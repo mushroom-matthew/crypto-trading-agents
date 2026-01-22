@@ -1,0 +1,13 @@
+items:
+  - name: "workflows/daily_planning_workflow.py"
+    owner: "tbd"
+    rationale: "legacy live-planning workflow; superseded by agent stack"
+    sunset_criteria: "Remove once ops API and agent planning cover live needs; deadline TBD"
+  - name: "workflows/live_trading_workflow.py"
+    owner: "tbd"
+    rationale: "legacy live trading orchestrator"
+    sunset_criteria: "Delete after parity confirmed via agent workflows"
+  - name: "services/*"
+    owner: "tbd"
+    rationale: "legacy service daemons launched via docker-compose"
+    sunset_criteria: "Retire once Compose uses agent worker/UI path and ops_api replaces service shims"

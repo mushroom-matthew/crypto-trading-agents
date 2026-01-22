@@ -15,3 +15,12 @@ uv.lock
 logs/
 *.log
 .DS_Store
+data/market_cache/
+data/
+AGENTS.md
+.cache/
+strategy_export*json
+tmp*/
+.debug/
+*summaries.json
+.runs/

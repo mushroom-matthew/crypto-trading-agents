@@ -1,0 +1,61 @@
+version: '3.9'
+
+# TODO: replace placeholder commands with dedicated entrypoints for each service.
+
+services:
+  temporal-server:
+    image: temporalio/auto-setup:1.24
+    environment:
+      - TEMPORAL_CLI_ADDRESS=temporal-server:7233
+    ports:
+      - "7233:7233"
+
+  temporal-worker:
+    build: ..
+    command: ["python", "worker/run.py"]
+    depends_on:
+      - temporal-server
+    environment:
+      - TEMPORAL_ADDRESS=temporal-server:7233
+    volumes:
+      - ..:/app
+
+  market-data-worker:
+    build: ..
+    command: ["python", "services/market_data_worker.py"]
+    environment:
+      - COINBASE_API_KEY=${COINBASE_API_KEY:-changeme}
+    volumes:
+      - ..:/app
+    profiles: ["legacy_live"]
+
+  indicator-engine:
+    build: ..
+    command: ["python", "services/indicator_engine.py"]
+    volumes:
+      - ..:/app
+    profiles: ["legacy_live"]
+
+  mcp-server:
+    build: ..
+    command: ["uv", "run", "uvicorn", "mcp_server.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      - temporal-server
+    environment:
+      - TEMPORAL_ADDRESS=temporal-server:7233
+    ports:
+      - "8080:8080"
+    volumes:
+      - ..:/app
+
+  ops-api:
+    build: ..
+    command: ["uv", "run", "python", "ops_api/app.py"]
+    environment:
+      - TRADING_STACK=${TRADING_STACK:-agent}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - LIVE_TRADING_ACK=${LIVE_TRADING_ACK:-false}
+    ports:
+      - "8081:8081"
+    volumes:
+      - ..:/app

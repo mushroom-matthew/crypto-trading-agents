@@ -6,12 +6,15 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
 import os
+from pathlib import Path
 from typing import Any, List
 
 import aiohttp
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
+from data_loader import CCXTAPILoader, DataCache
+from data_loader.utils import timeframe_to_seconds
 from tools.feature_engineering import signal_compute_vector, load_historical_data
 from agents.constants import STREAM_CONTINUE_EVERY, STREAM_HISTORY_LIMIT
 
@@ -55,6 +58,10 @@ async def fetch_ticker(symbol: str) -> dict[str, Any]:
         await client.close()
 
 
+_HISTORICAL_CACHE = DataCache(root=Path("data/market_cache/raw"))
+_HISTORICAL_BACKEND = CCXTAPILoader(exchange_id="coinbase", cache=_HISTORICAL_CACHE)
+
+
 @activity.defn
 async def fetch_historical_ohlcv(symbol: str, timeframe: str = '1m', limit: int = 60) -> List[dict]:
     """Fetch historical OHLCV data for a symbol.
@@ -73,51 +80,74 @@ async def fetch_historical_ohlcv(symbol: str, timeframe: str = '1m', limit: int 
     List[dict]
         List of ticks with timestamp and price
     """
-    import ccxt.async_support as ccxt
-    client = ccxt.coinbaseexchange()
-    
+    seconds = timeframe_to_seconds(timeframe)
+    end = datetime.now(tz=timezone.utc)
+    start = end - timedelta(seconds=seconds * (limit + 5))
+
     try:
-        # Fetch OHLCV data
-        ohlcv_data = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
-        
-        # Convert OHLCV to tick format
-        ticks = []
-        for candle in ohlcv_data:
-            # OHLCV format: [timestamp, open, high, low, close, volume]
-            timestamp_ms = candle[0]
-            close_price = candle[4]
-            
-            # Create tick in the same format as real-time ticks
-            tick = {
-                "timestamp": timestamp_ms,
-                "last": close_price,
-                "bid": close_price - 0.01,  # Approximate bid/ask
-                "ask": close_price + 0.01,
-                "datetime": datetime.fromtimestamp(timestamp_ms/1000, tz=timezone.utc).isoformat()
-            }
-            ticks.append(tick)
-            
-        logger.info("Fetched %d historical candles for %s", len(ticks), symbol)
-        return ticks
-        
+        frame = await asyncio.to_thread(
+            _HISTORICAL_BACKEND.fetch_history,
+            symbol,
+            start,
+            end,
+            timeframe,
+        )
     except Exception as exc:
         logger.error("Failed to fetch historical data for %s: %s", symbol, exc)
-        # Return empty list on error to allow system to continue
         return []
-    finally:
-        await client.close()
+
+    window = frame.tail(limit)
+    ticks: List[dict] = []
+    for ts, row in window.iterrows():
+        timestamp_ms = int(ts.timestamp() * 1000)
+        close_price = float(row.close)
+        tick = {
+            "timestamp": timestamp_ms,
+            "last": close_price,
+            "bid": close_price - 0.01,
+            "ask": close_price + 0.01,
+            "datetime": ts.isoformat(),
+        }
+        ticks.append(tick)
+    logger.info("Fetched %d historical candles for %s", len(ticks), symbol)
+    return ticks
 
 
 @activity.defn
 async def record_tick(tick: dict) -> None:
-    """Send tick payload to the MCP server signal log."""
+    """Send tick payload to the MCP server signal log and emit to event store."""
+    # Send to MCP server signal log
     url = f"http://{MCP_HOST}:{MCP_PORT}/signal/market_tick"
     timeout = aiohttp.ClientTimeout(total=5)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             await session.post(url, json=tick)
         except Exception as exc:
-            logger.error("Failed to record tick: %s", exc)
+            logger.error("Failed to record tick to MCP: %s", exc)
+
+    # Emit to event store for ops visibility
+    try:
+        from agents.event_emitter import emit_event
+
+        data = tick.get("data", {})
+        await emit_event(
+            "tick",
+            {
+                "symbol": tick.get("symbol"),
+                "exchange": tick.get("exchange"),
+                "price": data.get("last"),
+                "bid": data.get("bid"),
+                "ask": data.get("ask"),
+                "volume": data.get("baseVolume"),
+                "timestamp": data.get("timestamp"),
+            },
+            source="market_stream",
+            run_id="market-data",
+            # Use symbol as dedupe key to avoid overwhelming event store
+            dedupe_key=f"tick-{tick.get('symbol')}-{data.get('timestamp')}",
+        )
+    except Exception as exc:
+        logger.error("Failed to emit tick event: %s", exc)
 
 
 @workflow.defn

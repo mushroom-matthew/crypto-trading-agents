@@ -1,13 +1,17 @@
 """Tests for the judge agent and related components."""
 
+import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock, patch
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List
 
+from agents.judge_agent_client import JudgeAgent, _split_notes_and_json
 from agents.workflows import JudgeAgentWorkflow, ExecutionLedgerWorkflow
 from agents.prompt_manager import PromptManager, PromptComponent, PromptTemplate
 from tools.performance_analysis import PerformanceAnalyzer, PerformanceReport
+from schemas.judge_feedback import DisplayConstraints, JudgeConstraints, JudgeFeedback
 
 
 class TestJudgeAgentWorkflow:
@@ -161,6 +165,134 @@ class TestJudgeAgentWorkflow:
         # Old evaluation
         workflow.last_evaluation_ts = int(datetime.now(timezone.utc).timestamp()) - 5 * 3600  # 5 hours ago
         assert workflow.should_trigger_evaluation(4) is True
+
+
+class TestJudgeAgentLLMParsing:
+    """Validate parsing of hybrid judge responses."""
+
+    def test_split_notes_and_json(self):
+        response = """NOTES:
+- Line one
+- Line two
+
+JSON:
+{
+  "score": 42.0,
+  "constraints": {
+    "max_trades_per_day": null,
+    "risk_mode": "normal",
+    "disabled_trigger_ids": [],
+    "disabled_categories": []
+  },
+  "strategist_constraints": {
+    "must_fix": [],
+    "vetoes": [],
+    "boost": [],
+    "regime_correction": null,
+    "sizing_adjustments": {}
+  }
+}
+"""
+        notes, json_block = _split_notes_and_json(response)
+        assert "Line one" in notes
+        data = json.loads(json_block)
+        assert data["score"] == 42.0
+
+    @pytest.mark.asyncio
+    async def test_analyze_decision_quality_parses_feedback(self, monkeypatch):
+        response_text = """NOTES:
+- Trade cadence acceptable.
+
+JSON:
+{
+  "score": 47.0,
+  "constraints": {
+    "max_trades_per_day": 3,
+    "risk_mode": "conservative",
+    "disabled_trigger_ids": ["btc_scalp_v1"],
+    "disabled_categories": ["volatility_breakout"]
+  },
+  "strategist_constraints": {
+    "must_fix": ["Tighten exits"],
+    "vetoes": [],
+    "boost": [],
+    "regime_correction": "range",
+    "sizing_adjustments": {"BTC-USD": "limit to 1%"}
+  }
+}
+"""
+
+        class StubCompletions:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def create(self, **kwargs):
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=self.payload))]
+                )
+
+        stub_client = SimpleNamespace(chat=SimpleNamespace(completions=StubCompletions(response_text)))
+        monkeypatch.setattr("agents.judge_agent_client.openai_client", stub_client)
+
+        judge = JudgeAgent(Mock(), AsyncMock())
+        tx_history = [
+            {"timestamp": 0, "symbol": "BTC-USD", "side": "BUY", "quantity": 1.0, "fill_price": 100.0, "cost": 100.0}
+        ]
+        performance_snapshot = {
+            "start_date": "2024-01-01T00:00:00Z",
+            "end_date": "2024-01-07T00:00:00Z",
+            "total_return": 0.0,
+            "annualized_return": 0.0,
+            "volatility": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "total_trades": 1,
+            "win_rate": 0.0,
+            "profit_factor": 1.0,
+        }
+
+        result = await judge.analyze_decision_quality(tx_history, performance_snapshot)
+        assert result["decision_score"] == 47.0
+        assert result["constraints"]["max_trades_per_day"] == 3
+        assert result["strategist_constraints"]["must_fix"] == ["Tighten exits"]
+
+    @pytest.mark.asyncio
+    async def test_analyze_decision_quality_raises_on_invalid_json(self, monkeypatch):
+        bad_response = "NOTES:\n- text only\nJSON:\ninvalid"
+
+        class StubCompletions:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def create(self, **kwargs):
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=self.payload))]
+                )
+
+        stub_client = SimpleNamespace(chat=SimpleNamespace(completions=StubCompletions(bad_response)))
+        monkeypatch.setattr("agents.judge_agent_client.openai_client", stub_client)
+
+        judge = JudgeAgent(Mock(), AsyncMock())
+        tx_history = [
+            {"timestamp": 0, "symbol": "BTC-USD", "side": "BUY", "quantity": 1.0, "fill_price": 100.0, "cost": 100.0}
+        ]
+        performance_snapshot = {"start_date": "2024-01-01", "end_date": "2024-01-07"}
+
+        with pytest.raises(ValueError):
+            await judge.analyze_decision_quality(tx_history, performance_snapshot)
+
+    def test_apply_structured_constraints(self):
+        judge = JudgeAgent(Mock(), AsyncMock())
+        feedback = JudgeFeedback(
+            constraints=JudgeConstraints(),
+            strategist_constraints=DisplayConstraints(
+                must_fix=["Increase selectivity but avoid paralysis; at least one qualified trigger per day."],
+                sizing_adjustments={"BTC-USD": "Cut risk by 25% until two winning days post drawdown."},
+            ),
+        )
+        judge._apply_structured_constraints(feedback)
+        assert feedback.constraints.min_trades_per_day == 1
+        assert feedback.constraints.symbol_risk_multipliers["BTC-USD"] == 0.75
 
 
 class TestExecutionLedgerWorkflowEnhancements:

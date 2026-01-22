@@ -1,0 +1,13 @@
+{
+  "archetypes": {
+    "btc": 1.08
+  },
+  "archetype_hours": {},
+  "meta": {
+    "good_rpr_threshold": 0.15,
+    "bad_rpr_threshold": -0.15,
+    "min_trades_llm": 5,
+    "min_trades_baseline": 10,
+    "source_run_id": "p1a_20210201_20210228_rpr_weighted4"
+  }
+}

@@ -16,20 +16,21 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-TEMPORAL_NAMESPACE = os.environ.get("TEMPORAL_NAMESPACE", "default")
 TASK_QUEUE = os.environ.get("TASK_QUEUE", "mcp-tools")
 
 _TEMPORAL_CLIENT: Client | None = None
+_CLIENT_SETTINGS: tuple[str, str] | None = None
 
 
 async def _get_client() -> Client:
     """Return a cached Temporal client."""
-    global _TEMPORAL_CLIENT
-    if _TEMPORAL_CLIENT is None:
-        _TEMPORAL_CLIENT = await Client.connect(
-            TEMPORAL_ADDRESS, namespace=TEMPORAL_NAMESPACE
-        )
+    global _TEMPORAL_CLIENT, _CLIENT_SETTINGS
+    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+    namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
+    settings = (address, namespace)
+    if _TEMPORAL_CLIENT is None or _CLIENT_SETTINGS != settings:
+        _TEMPORAL_CLIENT = await Client.connect(address, namespace=namespace)
+        _CLIENT_SETTINGS = settings
     return _TEMPORAL_CLIENT
 
 

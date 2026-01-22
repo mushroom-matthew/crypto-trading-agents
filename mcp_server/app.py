@@ -8,23 +8,39 @@ import secrets
 from typing import Any, Dict, List
 from datetime import datetime, timezone
 import json
+from pathlib import Path
+from uuid import uuid4
+from functools import partial
 
 from mcp.server.fastmcp import FastMCP
 import logging
 from temporalio.client import Client, RPCError, RPCStatusCode, WorkflowExecutionStatus
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, PlainTextResponse
 from starlette.requests import Request
 
 # Import workflow classes
 from tools.market_data import SubscribeCEXStream, HistoricalDataLoaderWorkflow
 from tools.strategy_signal import EvaluateStrategyMomentum
 from tools.execution import PlaceMockOrder, PlaceMockBatchOrder, OrderIntent, BatchOrderIntent
+from tools.metrics_service import (
+    MetricsRequest,
+    load_dataframe_async,
+    fetch_and_cache_async,
+    compute_metrics_async,
+    cache_file_for,
+    ensure_required_columns,
+    load_cached_dataframe,
+)
 from agents.workflows import (
     ExecutionLedgerWorkflow,
     BrokerAgentWorkflow,
     JudgeAgentWorkflow,
+    StrategySpecWorkflow,
 )
 from tools.agent_logger import AgentLogger
+from metrics import list_metrics as registry_list_metrics
+from agents.event_emitter import emit_event, set_event_store
+from ops_api.event_store import EventStore
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="[%(asctime)s] %(levelname)s: %(message)s")
@@ -45,12 +61,56 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.temporal_utils import get_temporal_client
+from agents.strategy_planner import plan_strategy_spec
+from agents.runtime_mode import get_runtime_mode
 
 # Initialize FastMCP
 app = FastMCP("crypto-trading-server")
 
-# Simple in-memory signal log for backward compatibility
-signal_log: dict[str, list[dict]] = {}
+
+def configure_event_store(store: EventStore) -> None:
+    """Share a single EventStore across endpoints and emitters."""
+    global event_store, _append_event
+    event_store = store
+    set_event_store(store)
+    _append_event = partial(emit_event, store=event_store)
+
+
+configure_event_store(EventStore())
+
+
+
+@app.custom_route("/status", methods=["GET"])
+async def status(request: Request) -> Response:
+    """Expose runtime mode/latch state for Ops/UI."""
+    runtime = get_runtime_mode()
+    payload = {
+        "stack": runtime.stack,
+        "mode": runtime.mode,
+        "live_trading_ack": runtime.live_trading_ack,
+        "ui_unlock": runtime.ui_unlock,
+        "banner": runtime.banner,
+    }
+    return JSONResponse(payload)
+
+
+async def ensure_strategy_spec_handle(client: Client):
+    """Ensure the strategy spec workflow exists and return its handle."""
+    wf_id = "strategy-spec-store"
+    handle = client.get_workflow_handle(wf_id)
+    try:
+        await handle.describe()
+    except RPCError as err:
+        if err.status == RPCStatusCode.NOT_FOUND:
+            await client.start_workflow(
+                StrategySpecWorkflow.run,
+                id=wf_id,
+                task_queue="mcp-tools",
+            )
+            handle = client.get_workflow_handle(wf_id)
+        else:
+            raise
+    return handle
 
 
 @app.tool(annotations={"title": "Subscribe CEX Stream", "readOnlyHint": True})
@@ -179,7 +239,8 @@ async def set_user_preferences(preferences: Dict[str, Any]) -> Dict[str, str]:
             "status": "error",
             "message": "Preferences parameter is required and must be a non-empty dictionary"
         }
-    
+
+
     required_keys = ["experience_level", "risk_tolerance", "trading_style"]
     missing_keys = [key for key in required_keys if key not in preferences]
     if missing_keys:
@@ -235,6 +296,48 @@ async def set_user_preferences(preferences: Dict[str, Any]) -> Dict[str, str]:
         "message": f"Updated user preferences: {', '.join(preferences.keys())}",
         "preferences_set": str(list(preferences.keys()))
     }
+
+
+@app.tool(annotations={"title": "Plan Strategy", "readOnlyHint": False})
+async def plan_strategy(
+    market: str,
+    timeframe: str,
+    risk_profile: str,
+    mode: str | None = None,
+    notes: str | None = None,
+) -> Dict[str, Any]:
+    """Use the Strategy Planner to generate and persist a StrategySpec."""
+    result = await plan_strategy_spec(
+        market=market,
+        timeframe=timeframe,
+        risk_profile=risk_profile,
+        mode=mode,
+        notes=notes,
+    )
+    return {"status": "ok", "strategy": result}
+
+
+@app.tool(annotations={"title": "Get Strategy Spec", "readOnlyHint": True})
+async def get_strategy_spec(market: str, timeframe: str | None = None) -> Dict[str, Any]:
+    """Fetch the active StrategySpec for a market/timeframe."""
+    client = await get_temporal_client()
+    handle = await ensure_strategy_spec_handle(client)
+    spec = await handle.query("get_strategy_spec", market, timeframe)
+    if not spec:
+        return {
+            "status": "not_found",
+            "message": f"No strategy spec configured for {market}" + (f" ({timeframe})" if timeframe else ""),
+        }
+    return {"status": "ok", "strategy": spec}
+
+
+@app.tool(annotations={"title": "List Strategy Specs", "readOnlyHint": True})
+async def list_strategy_specs() -> Dict[str, Any]:
+    """List all stored StrategySpec entries."""
+    client = await get_temporal_client()
+    handle = await ensure_strategy_spec_handle(client)
+    strategies = await handle.query("list_strategy_specs")
+    return {"status": "ok", "strategies": strategies}
 
 
 @app.tool(annotations={"title": "Get User Preferences", "readOnlyHint": True})
@@ -310,21 +413,21 @@ async def evaluate_strategy_momentum(
 )
 async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
     """Execute trading orders with automatic portfolio updates.
-    
+
     SIMPLIFIED CONSISTENT FORMAT:
-    
+
     Single Order - Array with one order:
     {"orders": [{"symbol": "BTC/USD", "side": "BUY", "qty": 0.001, "price": 50000, "type": "market"}]}
-    
+
     Multiple Orders - Array with multiple orders:
     {"orders": [
         {"symbol": "BTC/USD", "side": "BUY", "qty": 0.001, "price": 50000, "type": "market"},
         {"symbol": "ETH/USD", "side": "SELL", "qty": 0.1, "price": 3000, "type": "market"}
     ]}
-    
+
     Validation & Execution:
     - BUY orders: Validates sufficient cash before execution
-    - SELL orders: Validates sufficient holdings before execution  
+    - SELL orders: Validates sufficient holdings before execution
     - All orders: Atomic operation (all succeed or all fail)
     - Orders automatically update portfolio and trigger 20% profit scraping on profitable sells
 
@@ -338,9 +441,37 @@ async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
     Dict[str, Any]
         Always returns: {order_count: int, fills: [list], total_cost: float, total_proceeds: float}
     """
+    # SAFETY CHECK: Verify runtime mode before executing any orders
+    runtime = get_runtime_mode()
+
+    if runtime.is_live:
+        logger.critical(
+            "LIVE TRADING ORDER REQUESTED: %d orders, mode=%s, ack=%s",
+            len(orders), runtime.mode, runtime.live_trading_ack
+        )
+        if not runtime.live_trading_ack:
+            error_msg = (
+                "LIVE TRADING BLOCKED: Cannot execute real trades without explicit "
+                "LIVE_TRADING_ACK=true environment variable. Set LIVE_TRADING_ACK=true "
+                "to acknowledge you understand this will place real orders with real money."
+            )
+            logger.error(error_msg)
+            return {
+                "error": "LIVE_TRADING_NOT_ACKNOWLEDGED",
+                "message": error_msg,
+                "orders_blocked": len(orders),
+                "runtime_mode": runtime.mode,
+                "live_trading_ack": runtime.live_trading_ack
+            }
+        # Log acknowledgment for audit trail
+        logger.critical(
+            "LIVE TRADING ACKNOWLEDGED: Proceeding with %d real orders (LIVE_TRADING_ACK=true)",
+            len(orders)
+        )
+
     client = await get_temporal_client()
-    
-    logger.info("Processing %d order(s)", len(orders))
+
+    logger.info("Processing %d order(s) in %s mode", len(orders), runtime.mode)
     
     # PRE-FLIGHT VALIDATION: Check cash for all BUY orders
     total_buy_cost = 0.0
@@ -391,6 +522,15 @@ async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
     fills = await handle.result()
     logger.info("Order workflow %s completed with %d fills", workflow_id, len(fills))
     
+    # Emit order submitted event
+    await _append_event(
+        "order_submitted",
+        {"orders": [order.model_dump() for order in batch_intent.orders]},
+        source="place_mock_batch_order",
+        run_id=batch_intent.orders[0].symbol if batch_intent.orders else None,
+        correlation_id=workflow_id,
+    )
+    
     # Record all fills in ledger
     try:
         ledger_wf_id = os.environ.get("LEDGER_WF_ID", "mock-ledger")
@@ -414,6 +554,13 @@ async def place_mock_order(orders: List[OrderIntent]) -> Dict[str, Any]:
         for fill in fills:
             await ledger.signal("record_fill", fill)
             logger.info("Recorded fill in ledger: %s %s %s", fill["side"], fill["qty"], fill["symbol"])
+            await _append_event(
+                "fill",
+                fill,
+                source="place_mock_batch_order",
+                run_id=batch_intent.orders[0].symbol if batch_intent.orders else None,
+                correlation_id=fill.get("order_id"),
+            )
             
     except Exception as exc:
         logger.error("Failed to record fills in ledger: %s", exc)
@@ -485,132 +632,225 @@ async def get_historical_ticks(
     return results
 
 
-@app.tool(annotations={"title": "Get Portfolio Status", "readOnlyHint": True})
-async def get_portfolio_status() -> Dict[str, Any]:
-    """Retrieve current portfolio cash and positions from the ledger.
+@app.tool(annotations={"title": "List Technical Metrics", "readOnlyHint": True})
+async def list_technical_metrics() -> Dict[str, Any]:
+    """Return the list of registered technical indicators."""
 
-    Returns
-    -------
-    Dict[str, Any]
-        Cash balance, open positions, entry prices, total PnL, realized PnL, and unrealized PnL.
-        - cash: Current cash balance
-        - positions: Current position sizes by symbol
-        - entry_prices: Weighted average entry prices for positions
-        - total_pnl: Total profit/loss (realized + unrealized)
-        - realized_pnl: Realized profit/loss from completed trades
-        - unrealized_pnl: Unrealized profit/loss from open positions
-    """
-    client = await get_temporal_client()
-    wf_id = os.environ.get("LEDGER_WF_ID", "mock-ledger")
-    logger.info("Fetching portfolio status from %s", wf_id)
-    try:
-        handle = client.get_workflow_handle(wf_id)
-        await handle.describe()
-    except RPCError as err:
-        if err.status == RPCStatusCode.NOT_FOUND:
-            handle = await client.start_workflow(
-                ExecutionLedgerWorkflow.run,
-                id=wf_id,
-                task_queue="mcp-tools",
-            )
-        else:
-            raise
-    
-    # Get basic data first
-    cash = await handle.query("get_cash")
-    positions = await handle.query("get_positions")
-    entry_prices = await handle.query("get_entry_prices")
-    realized_pnl = await handle.query("get_realized_pnl")
-    scraped_profits = await handle.query("get_scraped_profits")
-    
-    # Get live market prices for all positions using efficient get_latest_price query
-    live_prices = {}
-    price_fetch_errors = []
-    if positions:
-        symbols = list(positions.keys())
-        client = await get_temporal_client()
-        
-        for symbol in symbols:
-            wf_id = f"feature-{symbol.replace('/', '-')}"
-            try:
-                feature_handle = client.get_workflow_handle(wf_id)
-                price_info = await feature_handle.query("get_latest_price")
-                
-                if price_info["price"] is not None and price_info["age_seconds"] <= 60:
-                    # Fresh price available
-                    live_prices[symbol] = price_info["price"]
-                elif price_info["price"] is not None:
-                    # Stale price - note the issue but don't use it
-                    price_fetch_errors.append(f"{symbol}: price is {price_info['age_seconds']:.1f}s stale")
-                else:
-                    # No price data available
-                    price_fetch_errors.append(f"{symbol}: no price data from feature workflow")
-                    
-            except Exception as e:
-                price_fetch_errors.append(f"{symbol}: failed to query feature workflow - {str(e)}")
-                logger.warning("Failed to get latest price for %s: %s", symbol, e)
-    
-    # Calculate P&L with live prices if available, otherwise fall back
-    if live_prices:
-        pnl = await handle.query("get_pnl_with_live_prices", live_prices)
-        unrealized_pnl = await handle.query("get_unrealized_pnl_with_live_prices", live_prices)
-        logger.info("Portfolio status retrieved with live prices for %d symbols", len(live_prices))
+    metrics = registry_list_metrics()
+    return {"metrics": metrics, "count": len(metrics)}
+
+
+@app.tool(annotations={"title": "Update Market Cache", "readOnlyHint": False})
+async def update_market_cache(
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 500,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """Fetch OHLCV candles from Coinbase Exchange and cache locally."""
+
+    cache_path = cache_file_for(symbol, timeframe, limit)
+    if cache_path.exists() and not overwrite:
+        df = load_cached_dataframe(cache_path)
+        saved_path = cache_path
+        action = "loaded"
     else:
-        pnl = await handle.query("get_pnl")
-        unrealized_pnl = await handle.query("get_unrealized_pnl")
-        logger.info("Portfolio status retrieved with last fill prices")
-    
-    # Calculate detailed position information
-    position_details = {}
-    total_position_value = 0.0
-    
-    for symbol, quantity in positions.items():
-        entry_price = entry_prices.get(symbol, 0.0)
-        current_price = live_prices.get(symbol, entry_price)  # Fallback to entry price if no live price
-        
-        # Calculate position values
-        entry_value = quantity * entry_price
-        current_value = quantity * current_price
-        position_pnl = current_value - entry_value
-        position_pnl_pct = (position_pnl / entry_value * 100) if entry_value > 0 else 0.0
-        
-        total_position_value += current_value
-        
-        position_details[symbol] = {
-            "quantity": quantity,
-            "entry_price": entry_price,
-            "current_price": current_price,
-            "entry_value": entry_value,
-            "current_value": current_value,
-            "position_pnl": position_pnl,
-            "position_pnl_pct": position_pnl_pct,
-            "price_is_live": symbol in live_prices
-        }
-    
-    # Calculate total portfolio value
-    total_portfolio_value = cash + total_position_value + scraped_profits
+        if overwrite and cache_path.exists():
+            cache_path.unlink()
+        df, saved_path = await fetch_and_cache_async(symbol, timeframe, limit, cache_path)
+        action = "fetched"
+
+    preview = df.tail(5).to_dict(orient="records")
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "limit": limit,
+        "rows": len(df),
+        "cache_path": str(saved_path),
+        "action": action,
+        "preview": preview,
+    }
+
+
+@app.tool(annotations={"title": "Compute Technical Metrics", "readOnlyHint": True})
+async def compute_technical_metrics(
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 500,
+    features: List[str] | None = None,
+    params: Dict[str, Dict[str, Any]] | None = None,
+    output: str = "wide",
+    tail: int = 50,
+    use_cache: bool = True,
+    fetch_if_missing: bool = True,
+    data_path: str | None = None,
+) -> Dict[str, Any]:
+    """Compute Tier I technical metrics over OHLCV data."""
+
+    selected_features = features or registry_list_metrics()
+    params = params or {}
+    request = MetricsRequest(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=limit,
+        use_cache=use_cache,
+        data_path=Path(data_path) if data_path else None,
+    )
+
+    df = await load_dataframe_async(request, fetch_if_missing=fetch_if_missing)
+    ensure_required_columns(df)
+
+    metrics_df = await compute_metrics_async(df, selected_features, params=params, output=output)
+
+    tail = max(tail, 1)
+    if output == "wide":
+        preview_df = metrics_df.tail(tail)
+    else:
+        preview_df = metrics_df.tail(tail * len(selected_features))
 
     return {
-        "cash": cash,
-        "positions": positions,  # Legacy format for compatibility
-        "entry_prices": entry_prices,  # Legacy format for compatibility
-        "position_details": position_details,  # New detailed format
-        "total_position_value": total_position_value,
-        "total_portfolio_value": total_portfolio_value,
-        "total_pnl": pnl,
-        "realized_pnl": realized_pnl,
-        "unrealized_pnl": unrealized_pnl,
-        "scraped_profits": scraped_profits,
-        "available_cash": cash,  # Cash available for trading
-        "total_cash_value": cash + scraped_profits,  # Total cash including scraped profits
-        "price_data_quality": {
-            "live_prices_used": len(live_prices),
-            "total_positions": len(positions),
-            "using_stale_fallback": len(live_prices) < len(positions),
-            "price_fetch_errors": price_fetch_errors
-        },
-        "live_prices_used": live_prices,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "limit": limit,
+        "features": selected_features,
+        "output": output,
+        "rows": len(metrics_df),
+        "preview": preview_df.to_dict(orient="records"),
+        "cache_path": str(cache_file_for(symbol, timeframe, limit)),
     }
+
+
+def _empty_portfolio_snapshot(reason: str) -> Dict[str, Any]:
+    return {
+        "cash": 0.0,
+        "positions": {},
+        "entry_prices": {},
+        "position_details": {},
+        "total_position_value": 0.0,
+        "total_portfolio_value": 0.0,
+        "total_pnl": 0.0,
+        "pnl": 0.0,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "scraped_profits": 0.0,
+        "available_cash": 0.0,
+        "total_cash_value": 0.0,
+        "price_data_quality": {
+            "live_prices_used": 0,
+            "total_positions": 0,
+            "using_stale_fallback": False,
+            "price_fetch_errors": [reason],
+        },
+        "live_prices_used": {},
+        "status": "fallback",
+    }
+
+
+@app.tool(annotations={"title": "Get Portfolio Status", "readOnlyHint": True})
+async def get_portfolio_status() -> Dict[str, Any]:
+    """Retrieve current portfolio cash and positions from the ledger."""
+
+    def _fallback(reason: str) -> Dict[str, Any]:
+        return _empty_portfolio_snapshot(reason)
+
+    try:
+        client = await get_temporal_client()
+        wf_id = os.environ.get("LEDGER_WF_ID", "mock-ledger")
+        logger.info("Fetching portfolio status from %s", wf_id)
+        try:
+            handle = client.get_workflow_handle(wf_id)
+            await handle.describe()
+        except RPCError as err:
+            if err.status == RPCStatusCode.NOT_FOUND:
+                handle = await client.start_workflow(
+                    ExecutionLedgerWorkflow.run,
+                    id=wf_id,
+                    task_queue="mcp-tools",
+                )
+            else:
+                raise
+
+        cash = await handle.query("get_cash")
+        positions = await handle.query("get_positions")
+        entry_prices = await handle.query("get_entry_prices")
+        realized_pnl = await handle.query("get_realized_pnl")
+        scraped_profits = await handle.query("get_scraped_profits")
+
+        live_prices: Dict[str, float] = {}
+        price_fetch_errors: List[str] = []
+        if positions:
+            symbols = list(positions.keys())
+            for symbol in symbols:
+                wf_id = f"feature-{symbol.replace('/', '-')}"
+                try:
+                    feature_handle = client.get_workflow_handle(wf_id)
+                    price_info = await feature_handle.query("get_latest_price")
+                    if price_info["price"] is not None and price_info["age_seconds"] <= 60:
+                        live_prices[symbol] = price_info["price"]
+                    elif price_info["price"] is not None:
+                        price_fetch_errors.append(f"{symbol}: price is {price_info['age_seconds']:.1f}s stale")
+                    else:
+                        price_fetch_errors.append(f"{symbol}: no price data from feature workflow")
+                except Exception as exc:
+                    price_fetch_errors.append(f"{symbol}: failed to query feature workflow - {exc}")
+                    logger.warning("Failed to get latest price for %s: %s", symbol, exc)
+
+        if live_prices:
+            pnl = await handle.query("get_pnl_with_live_prices", live_prices)
+            unrealized_pnl = await handle.query("get_unrealized_pnl_with_live_prices", live_prices)
+        else:
+            pnl = await handle.query("get_pnl")
+            unrealized_pnl = await handle.query("get_unrealized_pnl")
+
+        position_details: Dict[str, Dict[str, float]] = {}
+        total_position_value = 0.0
+        for symbol, quantity in positions.items():
+            entry_price = entry_prices.get(symbol, 0.0)
+            current_price = live_prices.get(symbol, entry_price)
+            entry_value = quantity * entry_price
+            current_value = quantity * current_price
+            position_pnl = current_value - entry_value
+            position_pnl_pct = (position_pnl / entry_value * 100) if entry_value else 0.0
+            total_position_value += current_value
+            position_details[symbol] = {
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "entry_value": entry_value,
+                "current_value": current_value,
+                "position_pnl": position_pnl,
+                "position_pnl_pct": position_pnl_pct,
+                "price_is_live": symbol in live_prices,
+            }
+
+        total_portfolio_value = cash + total_position_value + scraped_profits
+        return {
+            "cash": cash,
+            "positions": positions,
+            "entry_prices": entry_prices,
+            "position_details": position_details,
+            "total_position_value": total_position_value,
+            "total_portfolio_value": total_portfolio_value,
+            "total_pnl": pnl,
+            "pnl": pnl,
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": unrealized_pnl,
+            "scraped_profits": scraped_profits,
+            "available_cash": cash,
+            "total_cash_value": cash + scraped_profits,
+            "price_data_quality": {
+                "live_prices_used": len(live_prices),
+                "total_positions": len(positions),
+                "using_stale_fallback": len(live_prices) < len(positions),
+                "price_fetch_errors": price_fetch_errors,
+            },
+            "live_prices_used": live_prices,
+            "status": "ok",
+        }
+    except Exception as exc:
+        logger.warning("Portfolio status fallback triggered: %s", exc)
+        return _fallback(str(exc))
 
 
 @app.tool(annotations={"title": "Get Transaction History", "readOnlyHint": True})
@@ -1209,22 +1449,39 @@ def _log_tick_continuity_summary() -> None:
 
 @app.custom_route("/signal/{name}", methods=["POST"])
 async def record_signal(request: Request) -> Response:
-    """Record a signal event for services still using HTTP polling."""
+    """Record a signal event (durable via event store)."""
     name = request.path_params["name"]
-    logger.debug("Recording signal %s", name)
     payload = await request.json()
     ts = payload.get("ts")
     if ts is None:
         ts = int(datetime.now(timezone.utc).timestamp())
         payload["ts"] = ts
-    signal_log.setdefault(name, []).append(payload)
-    
+
+    event_type = "intent"
+    if name == "market_tick":
+        event_type = "tick"
+    elif name == "approved_intent":
+        event_type = "intent"
+    elif name == "order_submitted":
+        event_type = "order_submitted"
+    elif name == "position_update":
+        event_type = "position_update"
+
+    await _append_event(
+        event_type,
+        payload,
+        source=name,
+        run_id=payload.get("run_id"),
+        correlation_id=payload.get("correlation_id"),
+        dedupe_key=payload.get("dedupe_key"),
+    )
+
     # Log market tick data for continuity monitoring
     if name == "market_tick":
         try:
             symbol = payload.get("symbol")
             tick_timestamp = payload.get("timestamp", ts)
-            
+
             # Update tick statistics
             tick_stats["total_ticks"] += 1
             if symbol:
@@ -1234,13 +1491,12 @@ async def record_signal(request: Request) -> Response:
                         "first_timestamp": tick_timestamp,
                         "last_timestamp": tick_timestamp
                     }
-                
+
                 symbol_stats = tick_stats["symbols"][symbol]
                 symbol_stats["count"] += 1
                 symbol_stats["last_timestamp"] = max(symbol_stats["last_timestamp"], tick_timestamp)
                 symbol_stats["first_timestamp"] = min(symbol_stats["first_timestamp"], tick_timestamp)
-            
-            # Log individual tick
+
             market_tick_logger.log_action(
                 action_type="market_tick_received",
                 details={
@@ -1257,46 +1513,181 @@ async def record_signal(request: Request) -> Response:
                 signal_name=name,
                 payload_timestamp=ts
             )
-            
-            # Log periodic summary (every 100 ticks)
+
             if tick_stats["total_ticks"] % 100 == 0:
                 _log_tick_continuity_summary()
-                
+
         except Exception as log_error:
             logger.error(f"Failed to log market tick: {log_error}")
-    
+
     logger.debug("Recorded signal %s", name)
     return Response(status_code=204)
 
 
 @app.custom_route("/signal/{name}", methods=["GET"])
 async def fetch_signals(request: Request) -> Response:
-    """Stream signal events newer than the provided ``after`` timestamp."""
+    """Return signal events newer than the provided ``after`` timestamp."""
 
     name = request.path_params["name"]
     after = int(request.query_params.get("after", "0"))
+    after_dt = datetime.fromtimestamp(after, tz=timezone.utc)
 
-    async def event_stream() -> Any:
-        cursor = after
-        idx = 0
-        events = signal_log.setdefault(name, [])
-        # Skip past events before ``cursor``
-        while idx < len(events) and events[idx].get("ts", 0) <= cursor:
-            idx += 1
+    events = await asyncio.to_thread(event_store.list_events, 500)
+    filtered = [
+        json.loads(evt.model_dump_json())
+        for evt in events
+        if evt.source == name and evt.ts.replace(tzinfo=timezone.utc) > after_dt
+    ]
+    return JSONResponse(filtered)
 
-        while not await request.is_disconnected():
-            events = signal_log.get(name, [])
-            while idx < len(events):
-                evt = events[idx]
-                idx += 1
-                ts = evt.get("ts", 0)
-                if ts > cursor:
-                    cursor = ts
-                yield f"data: {json.dumps(evt)}\n\n"
-            await asyncio.sleep(0.1)
 
-    logger.debug("Starting signal stream for %s after %s", name, after)
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+@app.custom_route("/healthz", methods=["GET"])
+async def healthz(_request):
+    return PlainTextResponse("ok", status_code=200)
+
+
+# ---- Backtest Control Endpoints ----
+from ops_api.routers.backtests import (
+    BacktestConfig,
+    start_backtest,
+    get_backtest_status,
+    get_backtest_results,
+    get_equity_curve,
+    get_backtest_trades,
+    get_playback_candles,
+    get_playback_events,
+    get_portfolio_state_snapshot,
+    get_backtest_progress,
+    get_llm_insights,
+    list_backtests,
+)
+
+@app.custom_route("/backtests", methods=["POST"])
+async def http_start_backtest(request: Request) -> Response:
+    """Start a new backtest run."""
+    body = await request.json()
+    config = BacktestConfig(**body)
+    result = await start_backtest(config)
+    return JSONResponse(result.model_dump())
+
+@app.custom_route("/backtests", methods=["GET"])
+async def http_list_backtests(request: Request) -> Response:
+    """List all backtests."""
+    status = request.query_params.get("status")
+    limit = int(request.query_params.get("limit", "50"))
+    result = await list_backtests(status, limit)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}", methods=["GET"])
+async def http_get_backtest_status(request: Request) -> Response:
+    """Get backtest status."""
+    run_id = request.path_params["run_id"]
+    result = await get_backtest_status(run_id)
+    return JSONResponse(result.model_dump())
+
+@app.custom_route("/backtests/{run_id}/results", methods=["GET"])
+async def http_get_backtest_results(request: Request) -> Response:
+    """Get backtest results."""
+    run_id = request.path_params["run_id"]
+    result = await get_backtest_results(run_id)
+    return JSONResponse(result.model_dump())
+
+@app.custom_route("/backtests/{run_id}/equity", methods=["GET"])
+async def http_get_equity_curve(request: Request) -> Response:
+    """Get equity curve."""
+    run_id = request.path_params["run_id"]
+    result = await get_equity_curve(run_id)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/trades", methods=["GET"])
+async def http_get_backtest_trades(request: Request) -> Response:
+    """Get backtest trades."""
+    run_id = request.path_params["run_id"]
+    limit = int(request.query_params.get("limit", "100"))
+    offset = int(request.query_params.get("offset", "0"))
+    result = await get_backtest_trades(run_id, limit, offset)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/playback/candles", methods=["GET"])
+async def http_get_playback_candles(request: Request) -> Response:
+    """Get playback candles."""
+    run_id = request.path_params["run_id"]
+    symbol = request.query_params["symbol"]
+    offset = int(request.query_params.get("offset", "0"))
+    limit = int(request.query_params.get("limit", "2000"))
+    result = await get_playback_candles(run_id, symbol, offset, limit)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/playback/events", methods=["GET"])
+async def http_get_playback_events(request: Request) -> Response:
+    """Get playback events."""
+    run_id = request.path_params["run_id"]
+    event_type = request.query_params.get("event_type")
+    symbol = request.query_params.get("symbol")
+    limit = int(request.query_params.get("limit", "1000"))
+    result = await get_playback_events(run_id, event_type, symbol, limit)
+    return JSONResponse([r.model_dump() for r in result])
+
+@app.custom_route("/backtests/{run_id}/progress", methods=["GET"])
+async def http_get_backtest_progress(request: Request) -> Response:
+    """Get backtest progress."""
+    run_id = request.path_params["run_id"]
+    result = await get_backtest_progress(run_id)
+    return JSONResponse(result)
+
+@app.custom_route("/backtests/{run_id}/llm-insights", methods=["GET"])
+async def http_get_llm_insights(request: Request) -> Response:
+    """Get LLM insights."""
+    run_id = request.path_params["run_id"]
+    result = await get_llm_insights(run_id)
+    return JSONResponse(result)
+
+
+# ---- Simple HTTP shims to invoke selected MCP tools ----
+@app.custom_route("/tools/start_market_stream", methods=["POST"])
+async def http_start_market_stream(request: Request) -> Response:
+    body = await request.json()
+    symbols = body.get("symbols") or []
+    interval_sec = int(body.get("interval_sec", 1))
+    load_historical = bool(body.get("load_historical", True))
+    result = await start_market_stream(symbols, interval_sec, load_historical)
+    return JSONResponse(result)
+
+
+@app.custom_route("/tools/subscribe_cex_stream", methods=["POST"])
+async def http_subscribe_cex_stream(request: Request) -> Response:
+    body = await request.json()
+    symbols = body.get("symbols") or []
+    interval_sec = int(body.get("interval_sec", 1))
+    result = await subscribe_cex_stream(symbols, interval_sec)
+    return JSONResponse(result)
+
+@app.custom_route("/tools/get_portfolio_status", methods=["GET", "POST"])
+async def http_get_portfolio_status(_request: Request) -> Response:
+    result = await get_portfolio_status()
+    return JSONResponse(result)
+
+@app.custom_route("/tools/place_mock_order", methods=["POST"])
+async def http_place_mock_order(request: Request) -> Response:
+    body = await request.json()
+    orders = body.get("orders") or []
+    # let pydantic/dataclass conversion inside tool handle types
+    result = await place_mock_order(orders)
+    return JSONResponse(result)
+
+@app.custom_route("/tools/get_transaction_history", methods=["GET"])
+async def http_get_tx(_request: Request) -> Response:
+    result = await get_transaction_history()
+    return JSONResponse(result)
+
+@app.custom_route("/tools/trigger_evaluation", methods=["POST"])
+async def http_trigger_eval(request: Request) -> Response:
+    body = await request.json()
+    window_days = int(body.get("window_days", 7))
+    force = bool(body.get("force", False))
+    result = await trigger_performance_evaluation(window_days, force)
+    return JSONResponse(result)
+
 
 
 if __name__ == "__main__":

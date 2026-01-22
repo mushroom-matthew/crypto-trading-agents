@@ -6,19 +6,21 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
-import openai
 from temporalio.client import Client, RPCError, RPCStatusCode
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from agents.workflows.judge_agent_workflow import JudgeAgentWorkflow
 from agents.workflows.execution_ledger_workflow import ExecutionLedgerWorkflow
+from pydantic import ValidationError
+
 from tools.performance_analysis import PerformanceAnalyzer, format_performance_report
 from tools.agent_logger import AgentLogger
-from agents.utils import check_and_process_feedback
+from agents.utils import check_and_process_feedback, tool_result_data
 from agents.constants import (
     ORANGE, CYAN, GREEN, RED, RESET, 
     DEFAULT_LOG_LEVEL, DEFAULT_OPENAI_MODEL,
@@ -27,10 +29,36 @@ from agents.constants import (
 )
 from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
+from agents.langfuse_utils import init_langfuse
+from agents.llm.client_factory import get_llm_client
+from agents.event_emitter import emit_event
+from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
+from services.risk_adjustment_service import multiplier_from_instruction
 
 logger = setup_logging(__name__, level="INFO")
 
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+init_langfuse()
+openai_client = get_llm_client()
+
+
+def _split_notes_and_json(response_text: str) -> Tuple[str, str]:
+    """Return (notes, json_str) from a two-section judge response."""
+
+    if not isinstance(response_text, str):
+        raise ValueError("Judge response must be text")
+    if "JSON:" not in response_text:
+        raise ValueError("Missing JSON section in judge response")
+    notes_segment, json_segment = response_text.split("JSON:", 1)
+    if "NOTES:" in notes_segment:
+        notes_text = notes_segment.split("NOTES:", 1)[1].strip()
+    else:
+        notes_text = notes_segment.strip()
+    start_idx = json_segment.find("{")
+    end_idx = json_segment.rfind("}")
+    if start_idx < 0 or end_idx <= start_idx:
+        raise ValueError("Could not locate JSON object in judge response")
+    json_block = json_segment[start_idx : end_idx + 1]
+    return notes_text, json_block
 
 
 class JudgeAgent:
@@ -53,6 +81,9 @@ class JudgeAgent:
         
         # Performance threshold for prompt updates
         self.update_threshold = 50.0  # Trigger prompt examination if score below this
+        self.replan_score_threshold = float(os.environ.get("JUDGE_REPLAN_SCORE_THRESHOLD", "45"))
+        self.replan_cooldown_seconds = int(os.environ.get("JUDGE_REPLAN_COOLDOWN_SECONDS", "3600"))
+        self.last_replan_timestamp: Optional[int] = None
     
     async def initialize(self) -> None:
         """Initialize the judge agent."""
@@ -155,15 +186,144 @@ class JudgeAgent:
                 "error": str(exc)
             }
     
-    async def analyze_decision_quality(self, transaction_history: List[Dict]) -> Dict:
+    async def collect_strategy_context(self) -> Dict[str, Any]:
+        """Collect strategy configuration context from available workflows."""
+        context = {
+            "strategy_context": "No active strategy configuration found.",
+            "risk_parameters": "No risk parameters configured.",
+            "trigger_summary": "No active triggers.",
+            "execution_settings": "Default execution settings.",
+        }
+
+        try:
+            # Try to get strategy specs from StrategySpecWorkflow
+            try:
+                spec_handle = self.temporal_client.get_workflow_handle("strategy-spec")
+                all_specs = await spec_handle.query("list_strategy_specs")
+                if all_specs:
+                    spec_lines = []
+                    for key, spec in all_specs.items():
+                        spec_lines.append(f"- {key}: mode={spec.get('mode')}, "
+                                        f"entry_conditions={len(spec.get('entry_conditions', []))}, "
+                                        f"exit_conditions={len(spec.get('exit_conditions', []))}")
+                        if spec.get('risk'):
+                            risk = spec['risk']
+                            spec_lines.append(f"  Risk: max_fraction={risk.get('max_fraction_of_balance')}, "
+                                            f"risk_per_trade={risk.get('risk_per_trade_fraction')}, "
+                                            f"max_drawdown={risk.get('max_drawdown_pct')}%")
+                    context["strategy_context"] = "\n".join(spec_lines)
+            except Exception:
+                pass  # Workflow not found
+
+            # Try to get user preferences which may include strategy settings
+            prefs = await self.get_user_preferences()
+            if prefs:
+                pref_lines = [
+                    f"- Risk tolerance: {prefs.get('risk_tolerance', 'moderate')}",
+                    f"- Trading style: {prefs.get('trading_style', 'balanced')}",
+                    f"- Experience level: {prefs.get('experience_level', 'intermediate')}",
+                ]
+                if prefs.get('max_position_risk_pct'):
+                    pref_lines.append(f"- Max position risk: {prefs.get('max_position_risk_pct')}%")
+                if prefs.get('max_daily_loss_pct'):
+                    pref_lines.append(f"- Max daily loss: {prefs.get('max_daily_loss_pct')}%")
+                if prefs.get('min_hold_hours'):
+                    pref_lines.append(f"- Min hold hours: {prefs.get('min_hold_hours')}")
+                if prefs.get('walk_away_profit_target_pct'):
+                    pref_lines.append(f"- Walk-away target: {prefs.get('walk_away_profit_target_pct')}%")
+                context["execution_settings"] = "\n".join(pref_lines)
+
+            # Try to get execution agent state for active triggers/settings
+            try:
+                exec_handle = self.temporal_client.get_workflow_handle("execution-agent")
+                exec_state = await exec_handle.query("get_execution_state")
+                if exec_state:
+                    state_lines = []
+                    if exec_state.get('max_trades_per_day'):
+                        state_lines.append(f"- Max trades/day: {exec_state.get('max_trades_per_day')}")
+                    if exec_state.get('max_triggers_per_symbol_per_day'):
+                        state_lines.append(f"- Max triggers/symbol/day: {exec_state.get('max_triggers_per_symbol_per_day')}")
+                    if exec_state.get('risk_mode'):
+                        state_lines.append(f"- Risk mode: {exec_state.get('risk_mode')}")
+                    if state_lines:
+                        context["risk_parameters"] = "\n".join(state_lines)
+            except Exception:
+                pass  # Workflow not found
+
+        except Exception as exc:
+            logger.warning("Failed to collect strategy context: %s", exc)
+
+        return context
+
+    def _get_fallback_prompt(self) -> str:
+        """Fallback prompt if template file is not found."""
+        return """You are an expert performance judge for a multi-asset crypto strategist.
+
+STRATEGY CONFIGURATION:
+{strategy_context}
+
+RISK PARAMETERS:
+{risk_parameters}
+
+ACTIVE TRIGGERS:
+{trigger_summary}
+
+EXECUTION SETTINGS:
+{execution_settings}
+
+PERFORMANCE SNAPSHOT:
+{performance_summary}
+
+RECENT TRANSACTIONS:
+{transaction_summary}
+
+TRADING STATISTICS:
+- Total transactions: {total_transactions}
+- Buy orders: {buy_count}
+- Sell orders: {sell_count}
+- Symbols traded: {symbols}
+
+Respond with **two sections only**:
+
+NOTES:
+- Provide up to five concise sentences on strategy alignment, risk adherence, and execution quality.
+
+JSON:
+{{
+  "score": <float 0-100>,
+  "constraints": {{
+    "max_trades_per_day": null,
+    "max_triggers_per_symbol_per_day": null,
+    "risk_mode": "normal",
+    "disabled_trigger_ids": [],
+    "disabled_categories": []
+  }},
+  "strategist_constraints": {{
+    "must_fix": [],
+    "vetoes": [],
+    "boost": [],
+    "regime_correction": null,
+    "sizing_adjustments": {{}}
+  }}
+}}"""
+
+    async def analyze_decision_quality(self, transaction_history: List[Dict], performance_snapshot: Dict[str, Any]) -> Dict:
         """Use LLM to analyze decision quality from transaction patterns."""
+
         if not transaction_history:
+            feedback = JudgeFeedback(score=50.0)
             return {
+                "notes": "No transactions to analyze; keep collecting executions before judging quality.",
                 "decision_score": 50.0,
-                "reasoning": "No transactions to analyze",
-                "recommendations": []
+                "judge_feedback": feedback.model_dump(),
+                "constraints": feedback.constraints.model_dump(),
+                "strategist_constraints": feedback.strategist_constraints.model_dump(),
+                "recommendations": ["Wait for new trades before drawing conclusions"],
             }
-        
+
+        # Collect strategy context for comprehensive evaluation
+        strategy_context = await self.collect_strategy_context()
+
         # Prepare transaction summary for LLM analysis
         recent_transactions = transaction_history[:20]  # Last 20 transactions
         transaction_summary = "\n".join([
@@ -172,38 +332,49 @@ class JudgeAgent:
             f"Cost: ${tx['cost']:.2f}"
             for tx in recent_transactions
         ])
-        
+
         # Calculate basic statistics
         symbols = list(set(tx['symbol'] for tx in transaction_history))
         buy_count = len([tx for tx in transaction_history if tx['side'] == 'BUY'])
         sell_count = len([tx for tx in transaction_history if tx['side'] == 'SELL'])
-        
-        analysis_prompt = f"""
-Analyze the following cryptocurrency trading decisions for quality and effectiveness:
+        def _fmt_pct(value: float | None) -> str:
+            if not isinstance(value, (int, float)):
+                return "n/a"
+            return f"{float(value) * 100:.2f}%"
 
-RECENT TRANSACTIONS:
-{transaction_summary}
+        perf_lines = [
+            f"Window: {performance_snapshot.get('start_date', 'n/a')} -> {performance_snapshot.get('end_date', 'n/a')}",
+            f"Total return: {_fmt_pct(performance_snapshot.get('total_return'))}",
+            f"Annualized return: {_fmt_pct(performance_snapshot.get('annualized_return'))}",
+            f"Volatility: {_fmt_pct(performance_snapshot.get('volatility'))}",
+            f"Sharpe ratio: {performance_snapshot.get('sharpe_ratio', 'n/a')}",
+            f"Max drawdown: {_fmt_pct(performance_snapshot.get('max_drawdown'))}",
+            f"Win rate: {_fmt_pct(performance_snapshot.get('win_rate'))}",
+            f"Total trades: {performance_snapshot.get('total_trades', 0)}",
+            f"Profit factor: {performance_snapshot.get('profit_factor', 'n/a')}",
+        ]
+        performance_summary = "\n".join(perf_lines)
 
-TRADING STATISTICS:
-- Total transactions: {len(transaction_history)}
-- Buy orders: {buy_count}
-- Sell orders: {sell_count}
-- Symbols traded: {', '.join(symbols)}
+        # Load enhanced prompt template
+        prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "llm_judge_prompt.txt"
+        try:
+            prompt_template = prompt_path.read_text()
+        except Exception:
+            # Fallback to embedded prompt if file not found
+            prompt_template = self._get_fallback_prompt()
 
-Please evaluate:
-1. Decision timing and market awareness
-2. Position sizing consistency
-3. Risk management adherence
-4. Portfolio diversification approach
-
-Provide a score from 0-100 and specific recommendations for improvement.
-Respond in JSON format:
-{{
-    "decision_score": <number>,
-    "reasoning": "<detailed analysis>",
-    "recommendations": ["<recommendation1>", "<recommendation2>", ...]
-}}
-"""
+        analysis_prompt = prompt_template.format(
+            strategy_context=strategy_context.get("strategy_context", "No strategy context available."),
+            risk_parameters=strategy_context.get("risk_parameters", "No risk parameters configured."),
+            trigger_summary=strategy_context.get("trigger_summary", "No active triggers."),
+            execution_settings=strategy_context.get("execution_settings", "Default execution settings."),
+            performance_summary=performance_summary,
+            transaction_summary=transaction_summary,
+            total_transactions=len(transaction_history),
+            buy_count=buy_count,
+            sell_count=sell_count,
+            symbols=', '.join(symbols),
+        )
         
         try:
             response = openai_client.chat.completions.create(
@@ -220,24 +391,30 @@ Respond in JSON format:
                 ],
                 max_completion_tokens=800
             )
-            
+
             analysis_text = response.choices[0].message.content
-            # Extract JSON from response
-            start_idx = analysis_text.find('{')
-            end_idx = analysis_text.rfind('}') + 1
-            
-            if start_idx >= 0 and end_idx > start_idx:
-                return json.loads(analysis_text[start_idx:end_idx])
-            else:
-                raise ValueError("No valid JSON found in LLM response")
-                
+            if not analysis_text:
+                raise ValueError("Empty judge response")
+            notes_text, json_block = _split_notes_and_json(analysis_text)
+            feedback = JudgeFeedback.model_validate_json(json_block)
+            self._apply_structured_constraints(feedback)
+            decision_score = feedback.score if feedback.score is not None else 50.0
+            display_constraints = feedback.strategist_constraints.model_dump()
+            machine_constraints = feedback.constraints.model_dump()
+            return {
+                "notes": notes_text,
+                "decision_score": decision_score,
+                "judge_feedback": feedback.model_dump(),
+                "constraints": machine_constraints,
+                "strategist_constraints": display_constraints,
+                "recommendations": display_constraints.get("must_fix", [])[:3],
+            }
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            logger.error("Judge feedback JSON invalid: %s", exc)
+            raise
         except Exception as exc:
             logger.error("Failed to analyze decision quality: %s", exc)
-            return {
-                "decision_score": 50.0,
-                "reasoning": f"Analysis failed: {exc}",
-                "recommendations": ["Review decision analysis system"]
-            }
+            raise
     
     async def generate_evaluation_report(self, performance_data: Dict) -> Dict:
         """Generate comprehensive evaluation report."""
@@ -252,23 +429,6 @@ Respond in JSON format:
             risk_metrics=risk_metrics
         )
         
-        # Analyze decision quality using LLM
-        decision_analysis = await self.analyze_decision_quality(transaction_history)
-        
-        # Calculate overall evaluation score
-        return_score = min(100.0, max(0.0, (performance_report.annualized_return + 1) * 50))
-        risk_score = performance_report.risk_management_score
-        decision_score = decision_analysis["decision_score"]
-        consistency_score = performance_report.consistency_score
-        
-        overall_score = (
-            return_score * self.criteria_weights["returns"] +
-            risk_score * self.criteria_weights["risk_management"] +
-            decision_score * self.criteria_weights["decision_quality"] +
-            consistency_score * self.criteria_weights["consistency"]
-        )
-        
-        # Convert performance_report to JSON-serializable dict using only actual attributes
         performance_report_dict = {
             "start_date": performance_report.start_date.isoformat(),
             "end_date": performance_report.end_date.isoformat(),
@@ -290,6 +450,22 @@ Respond in JSON format:
             "consistency_score": performance_report.consistency_score,
             "overall_grade": performance_report.overall_grade
         }
+
+        # Analyze decision quality using LLM
+        decision_analysis = await self.analyze_decision_quality(transaction_history, performance_report_dict)
+
+        # Calculate overall evaluation score
+        return_score = min(100.0, max(0.0, (performance_report.annualized_return + 1) * 50))
+        risk_score = performance_report.risk_management_score
+        decision_score = decision_analysis.get("decision_score", 50.0)
+        consistency_score = performance_report.consistency_score
+        
+        overall_score = (
+            return_score * self.criteria_weights["returns"] +
+            risk_score * self.criteria_weights["risk_management"] +
+            decision_score * self.criteria_weights["decision_quality"] +
+            consistency_score * self.criteria_weights["consistency"]
+        )
         
         return {
             "timestamp": int(datetime.now(timezone.utc).timestamp()),
@@ -303,6 +479,7 @@ Respond in JSON format:
             },
             "performance_report": performance_report_dict,
             "decision_analysis": decision_analysis,
+            "strategist_constraints": decision_analysis.get("strategist_constraints", {}),
             "metrics": {
                 "total_trades": len(transaction_history),
                 "annualized_return": performance_report.annualized_return,
@@ -652,6 +829,23 @@ Return ONLY the improved system prompt, no explanations."""
             handle = self.temporal_client.get_workflow_handle("judge-agent")
             await handle.signal("record_evaluation", evaluation)
             logger.info("Recorded evaluation with score %.1f", evaluation["overall_score"])
+            try:
+                payload = {
+                    "overall_score": evaluation.get("overall_score"),
+                    "component_scores": evaluation.get("component_scores"),
+                    "recommendations": evaluation.get("recommendations", []),
+                    "context_update": evaluation.get("context_update"),
+                    "strategy_replans": evaluation.get("strategy_replans", []),
+                }
+                await emit_event(
+                    "plan_judged",
+                    payload,
+                    source="judge_agent",
+                    run_id="judge-agent",
+                    correlation_id=str(evaluation.get("overall_score", "")),
+                )
+            except Exception:
+                logger.debug("Failed to emit plan_judged event", exc_info=True)
         except Exception as exc:
             logger.error("Failed to record evaluation: %s", exc)
     
@@ -662,7 +856,86 @@ Return ONLY the improved system prompt, no explanations."""
             await handle.signal("mark_triggers_processed", {})
         except Exception as exc:
             logger.debug("Failed to mark triggers as processed: %s", exc)
-    
+
+    async def trigger_strategy_replan(self, evaluation: Dict) -> Optional[List[Dict[str, Any]]]:
+        """Trigger deterministic strategy re-planning when performance degrades."""
+        overall_score = evaluation.get("overall_score", 100.0)
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if overall_score >= self.replan_score_threshold:
+            return None
+        if (
+            self.last_replan_timestamp
+            and now_ts - self.last_replan_timestamp < self.replan_cooldown_seconds
+        ):
+            logger.info("Skipping re-plan: cooldown active")
+            return None
+
+        broker_wf = os.environ.get("BROKER_WF_ID", "broker-agent")
+        try:
+            broker_handle = self.temporal_client.get_workflow_handle(broker_wf)
+            symbols: list[str] = await broker_handle.query("get_symbols")
+        except Exception as exc:
+            logger.warning("Unable to fetch active symbols for re-plan: %s", exc)
+            return None
+
+        if not symbols:
+            logger.info("No active symbols to re-plan")
+            return None
+
+        prefs = await self.get_user_preferences()
+        risk_profile = prefs.get("risk_tolerance", "medium")
+        trading_style = prefs.get("trading_style", "balanced")
+        mode_map = {
+            "aggressive": "breakout",
+            "balanced": "trend",
+            "conservative": "mean_revert",
+        }
+        mode = mode_map.get(trading_style, None)
+        timeframe = os.environ.get("STRATEGY_TIMEFRAME", "15m")
+        recommendations = evaluation.get("recommendations", [])
+        notes = (
+            f"Judge-triggered replan due to low score {overall_score:.1f}. "
+            f"Top recommendations: {', '.join(recommendations[:2]) if recommendations else 'improve risk discipline'}"
+        )
+
+        replan_results: List[Dict[str, Any]] = []
+        for symbol in symbols:
+            payload = {
+                "market": symbol,
+                "timeframe": timeframe,
+                "risk_profile": risk_profile,
+                "mode": mode,
+                "notes": notes,
+            }
+            try:
+                result = await self.mcp_session.call_tool("plan_strategy", payload)
+                replan_results.append(
+                    {
+                        "symbol": symbol,
+                        "strategy": tool_result_data(result),
+                    }
+                )
+                print(
+                    f"{ORANGE}[JudgeAgent] 🔁 Strategy re-plan triggered for {symbol} (risk={risk_profile}){RESET}"
+                )
+            except Exception as exc:
+                logger.error("Failed to plan strategy for %s: %s", symbol, exc)
+
+        if replan_results:
+            self.last_replan_timestamp = now_ts
+            await self.agent_logger.log_action(
+                action_type="strategy_replan",
+                details={
+                    "trigger": "judge_auto",
+                    "threshold": self.replan_score_threshold,
+                    "overall_score": overall_score,
+                    "symbols": [entry["symbol"] for entry in replan_results],
+                },
+                result={"success": True},
+            )
+            return replan_results
+        return None
+
     
     async def run_evaluation_cycle(self) -> None:
         """Run a complete evaluation cycle."""
@@ -757,6 +1030,13 @@ Return ONLY the improved system prompt, no explanations."""
             except Exception as log_error:
                 logger.error(f"Failed to log evaluation: {log_error}")
             
+            replan_info = await self.trigger_strategy_replan(evaluation)
+            if replan_info:
+                evaluation["strategy_replans"] = replan_info
+                print(f"{ORANGE}[JudgeAgent] Triggered strategy re-planning for {len(replan_info)} market(s){RESET}")
+            else:
+                evaluation["strategy_replans"] = []
+            
             # Mark any trigger requests as processed
             await self._mark_triggers_processed()
             
@@ -769,6 +1049,19 @@ Return ONLY the improved system prompt, no explanations."""
         except Exception as exc:
             logger.error("Evaluation cycle failed: %s", exc)
             print(f"{RED}[JudgeAgent] Evaluation cycle failed: {exc}{RESET}")
+
+    def _apply_structured_constraints(self, feedback: JudgeFeedback) -> None:
+        constraints = feedback.constraints
+        display = feedback.strategist_constraints
+        for entry in display.must_fix or []:
+            lowered = entry.lower()
+            if "at least" in lowered and "per day" in lowered:
+                constraints.min_trades_per_day = max(constraints.min_trades_per_day or 0, 1)
+        for symbol, instruction in (display.sizing_adjustments or {}).items():
+            lowered = instruction.lower()
+            multiplier = multiplier_from_instruction(instruction)
+            if multiplier is not None and multiplier < 1.0:
+                constraints.symbol_risk_multipliers[symbol] = multiplier
 
 
 async def _watch_judge_preferences(client: Client, current_preferences: dict, judge_agent: JudgeAgent) -> None:
@@ -783,6 +1076,7 @@ async def _watch_judge_preferences(client: Client, current_preferences: dict, ju
             if prefs != current_preferences:
                 current_preferences.clear()
                 current_preferences.update(prefs)
+                judge_agent.user_preferences = dict(prefs)
                 
                 if prefs:
                     print(f"{GREEN}[JudgeAgent] ✅ User preferences updated: risk_tolerance={prefs.get('risk_tolerance', 'moderate')}, trading_style={prefs.get('trading_style', 'balanced')}, experience_level={prefs.get('experience_level', 'intermediate')}{RESET}")

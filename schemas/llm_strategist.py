@@ -1,0 +1,193 @@
+"""Schema definitions for the LLM strategist protocol."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional
+from uuid import uuid4
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class SerializableModel(BaseModel):
+    """Base-model that standardizes JSON helpers and validation."""
+
+    model_config = {"extra": "forbid", "validate_assignment": True}
+
+    def to_json(self, **kwargs: Any) -> str:
+        return self.model_dump_json(**kwargs)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "SerializableModel":
+        return cls.model_validate_json(raw)
+
+
+class IndicatorSnapshot(SerializableModel):
+    """Pre-computed indicator payload that the LLM consumes."""
+
+    symbol: str
+    timeframe: str
+    as_of: datetime
+    close: float
+    volume: float | None = None
+    volume_multiple: float | None = None
+    sma_short: float | None = None
+    sma_medium: float | None = None
+    sma_long: float | None = None
+    ema_short: float | None = None
+    ema_medium: float | None = None
+    rsi_14: float | None = None
+    macd: float | None = None
+    macd_signal: float | None = None
+    macd_hist: float | None = None
+    atr_14: float | None = None
+    roc_short: float | None = None
+    roc_medium: float | None = None
+    realized_vol_short: float | None = None
+    realized_vol_medium: float | None = None
+    donchian_upper_short: float | None = None
+    donchian_lower_short: float | None = None
+    bollinger_upper: float | None = None
+    bollinger_lower: float | None = None
+    # Cycle indicators (200-bar window for cyclical analysis)
+    cycle_high_200: float | None = None
+    cycle_low_200: float | None = None
+    cycle_range_200: float | None = None
+    cycle_position: float | None = None
+    # Fibonacci retracement levels (from cycle high/low)
+    fib_236: float | None = None
+    fib_382: float | None = None
+    fib_500: float | None = None
+    fib_618: float | None = None
+    fib_786: float | None = None
+    # Expansion/contraction ratios (swing-based)
+    last_expansion_pct: float | None = None
+    last_contraction_pct: float | None = None
+    expansion_contraction_ratio: float | None = None
+
+
+class AssetState(SerializableModel):
+    """Summarized asset view injected into the LLM context."""
+
+    symbol: str
+    indicators: List[IndicatorSnapshot]
+    trend_state: Literal["uptrend", "downtrend", "sideways"]
+    vol_state: Literal["low", "normal", "high", "extreme"]
+
+
+class PortfolioState(SerializableModel):
+    """Rolling-account statistics shared with the LLM."""
+
+    timestamp: datetime
+    equity: float
+    cash: float
+    positions: Dict[str, float]
+    realized_pnl_7d: float
+    realized_pnl_30d: float
+    sharpe_30d: float
+    max_drawdown_90d: float
+    win_rate_30d: float
+    profit_factor_30d: float
+
+
+TriggerDirection = Literal["long", "short", "flat", "exit", "flat_exit"]
+TriggerCategory = Literal[
+    "trend_continuation",
+    "reversal",
+    "volatility_breakout",
+    "mean_reversion",
+    "emergency_exit",
+    "other",
+]
+
+
+class TriggerSummary(SerializableModel):
+    """Compact trigger payload for continuity across replans."""
+
+    id: str
+    symbol: str
+    timeframe: str
+    direction: TriggerDirection
+    category: TriggerCategory | None = Field(default=None)
+    confidence_grade: Literal["A", "B", "C"] | None = Field(default=None)
+    entry_rule: str
+    exit_rule: str
+    hold_rule: str | None = Field(default=None)
+    stop_loss_pct: float | None = Field(default=None, ge=0.0)
+
+
+class LLMInput(SerializableModel):
+    """Structured payload that is serialized and sent to the LLM strategist."""
+
+    portfolio: PortfolioState
+    assets: List[AssetState]
+    risk_params: Dict[str, Any]
+    global_context: Dict[str, Any] = Field(default_factory=dict)
+    market_structure: Dict[str, Any] = Field(default_factory=dict)
+    previous_triggers: List[TriggerSummary] = Field(default_factory=list)
+
+
+class TriggerCondition(SerializableModel):
+    """Entry/exit specification provided by the LLM."""
+
+    id: str
+    symbol: str
+    category: TriggerCategory | None = Field(default=None)
+    confidence_grade: Literal["A", "B", "C"] | None = Field(default=None)
+    direction: TriggerDirection
+    timeframe: str
+    entry_rule: str
+    exit_rule: str
+    hold_rule: str | None = Field(
+        default=None,
+        description="Optional rule that, when True, suppresses exit_rule to maintain position. "
+        "Use to prevent premature exits from minor fluctuations. Emergency exits still fire."
+    )
+    stop_loss_pct: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def _require_emergency_exit_rule(self) -> "TriggerCondition":
+        if self.category == "emergency_exit" and not (self.exit_rule or "").strip():
+            raise ValueError("emergency_exit triggers must define a non-empty exit_rule")
+        return self
+
+
+class RiskConstraint(SerializableModel):
+    """Plan-level guardrails enforced by the deterministic engine."""
+
+    max_position_risk_pct: float = Field(..., ge=0.0)
+    max_symbol_exposure_pct: float = Field(..., ge=0.0)
+    max_portfolio_exposure_pct: float = Field(..., ge=0.0)
+    max_daily_loss_pct: float = Field(..., ge=0.0)
+    max_daily_risk_budget_pct: float | None = Field(default=None, ge=0.0)
+
+
+class PositionSizingRule(SerializableModel):
+    """Symbol-level sizing behavior derived from risk params."""
+
+    symbol: str
+    sizing_mode: Literal["fixed_fraction", "vol_target", "notional"]
+    target_risk_pct: float | None = Field(default=None, ge=0.0)
+    vol_target_annual: float | None = Field(default=None, ge=0.0)
+    notional: float | None = Field(default=None, ge=0.0)
+
+
+class StrategyPlan(SerializableModel):
+    """Complete plan payload returned by the LLM."""
+
+    plan_id: str = Field(default_factory=lambda: f"plan_{uuid4().hex}")
+    run_id: str | None = None
+    generated_at: datetime
+    valid_until: datetime
+    global_view: Optional[str] = None
+    regime: Literal["bull", "bear", "range", "high_vol", "mixed"]
+    triggers: List[TriggerCondition]
+    risk_constraints: RiskConstraint
+    sizing_rules: List[PositionSizingRule] = Field(default_factory=list)
+    max_trades_per_day: int | None = Field(default=None, ge=0)
+    min_trades_per_day: int | None = Field(default=None, ge=0)
+    max_triggers_per_symbol_per_day: int | None = Field(default=None, ge=0)
+    trigger_budgets: Dict[str, int] = Field(default_factory=dict)
+    allowed_symbols: List[str] = Field(default_factory=list)
+    allowed_directions: List[TriggerDirection] = Field(default_factory=list)
+    allowed_trigger_categories: List[TriggerCategory] = Field(default_factory=list)

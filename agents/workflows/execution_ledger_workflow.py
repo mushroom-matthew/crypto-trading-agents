@@ -5,9 +5,15 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 from typing import Dict, List, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from temporalio import workflow
 from temporalio.client import Client
+
+from agents.activities.ledger import persist_fill_activity
+from agents.wallet_provider import get_wallet_provider, PaperWalletProvider, WalletProvider
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @workflow.defn
@@ -30,6 +36,21 @@ class ExecutionLedgerWorkflow:
         self.profit_scraping_percentage = Decimal("0.20")  # Default 20% profit scraping
         self.scraped_profits = Decimal("0")  # Total profits set aside
         self.user_preferences: Dict[str, Any] = {}  # Store user preferences
+        self.enable_real_ledger = os.environ.get("ENABLE_REAL_LEDGER", "1") != "0"
+        self.trading_wallet_id = self._env_int("LEDGER_TRADING_WALLET_ID")
+        self.trading_wallet_name = os.environ.get("LEDGER_TRADING_WALLET_NAME", "mock_trading")
+        self.equity_wallet_name = os.environ.get("LEDGER_EQUITY_WALLET_NAME", "system_equity")
+        self.wallet_provider: WalletProvider | None = None
+
+    def _env_int(self, key: str) -> int | None:
+        value = os.environ.get(key)
+        if not value:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            workflow.logger.warning("Invalid integer for %s environment variable", key)
+            return None
 
     @workflow.signal
     def set_user_preferences(self, preferences: Dict[str, Any]) -> None:
@@ -44,10 +65,100 @@ class ExecutionLedgerWorkflow:
         else:
             self.profit_scraping_percentage = Decimal("0.20")  # Default 20%
         
-        workflow.logger.info(f"Profit scraping set to {self.profit_scraping_percentage * 100}%")
+        try:
+            workflow.logger.info("Profit scraping set to %s%%", self.profit_scraping_percentage * 100)
+        except Exception:
+            logger.info("Profit scraping set to %s%%", self.profit_scraping_percentage * 100)
+        if "enable_real_ledger" in preferences:
+            self.enable_real_ledger = bool(preferences["enable_real_ledger"])
+        if "trading_wallet_id" in preferences:
+            try:
+                self.trading_wallet_id = int(preferences["trading_wallet_id"])
+            except (TypeError, ValueError):
+                workflow.logger.warning("Invalid trading_wallet_id supplied via preferences")
+        if "trading_wallet_name" in preferences:
+            self.trading_wallet_name = str(preferences["trading_wallet_name"])
+        if "equity_wallet_name" in preferences:
+            self.equity_wallet_name = str(preferences["equity_wallet_name"])
+
+    @workflow.signal
+    def initialize_portfolio(self, portfolio: Dict[str, Any]) -> None:
+        """Initialize portfolio with cash and positions for paper trading.
+
+        Args:
+            portfolio: Dict with:
+                - cash: Initial cash amount
+                - positions: Dict of symbol -> quantity
+                - prices: Dict of symbol -> current price (for entry price tracking)
+        """
+        # Set cash
+        if "cash" in portfolio:
+            self.cash = Decimal(str(portfolio["cash"]))
+            self.initial_cash = self.cash
+            workflow.logger.info(f"Initialized cash to {self.cash}")
+
+        # Set positions
+        positions = portfolio.get("positions", {})
+        prices = portfolio.get("prices", {})
+
+        for symbol, qty in positions.items():
+            qty_decimal = Decimal(str(qty))
+            if qty_decimal != 0:
+                self.positions[symbol] = qty_decimal
+                # Set entry price from provided prices
+                if symbol in prices:
+                    self.entry_price[symbol] = Decimal(str(prices[symbol]))
+                    self.last_price[symbol] = self.entry_price[symbol]
+                    self.last_price_timestamp[symbol] = int(datetime.now(timezone.utc).timestamp() * 1000)
+                workflow.logger.info(f"Initialized position: {symbol} = {qty_decimal} @ {self.entry_price.get(symbol, 'unknown')}")
+
+        # Reset P&L tracking
+        self.realized_pnl = Decimal("0")
+        self.scraped_profits = Decimal("0")
+        self.transaction_history = []
+        self.fill_count = 0
+
+        workflow.logger.info(f"Portfolio initialized: cash={self.cash}, positions={len(self.positions)}")
+
+    @workflow.signal
+    def reset_portfolio(self) -> None:
+        """Reset portfolio to initial state (clear all positions)."""
+        initial_balance = os.environ.get("INITIAL_PORTFOLIO_BALANCE", "1000")
+        self.initial_cash = Decimal(initial_balance)
+        self.cash = self.initial_cash
+        self.positions = {}
+        self.entry_price = {}
+        self.last_price = {}
+        self.last_price_timestamp = {}
+        self.realized_pnl = Decimal("0")
+        self.scraped_profits = Decimal("0")
+        self.transaction_history = []
+        self.fill_count = 0
+        workflow.logger.info("Portfolio reset to initial state")
 
     @workflow.signal
     def record_fill(self, fill: Dict) -> None:
+        sequence = self.fill_count + 1
+        if self.wallet_provider is None:
+            # Initialize wallet provider on first fill
+            self.wallet_provider = get_wallet_provider({"CASH": self.cash})
+        if self.enable_real_ledger:
+            try:
+                info = workflow.info()
+            except Exception:
+                info = None
+            if info is not None:
+                payload = {
+                    "fill": dict(fill),
+                    "workflow_id": info.workflow_id,
+                    "sequence": sequence,
+                    "recorded_at": datetime.now(timezone.utc).timestamp(),
+                    "trading_wallet_id": self.trading_wallet_id,
+                    "trading_wallet_name": self.trading_wallet_name,
+                    "equity_wallet_name": self.equity_wallet_name,
+                }
+                workflow.create_task(self._persist_fill(payload))
+
         side = fill["side"]
         symbol = fill["symbol"]
         qty = Decimal(str(fill["qty"]))
@@ -74,6 +185,11 @@ class ExecutionLedgerWorkflow:
         current_qty = self.positions.get(symbol, Decimal("0"))
         if side == "BUY":
             self.cash -= cost
+            try:
+                if self.wallet_provider:
+                    self.wallet_provider.debit("CASH", cost)
+            except Exception:
+                pass
             new_qty = current_qty + qty
             
             # Calculate weighted average entry price
@@ -90,6 +206,11 @@ class ExecutionLedgerWorkflow:
             self.positions[symbol] = new_qty
         else:  # SELL
             self.cash += cost
+            try:
+                if self.wallet_provider:
+                    self.wallet_provider.credit("CASH", cost)
+            except Exception:
+                pass
             new_qty = current_qty - qty
             
             # Calculate realized PnL for the sold quantity
@@ -105,14 +226,60 @@ class ExecutionLedgerWorkflow:
                     self.scraped_profits += scraped_amount
                     # Remove scraped profits from available cash
                     self.cash -= scraped_amount
-                    workflow.logger.info(f"Scraped {scraped_amount:.2f} ({self.profit_scraping_percentage * 100}%) from {position_realized_pnl:.2f} profit")
-            
-            if new_qty <= 0:
-                self.positions.pop(symbol, None)
-                self.entry_price.pop(symbol, None)
-            else:
-                self.positions[symbol] = new_qty
+                    message = f"Scraped {scraped_amount:.2f} ({self.profit_scraping_percentage * 100}%) from {position_realized_pnl:.2f} profit"
+                    try:
+                        workflow.logger.info(message)
+                    except Exception:
+                        logger.info(message)
+        
+        if new_qty <= 0:
+            self.positions.pop(symbol, None)
+            self.entry_price.pop(symbol, None)
+        else:
+            self.positions[symbol] = new_qty
         self.fill_count += 1
+
+        # Emit position update event for ops telemetry
+        try:
+            from agents.event_emitter import emit_event  # type: ignore
+            from agents.wallet_provider import get_wallet_provider, PaperWalletProvider  # type: ignore
+
+            unrealized_pnl = float(self.get_unrealized_pnl_decimal())
+            payload = {
+                "symbol": symbol,
+                "qty": float(self.positions.get(symbol, Decimal("0"))),
+                "cash": float(self.cash),
+                "realized_pnl": float(self.realized_pnl),
+                "unrealized_pnl": unrealized_pnl,
+                "pnl": float(self.realized_pnl) + unrealized_pnl,
+                "mark_price": float(price),
+                "entry_price": float(self.entry_price.get(symbol, Decimal("0"))) if symbol in self.entry_price else None,
+                "scraped_profits": float(self.scraped_profits),
+            }
+            # Paper wallet snapshot for visibility; live provider would integrate real balances.
+            if isinstance(self.wallet_provider, PaperWalletProvider):
+                payload["paper_balance_cash"] = float(self.wallet_provider.get_balance("CASH"))
+            workflow.create_task(
+                emit_event(
+                    "position_update",
+                    payload,
+                    source="execution_ledger",
+                    run_id=info.workflow_id if "info" in locals() and info else None,
+                    correlation_id=str(sequence),
+                )
+            )
+        except Exception:
+            pass
+
+    async def _persist_fill(self, payload: Dict[str, Any]) -> None:
+        try:
+            await workflow.execute_activity(
+                persist_fill_activity,
+                payload,
+                schedule_to_close_timeout=timedelta(seconds=30),
+            )
+        except Exception as exc:
+            workflow.logger.error("Failed to persist fill to ledger", error=str(exc))
     
     def _validate_price(self, price: Decimal, symbol: str) -> bool:
         """Validate that a price is reasonable."""
@@ -235,21 +402,21 @@ class ExecutionLedgerWorkflow:
         return {sym: float(p) for sym, p in self.entry_price.items()}
 
     @workflow.query
-    def get_transaction_history(self, params: Dict = None) -> List[Dict]:
+    def get_transaction_history(self, params: Dict = None, *, limit: int | None = None, since_ts: int | None = None) -> List[Dict]:
         """Return transaction history filtered by timestamp and limited by count."""
         if params is None:
             params = {}
         
-        since_ts = params.get("since_ts", 0)
-        limit = params.get("limit", 1000)
+        since = since_ts if since_ts is not None else params.get("since_ts", 0)
+        max_items = limit if limit is not None else params.get("limit", 1000)
         
         filtered_transactions = [
             tx for tx in self.transaction_history 
-            if tx["timestamp"] >= since_ts
+            if tx["timestamp"] >= since
         ]
         # Return most recent transactions first
         filtered_transactions.sort(key=lambda x: x["timestamp"], reverse=True)
-        return filtered_transactions[:limit]
+        return filtered_transactions[:max_items]
 
     @workflow.query
     def get_performance_metrics(self, window_days: int = 30) -> Dict[str, float]:
@@ -353,7 +520,9 @@ class ExecutionLedgerWorkflow:
             position_concentrations[symbol] = concentration
         
         max_position_concentration = max(position_concentrations.values()) if position_concentrations else 0.0
-        cash_ratio = float(self.cash) / total_portfolio_value if total_portfolio_value > 0 else 1.0
+        max_position_concentration = max(0.0, min(1.0, max_position_concentration))
+        raw_ratio = float(self.cash) / total_portfolio_value if total_portfolio_value > 0 else 1.0
+        cash_ratio = max(0.0, min(1.0, raw_ratio))
         
         return {
             "total_portfolio_value": total_portfolio_value,

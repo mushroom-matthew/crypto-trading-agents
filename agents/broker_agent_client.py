@@ -5,18 +5,15 @@ import logging
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent
-try:
-    import openai
-    _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-except Exception:  # pragma: no cover - optional dependency
-    openai = None
-    _openai_client = None
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from agents.utils import stream_chat_completion, tool_result_data
 from agents.context_manager import create_context_manager
 from agents.constants import ORANGE, PINK, RESET, EXCHANGE, DEFAULT_LOG_LEVEL, BROKER_AGENT
 from agents.logging_utils import setup_logging
+from agents.langfuse_utils import init_langfuse
+from agents.llm.client_factory import get_llm_client
+from agents.event_emitter import emit_event
 
 # Tools this agent is allowed to call
 ALLOWED_TOOLS = {
@@ -24,6 +21,9 @@ ALLOWED_TOOLS = {
     "get_portfolio_status",
     "set_user_preferences",
     "get_user_preferences",
+    "plan_strategy",
+    "get_strategy_spec",
+    "list_strategy_specs",
     "trigger_performance_evaluation",
     "get_judge_evaluations",
     "get_prompt_history",
@@ -31,10 +31,15 @@ ALLOWED_TOOLS = {
     "get_transaction_history",
     "send_user_feedback",
     "get_pending_feedback",
+    "list_technical_metrics",
+    "compute_technical_metrics",
+    "update_market_cache",
 }
 
 logger = setup_logging(__name__)
 
+init_langfuse()
+_openai_client = get_llm_client()
 
 
 SYSTEM_PROMPT = (
@@ -100,7 +105,12 @@ SYSTEM_PROMPT = (
     "3. CRITICAL: The tool requires a 'preferences' key containing the dictionary of preferences\n"
     "4. The execution and judge agents will determine appropriate position sizing, cash reserves, and other parameters based on these core preferences\n\n"
     
-    "PERFORMANCE EVALUATION CAPABILITIES:\n"
+"STRATEGY PLANNING & EXECUTION HANDOFF:\n"
+"• Use `plan_strategy` when users request a deterministic strategy for a market/timeframe or when a refresh is needed\n"
+"• Summarize the resulting StrategySpec for the user (entry/exit conditions, risk config) and confirm it has been stored\n"
+"• Use `get_strategy_spec` or `list_strategy_specs` to review the active plan(s) before giving guidance or status updates\n"
+"• Once a StrategySpec exists, remind the user that execution is deterministic until a new plan is requested\n\n"
+"PERFORMANCE EVALUATION CAPABILITIES:\n"
     "When users ask about execution agent performance, trading results, or system optimization:\n"
     "• Use `trigger_performance_evaluation` to run immediate performance analysis\n"
     "• Use `get_judge_evaluations` to show recent evaluation reports and trends\n"
@@ -165,6 +175,14 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
                     continue
 
                 logger.info("User command: %s", user_request)
+                asyncio.create_task(
+                    emit_event(
+                        "intent",
+                        {"text": user_request},
+                        source="broker_agent",
+                        correlation_id=str(len(conversation)),
+                    )
+                )
                 conversation.append({"role": "user", "content": user_request})
 
                 tools_payload = [

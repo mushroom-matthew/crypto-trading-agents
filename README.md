@@ -13,12 +13,17 @@ A 24×7 multi-agent crypto trading stack built on Temporal and Model Context Pro
 - **📚 Historical Data Loading**: Automatic 1-hour historical data initialization for informed startup
 - **📋 Distributed Logging**: Individual agent workflow logging for better separation of concerns
 - **⚡ Durable Execution**: Built on Temporal workflows for fault tolerance and auditability
+- **🌐 Unified Web Dashboard**: React-based UI for backtest orchestration, live trading monitoring, wallet reconciliation, and agent inspection
+- **🔌 Real-Time WebSocket Streaming**: Live market ticks, trade fills, and position updates via WebSocket connections
+- **💼 Wallet Reconciliation**: Automated drift detection between ledger and exchange balances with threshold-based alerting
 
 ## Table of Contents
 
 - [Background](#background)
 - [Architecture](#architecture)
 - [Durable Tools Catalog](#durable-tools-catalog)
+- [Web UI & Real-Time Monitoring](#web-ui--real-time-monitoring)
+- [WebSocket Configuration](#websocket-configuration)
 - [Getting Started](#getting-started)
 - [Demo](#demo)
 - [Repository Layout](#repository-layout)
@@ -168,7 +173,135 @@ Each block corresponds to one or more MCP tools (Temporal workflows) described b
 | `JudgeAgentWorkflow`     | Individual judge agent logging and evaluations  | Performance analysis |
 | `BrokerAgentWorkflow`    | Broker agent state and user interaction logging | User interactions    |
 
-## Getting Started
+## Web UI & Real-Time Monitoring
+
+The system includes a modern React-based web dashboard (`ui/`) that provides comprehensive monitoring and control capabilities:
+
+### Dashboard Features
+
+**Backtest Control Tab**
+- Configure and launch backtests with custom parameters (symbols, timeframe, initial cash, risk settings)
+- Monitor backtest progress in real-time with live status updates
+- View equity curves, performance metrics, and trade history
+- Analyze daily reports with detailed breakdowns of trades, blocks, and risk budget usage
+
+**Live Trading Monitor Tab**
+- Real-time position tracking with P&L calculations
+- Recent fills and trade execution logs
+- Trade block monitoring with categorized reasons (insufficient budget, max concentration, etc.)
+- Risk budget allocation and usage visualization
+- Interactive market ticker with WebSocket-powered live price updates
+
+**Wallet Reconciliation Tab**
+- View all configured wallets with current ledger balances
+- Trigger on-demand reconciliation against exchange (Coinbase) balances
+- Drift detection with configurable thresholds
+- Color-coded status indicators for balance discrepancies
+- Tradeable fraction configuration per wallet
+
+**Agent Inspector Tab**
+- Trace decision chains via correlation ID linking
+- Event filtering by type, source, run_id, or correlation_id
+- LLM telemetry monitoring (model usage, token counts, cost estimates)
+- Workflow status cards (Broker, Execution, Judge agents)
+- Real-time event stream via WebSocket with polling fallback
+
+### Accessing the Dashboard
+
+1. Start the full stack:
+   ```bash
+   docker compose up
+   ```
+
+2. Start the UI development server:
+   ```bash
+   cd ui && npm run dev
+   ```
+
+3. Open your browser to `http://localhost:3000` (or the port shown in terminal)
+
+The dashboard automatically connects to the Ops API at `localhost:8081` and establishes WebSocket connections for real-time updates.
+
+## WebSocket Configuration
+
+The system uses WebSocket connections for real-time data streaming (market ticks, trade fills, position updates). The UI automatically constructs WebSocket URLs based on the deployment environment.
+
+### Environment Variables
+
+Configure WebSocket endpoints via these environment variables in `ui/.env`:
+
+```bash
+# Option 1: Explicit WebSocket URL (highest priority)
+VITE_WS_URL=ws://localhost:8081
+
+# Option 2: API URL (automatically converted to ws/wss)
+VITE_API_URL=http://localhost:8081
+
+# If neither is set, defaults to current window.location with port 8081 in dev mode
+```
+
+### WebSocket Endpoints
+
+The Ops API exposes two WebSocket endpoints:
+
+- **`/ws/live`** - Live trading updates (fills, positions, blocks, risk budget, agent events)
+- **`/ws/market`** - Market data updates (ticks, price changes, symbol updates)
+
+### Connection Behavior
+
+- **Automatic Reconnection**: WebSocket hook retries connection with exponential backoff (default 3s delay)
+- **Heartbeat/Keep-Alive**: Ping/pong messages every 30 seconds to maintain connection
+- **Graceful Fallback**: UI components fall back to HTTP polling if WebSocket unavailable
+- **Environment-Aware**: Automatically uses `wss://` for HTTPS deployments and `ws://` for HTTP
+
+### Testing WebSocket Connection
+
+Check WebSocket connection stats:
+```bash
+curl http://localhost:8081/ws/stats
+# Response: {"live_connections": 1, "market_connections": 1}
+```
+
+Test WebSocket connection manually (requires `wscat`):
+```bash
+npm install -g wscat
+wscat -c ws://localhost:8081/ws/market
+
+# Send ping
+> ping
+
+# Receive pong
+< {"type": "pong"}
+```
+
+### Production Deployment
+
+For production deployments behind load balancers or proxies:
+
+1. Configure explicit WebSocket URL:
+   ```bash
+   VITE_WS_URL=wss://your-domain.com
+   ```
+
+2. Ensure your proxy/load balancer supports WebSocket upgrade:
+   ```nginx
+   # Nginx example
+   location /ws/ {
+       proxy_pass http://ops-api:8081;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_set_header Host $host;
+   }
+   ```
+
+3. For custom API hosts (e.g., internal DNS):
+   ```bash
+   VITE_API_URL=https://api.internal.company.com:8081
+   # Automatically becomes wss://api.internal.company.com:8081
+   ```
+
+## Getting Started (Compose-first)
 
 ### Prerequisites
 
@@ -176,15 +309,39 @@ Each block corresponds to one or more MCP tools (Temporal workflows) described b
 | ------------ | ------------- | --------------------------------------------- |
 | Python       | 3.11 or newer | Data & strategy agents                        |
 | Temporal CLI | 1.24+         | `brew install temporal` or use Temporal Cloud |
-| tmux         | latest        | Required for `run_stack.sh` start script      |
+| Docker + Compose | latest    | Required for `docker compose up` bootstrap    |
 
 Required environment variables:
 
 - `OPENAI_API_KEY` – enables the broker and execution agents to use OpenAI models.
-- `COINBASEEXCHANGE_API_KEY` and `COINBASEEXCHANGE_SECRET` – API credentials for Coinbase Exchange.
+- `COINBASE_API_KEY` / `COINBASE_API_SECRET` – Coinbase App (CDP) API key pair; secrets can be pasted directly from the downloaded JSON (newlines are supported).
+- `COINBASE_WALLET_SECRET` – optional, only required for wallet-authenticated POST/DELETE calls. Leave empty for read-only trading.
+- `COINBASEEXCHANGE_API_KEY` and `COINBASEEXCHANGE_SECRET` – legacy Advanced Trade credentials (fallback if you still need HMAC auth).
 - `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` and `TASK_QUEUE` – Temporal connection settings (defaults are shown in `.env`).
 - `MCP_PORT` – port for the MCP server (defaults to `8080`).
 - `HISTORICAL_MINUTES` – minutes of historical data to load on startup (defaults to `60` for 1 hour).
+
+### Preparing Coinbase Wallets for Live Trading
+
+1. **Fund Coinbase wallets** – Deposit ETH and BTC into the Coinbase account tied to your API key. Only these balances will be used; live mode also requires `TRADING_MODE=live` **and** `LIVE_TRADING_ACK=true`.
+2. **Seed the ledger** – Pull wallets/balances into the internal database so Temporal workflows see real holdings:
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main ledger seed-from-coinbase
+   ```
+3. **Inspect wallet IDs and cached balances** – Use the wallet inspector to note the `wallet_id` for ETH and BTC:
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main wallet list
+   ```
+4. **Mark 20% as tradable** – For each funded wallet, set the tradeable fraction to `0.20` (repeat per wallet):
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main wallet set-tradeable-fraction <wallet_id> 0.20
+   ```
+   These fractions gate how much the execution agent may reserve or spend per wallet.
+5. **Reconcile before trading** – Confirm ledger entries match Coinbase using the reconciliation tool:
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python -m app.cli.main reconcile run
+   ```
+6. **Dry-run trading flows** – Keep `RUN_MODE=dev` (or disable actual order placement in prompts) while observing the broker/execution agents. Only remove the guard once you’re satisfied with monitoring, risk limits, and logging.
 
 ### Quick Setup (local dev)
 
@@ -198,25 +355,94 @@ python -m venv .venv && source .venv/bin/activate
 pip install uv
 uv sync
 
-# Launch the full stack
-./run_stack.sh
+### Coinbase Ledger & Trading
+
+The production ledger stack lives under `app/` and exposes a CLI for seeding wallets, reserving balances, and placing live trades via Coinbase Advanced Trade.
+
+1. Copy environment defaults and update with your credentials:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Install dependencies and start the Postgres service with migrations:
+
+   ```bash
+   make init
+   make db-up
+   ```
+
+3. Seed wallets directly from Coinbase (creates internal ledger balances and reservations backing):
+
+   ```bash
+   uv run python -m app.cli.main ledger seed-from-coinbase
+   ```
+
+4. Configure what fraction of each wallet is available to the trading bots:
+
+   ```bash
+   uv run python -m app.cli.main wallet set-tradeable-fraction --wallet 1 --frac 0.5
+   ```
+
+5. Place a cost-gated trade **(LIVE Coinbase call — not a mock)**:
+
+   ```bash
+   uv run python -m app.cli.main trade place \
+     --wallet 1 \
+     --product BTC-USD \
+     --side buy \
+     --qty 0.01 \
+     --notional 300 \
+     --expected-edge 15 \
+     --idempotency-key demo-trade-001
+   ```
+   ⚠️ This hits Coinbase Advanced Trade with your API keys. There is no paper/dry-run flag in this CLI; only the cost gate and your wallet fraction guard execution. Use sandbox/test credentials or skip this step if you do not intend to place a real order.
+
+6. Reconcile the internal ledger with Coinbase balances (writes a drift report to stdout):
+
+   ```bash
+   uv run python -m app.cli.main reconcile run --threshold 0.0001
+   ```
+
+### Web Dashboard (Human Supervisor)
+
+Replace the tmux-based workflow with a lightweight web UI that supervises all agents, shows ledger snapshots, and keeps a human in the loop.
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python -m app.dashboard
 ```
 
-Point your agent workers at `localhost:8080` (default MCP port) and confirm health at <http://localhost:8080/healthz>.
+Open <http://localhost:8081/> to:
+
+- Start/stop Temporal, the worker, MCP server, and broker/execution/judge agents from a single panel.
+- Inspect Coinbase-linked wallets, tradable fractions, and balances per strategy/portfolio.
+- Review the short-term backlog (see `docs/ROADMAP.md`) and plan future automation without leaving the UI.
+
+# Launch the full stack (Compose)
+```bash
+# baseline (agent stack + MCP + Ops API + UI)
+docker compose up
+
+# legacy services only when you explicitly need them
+docker compose --profile legacy_live up
+```
+
+What runs:
+- MCP server at `http://localhost:8080` (tools/endpoints).
+- Ops API + UI at `http://localhost:8081/` (UI served by the Ops API).
+- Temporal dev server at `localhost:7233`.
+
+Notes:
+- Set `OPENAI_API_KEY` (and other secrets) in your shell or `.env` before composing.
+- Only use the `legacy_live` profile when you intentionally need legacy services; default stack is agent-only.
 
 ## Demo
 
-The quickest way to see the stack in action is to run the included `run_stack.sh` script which launches everything in a single `tmux` session.
-
-```bash
-./run_stack.sh
-```
-
-This starts the Temporal dev server, Python worker, MCP server and several sample agents. Each component runs in its own `tmux` pane so you can watch log output as orders flow through the system. Detach from the session with `Ctrl-b d` and reattach anytime by running the script again. Shutdown is as simple as ctrl+c in any tmux pane and then entering `tmux kill-server`
+The quickest way to see the stack in action is to run `docker compose up`, which launches the Temporal dev server, Python worker, MCP server, Ops API, and (once wired) UI. Logs stream via container output; use `docker compose logs -f` to inspect services. To stop, press `Ctrl+C` in the compose terminal.
 
 ### Walking through the demo
 
-1. Run the shell script `./run_stack.sh`
+1. Run `docker compose up`
 2. When prompted for trading pairs, tell the broker agent **"BTC/USD, ETH/USD, DOGE/USD"** (recommended 2-4 pairs for optimal performance).
 3. `start_market_stream` automatically loads 1 hour of historical data, then spawns a `subscribe_cex_stream` workflow that broadcasts each ticker to its `ComputeFeatureVector` child.
 4. The execution agent wakes up periodically via a scheduled workflow and analyzes market data to decide whether to trade using `place_mock_order`.
@@ -272,9 +498,10 @@ and `VECTOR_HISTORY_LIMIT` environment variables.
 │   ├── execution.py              # Order execution
 │   └── ...
 ├── mcp_server/               # FastAPI server exposing the tools
-├── worker/                   # Temporal worker loading workflows
+├── ops_api/                  # Ops API (UI backend) for status/controls
+├── worker/                   # Temporal worker (agent/legacy split)
 ├── tests/                    # Unit tests for tools and agents
-├── run_stack.sh             # tmux helper to launch local stack
+├── docker-compose.yml        # Canonical bootstrap
 └── ticker_ui_service.py     # Simple websocket ticker UI
 ```
 
@@ -288,6 +515,7 @@ and `VECTOR_HISTORY_LIMIT` environment variables.
 - **`performance_analysis.py`**: Comprehensive trading performance analysis tools
 - **`market_data.py`**: Historical data loading and streaming with configurable windows
 - **`agent_logger.py`**: Distributed logging system routing to individual agent workflows
+- **`ops_api/`**: Ops API (UI backend) exposing status, block reasons, events, and telemetry
 
 ## 🧠 LLM as Judge System
 

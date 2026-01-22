@@ -5,6 +5,8 @@ from .execution_ledger_workflow import ExecutionLedgerWorkflow
 from .broker_agent_workflow import BrokerAgentWorkflow
 from .execution_agent_workflow import ExecutionAgentWorkflow
 from .judge_agent_workflow import JudgeAgentWorkflow
+from .strategy_spec_workflow import StrategySpecWorkflow
+from .backtest_workflow import LLMBacktestWorkflow
 
 __all__ = [
     "EnsembleWorkflow",
@@ -12,4 +14,6 @@ __all__ = [
     "BrokerAgentWorkflow",
     "ExecutionAgentWorkflow",
     "JudgeAgentWorkflow",
+    "StrategySpecWorkflow",
+    "LLMBacktestWorkflow",
 ]

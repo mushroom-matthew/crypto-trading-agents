@@ -1,0 +1,124 @@
+services:
+  temporal:
+    image: temporalio/auto-setup:1.24
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=botuser
+      - POSTGRES_PWD=botpass
+      - POSTGRES_SEEDS=db
+      - POSTGRES_DB=temporal
+      - POSTGRES_VISIBILITY_DB=temporal_visibility
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "7233:7233"
+    healthcheck:
+      # force IPv4 so we don't resolve localhost to ::1
+      test: ["CMD-SHELL", "tctl --address temporal:7233 namespace list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: crypto-trading-agents-ui
+    environment:
+      # Point UI at the Temporal frontend gRPC endpoint inside the compose network
+      - TEMPORAL_ADDRESS=temporal:7233
+      # Optional: name it if you run multiple clusters
+      - TEMPORAL_AUTH_ENABLED=false
+      # If you ever add a payload codec service, expose it here:
+      # - TEMPORAL_CODEC_ENDPOINT=http://codec:8080
+    ports:
+      - "8088:8080"     # host:container
+    depends_on:
+      - temporal
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=botuser
+      - POSTGRES_PASSWORD=botpass
+      - POSTGRES_DB=botdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      temporal:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    env_file: .env
+    command: sh -lc "uv run python -m mcp_server.app"
+    ports:
+      - "${MCP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+
+  ops-api: # Ops API for backtesting and monitoring
+    build: .
+    depends_on:
+      temporal:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - DB_DSN=postgresql+psycopg://botuser:botpass@db:5432/botdb
+    command: sh -lc "uv run uvicorn ops_api.app:app --host 0.0.0.0 --port 8081"
+    ports:
+      - "8081:8081"
+    volumes:
+      - backtest_cache:/app/.cache/backtests
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  worker: # Temporal worker that loads workflows
+    build: .
+    depends_on:
+      temporal:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      app:
+        condition: service_started
+    env_file: .env
+    # Add explicit wait for Temporal gRPC to be reachable before starting worker
+    command: sh -lc "sleep 5 && uv run python -m worker.main"
+    restart: unless-stopped
+    # Workaround for Temporal Rust SDK DNS resolution issues
+    dns:
+      - 127.0.0.11  # Docker's embedded DNS server
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - backtest_cache:/app/.cache/backtests
+      - ./data:/app/data
+
+volumes:
+  pgdata:
+  backtest_cache:

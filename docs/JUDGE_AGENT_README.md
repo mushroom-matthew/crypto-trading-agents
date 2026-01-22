@@ -162,9 +162,16 @@ The system automatically updates prompts based on:
 
 ```
 agents/
-├── judge_agent_client.py          # Main judge agent implementation
+├── judge_agent_client.py          # Live judge agent implementation
 ├── workflows.py                   # JudgeAgentWorkflow + enhancements
 └── context_manager.py             # Context management (existing)
+
+services/
+└── judge_feedback_service.py      # Shared judge feedback service (backtest/live)
+
+backtesting/
+├── llm_strategist_runner.py       # Uses JudgeFeedbackService for backtest judge
+└── llm_shim.py                    # Judge shim transport for deterministic backtests
 
 tools/
 └── performance_analysis.py        # Performance calculation and analysis
@@ -174,6 +181,60 @@ mcp_server/
 
 tests/
 └── test_judge_agent.py           # Comprehensive test suite
+```
+
+## Live vs Backtest Judge Architecture
+
+The system has two judge modes that share the same core LLM prompt but differ in context and output:
+
+### Live Judge (`agents/judge_agent_client.py`)
+
+Used for paper trading and live trading evaluation:
+
+1. **Full Evaluation Report** with 4 weighted dimensions:
+   - Returns (30%) - from `PerformanceAnalyzer`
+   - Risk Management (25%) - from `PerformanceAnalyzer`
+   - Decision Quality (25%) - from LLM `analyze_decision_quality()`
+   - Consistency (20%) - from `PerformanceAnalyzer`
+
+2. **Rich Context** from Temporal workflows:
+   - Strategy specs from `StrategySpecWorkflow`
+   - User preferences from `JudgeAgentWorkflow`
+   - Execution state from `ExecutionAgentWorkflow`
+
+3. **Prompt Updates** - can update execution agent system prompt
+
+### Backtest Judge (`services/judge_feedback_service.py`)
+
+Used for strategy backtesting:
+
+1. **JudgeFeedback Only** - returns the LLM feedback directly:
+   - Single score (0-100)
+   - Machine constraints (trigger limits, disabled triggers)
+   - Strategist constraints (must_fix, vetoes, boost)
+
+2. **Heuristics as Context** - computes deterministic pre-analysis:
+   - Score adjustments with reasons
+   - Observations and red flags
+   - Suggested constraints
+
+3. **Shim Mode** - when `use_judge_shim=True`:
+   - Returns deterministic feedback from heuristics
+   - No LLM call (fast backtests)
+
+4. **LLM Mode** - when `use_judge_shim=False`:
+   - Calls LLM with heuristics section appended to prompt
+   - Matches live judge LLM reasoning
+
+### Configuration
+
+```python
+# Backtest config
+{
+    "use_judge_shim": False,        # True = deterministic, False = LLM
+    "judge_cadence_hours": 4.0,     # Hours between evaluations
+    "judge_replan_threshold": 40.0, # Score triggering replan
+}
 ```
 
 ## Example Evaluation Output

@@ -1,0 +1,37 @@
+# VCS and local environments
+.git/
+.vscode/
+.env
+.venv/
+.python-version
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.uv-cache/
+.uv_cache/
+
+# Local data and logs
+logs/
+data/
+*.log
+tmp*/
+.debug/
+.runs/
+strategy_export*json
+*summaries.json
+
+# UI artifacts
+node_modules/
+ui/dist/
+
+# Screenshots
+Capture*.JPG
+Capture*.jpg

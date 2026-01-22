@@ -1,0 +1,39 @@
+{
+  "start": "2023-10-15",
+  "end": "2024-01-31",
+  "initial_cash": 1400,
+  "fee_rate": 0.001,
+  "cases": [
+    {"name": "BTC_default", "pair": "BTC-USD", "atr_mult": 1.5, "volume_floor": 1.0},
+    {"name": "BTC_tight_vol", "pair": "BTC-USD", "atr_mult": 0.8, "volume_floor": 1.0},
+    {"name": "BTC_loose_vol", "pair": "BTC-USD", "atr_mult": 2.0, "volume_floor": 1.0},
+    {"name": "BTC_high_vol_floor", "pair": "BTC-USD", "atr_mult": 1.5, "volume_floor": 1.5},
+    {"name": "ETH_default", "pair": "ETH-USD", "atr_mult": 1.5, "volume_floor": 1.0},
+    {"name": "ETH_tight", "pair": "ETH-USD", "atr_mult": 0.8, "volume_floor": 1.5},
+    {"name": "ETH_loose", "pair": "ETH-USD", "atr_mult": 2.0, "volume_floor": 1.0},
+    {
+      "name": "Portfolio_70_30_go_to_cash",
+      "pairs": ["BTC-USD", "ETH-USD"],
+      "weights": [0.7, 0.3],
+      "go_to_cash": true,
+      "atr_mult": 1.5,
+      "volume_floor": 1.0
+    },
+    {
+      "name": "Portfolio_50_50_defensive",
+      "pairs": ["BTC-USD", "ETH-USD"],
+      "weights": [0.5, 0.5],
+      "atr_mult": 1.0,
+      "volume_floor": 1.2,
+      "go_to_cash": true
+    },
+    {
+      "name": "Portfolio_30_70_aggressive",
+      "pairs": ["BTC-USD", "ETH-USD"],
+      "weights": [0.3, 0.7],
+      "atr_mult": 2.0,
+      "volume_floor": 1.0,
+      "go_to_cash": false
+    }
+  ]
+}
