@@ -48,11 +48,11 @@ PRESETS["scalper-mode"]="docs/branching/later/scalper-mode.md|scalper-mode|P2"
 PRESETS["ui-unification"]="docs/branching/later/ui-unification.md|ui-unification|P3"
 
 list_presets() {
-  printf "Available presets:\n"
+  printf -- "Available presets:\n"
   for name in "${PRESET_ORDER[@]}"; do
     entry="${PRESETS[$name]}"
     IFS='|' read -r path branch priority <<<"$entry"
-    printf "- %s -> %s (%s, %s)\n" "$name" "$path" "$branch" "$priority"
+    printf -- "- %s -> %s (%s, %s)\n" "$name" "$path" "$branch" "$priority"
   done
 }
 
