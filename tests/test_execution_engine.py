@@ -169,8 +169,8 @@ def test_emergency_exit_bypasses_daily_cap(tmp_path, monkeypatch):
         symbol="BTC-USD",
         direction="flat",
         timeframe="1h",
-        entry_rule="timeframe=='1h'",
-        exit_rule="",
+        entry_rule="false",
+        exit_rule="timeframe=='1h'",
         category="emergency_exit",
     )
     plan.triggers.append(emergency)

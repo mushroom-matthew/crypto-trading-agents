@@ -36,6 +36,7 @@ export function PaperTradingControl() {
   const [planningSettings, setPlanningSettings] = useState<PlanningSettings>({
     max_trades_per_day: 10,
     max_triggers_per_symbol_per_day: 5,
+    judge_check_after_trades: 3,
   });
 
   // Selected session

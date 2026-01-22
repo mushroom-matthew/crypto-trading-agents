@@ -5,6 +5,7 @@ export interface PlanningSettings {
   max_trades_per_day?: number;
   max_triggers_per_symbol_per_day?: number;
   judge_cadence_hours?: number;
+  judge_check_after_trades?: number;
 }
 
 interface PlanningSettingsPanelProps<T extends PlanningSettings> {
@@ -106,6 +107,29 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                 />
                 <p className="text-xs text-slate-400 mt-1">
                   How often judge evaluates strategy quality
+                </p>
+              </div>
+            )}
+
+            {showJudgeCadence && (
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Judge Check After Trades
+                </label>
+                <input
+                  type="number"
+                  value={config.judge_check_after_trades ?? 3}
+                  onChange={(e) =>
+                    onChange({ ...config, judge_check_after_trades: parseInt(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                  min={1}
+                  max={100}
+                  step={1}
+                  disabled={disabled}
+                />
+                <p className="text-xs text-slate-400 mt-1">
+                  Triggers a judge run after N trades, even if cadence has not elapsed
                 </p>
               </div>
             )}

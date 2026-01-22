@@ -79,8 +79,8 @@ def test_emergency_exit_trigger_bypasses_risk_checks():
         symbol="BTC-USD",
         direction="flat",
         timeframe="1h",
-        entry_rule="True",
-        exit_rule="",
+        entry_rule="false",
+        exit_rule="timeframe=='1h'",
         category="emergency_exit",
     )
     plan = _plan(trigger)

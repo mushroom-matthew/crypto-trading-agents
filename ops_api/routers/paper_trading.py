@@ -91,6 +91,10 @@ class PaperTradingSessionConfig(BaseModel):
         default=None, ge=1, le=50,
         description="Maximum triggers per symbol per day (default: 5)"
     )
+    judge_check_after_trades: Optional[int] = Field(
+        default=None, ge=1, le=100,
+        description="Trigger judge after N trades, regardless of cadence (default: 3)"
+    )
 
     # ============================================================================
     # Whipsaw / Anti-Flip-Flop Controls

@@ -5,6 +5,8 @@ from .indicator_snapshots import (
     build_asset_state,
     compute_indicator_matrix,
     compute_indicator_snapshot,
+    precompute_indicator_frame,
+    snapshot_from_frame,
 )
 from .factors import (
     FactorExposure,
@@ -30,6 +32,8 @@ __all__ = [
     "build_asset_state",
     "compute_indicator_matrix",
     "compute_indicator_snapshot",
+    "precompute_indicator_frame",
+    "snapshot_from_frame",
     "FactorExposure",
     "compute_factor_loadings",
     "example_crypto_factors",

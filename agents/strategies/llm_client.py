@@ -369,6 +369,15 @@ class LLMClient:
                 continue
             if isinstance(direction, str) and direction.lower() == "flat_exit":
                 trig["direction"] = "exit"
+            if trig.get("category") == "emergency_exit":
+                exit_rule = (trig.get("exit_rule") or "").strip()
+                entry_rule = (trig.get("entry_rule") or "").strip()
+                if not exit_rule and entry_rule:
+                    trig["exit_rule"] = entry_rule
+                    trig["entry_rule"] = "false"
+                elif not exit_rule:
+                    trig["exit_rule"] = "false"
+                    trig["entry_rule"] = "false"
             cleaned.append(trig)
         data["triggers"] = cleaned
         return data

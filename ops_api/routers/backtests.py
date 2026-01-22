@@ -26,8 +26,13 @@ from backtesting.llm_strategist_runner import LLMStrategistBacktester
 from agents.strategies.llm_client import LLMClient
 from metrics.technical import sma, ema, rsi, macd, atr, bollinger_bands
 from data_loader.utils import ensure_utc, timeframe_to_seconds
+from app.db.repo import Database
+from app.db.models import BacktestRun, BacktestStatus
+from sqlalchemy import select, desc
 
 logger = logging.getLogger(__name__)
+
+_db = Database()
 
 # Task queue configuration - must match worker's TASK_QUEUE
 BACKTEST_TASK_QUEUE = os.environ.get("TASK_QUEUE", "mcp-tools")
@@ -73,6 +78,72 @@ def load_backtest_from_disk(run_id: str) -> Dict[str, Any] | None:
         except Exception as e:
             logger.error(f"Failed to load backtest {run_id} from disk: {e}")
     return None
+
+
+async def load_backtest_from_db(run_id: str) -> Dict[str, Any] | None:
+    try:
+        async with _db.session() as session:
+            result = await session.execute(select(BacktestRun).where(BacktestRun.run_id == run_id))
+            record = result.scalar_one_or_none()
+            if not record:
+                return None
+            payload: Dict[str, Any] = {}
+            if record.results:
+                try:
+                    payload = json.loads(record.results)
+                except json.JSONDecodeError:
+                    payload = {}
+            payload.setdefault("run_id", record.run_id)
+            payload.setdefault("status", record.status.value if isinstance(record.status, BacktestStatus) else str(record.status))
+            payload.setdefault("config", json.loads(record.config) if record.config else {})
+            payload.setdefault("started_at", record.started_at.isoformat() if record.started_at else None)
+            payload.setdefault("completed_at", record.completed_at.isoformat() if record.completed_at else None)
+            payload.setdefault("candles_total", record.candles_total)
+            payload.setdefault("candles_processed", record.candles_processed)
+            return payload
+    except Exception as exc:
+        logger.warning("DB backtest lookup failed for %s: %s", run_id, exc)
+        return None
+
+
+def _merge_disk_payload(db_payload: Dict[str, Any], disk_payload: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(disk_payload)
+    for key in ("run_id", "status", "started_at", "completed_at", "candles_total", "candles_processed", "config", "strategy"):
+        if db_payload.get(key) is not None:
+            merged[key] = db_payload[key]
+    return merged
+
+
+def _needs_disk_payload(payload: Dict[str, Any]) -> bool:
+    if payload.get("equity_curve") or payload.get("trades"):
+        return False
+    llm_data = payload.get("llm_data") or {}
+    if isinstance(llm_data, dict) and llm_data.get("artifact_path"):
+        return True
+    return False
+
+
+async def list_backtests_from_db(status: str | None, limit: int) -> List[BacktestRun]:
+    async with _db.session() as session:
+        query = select(BacktestRun).order_by(desc(BacktestRun.completed_at), desc(BacktestRun.started_at))
+        if status:
+            try:
+                query = query.where(BacktestRun.status == BacktestStatus(status))
+            except ValueError:
+                return []
+        result = await session.execute(query.limit(limit))
+        return list(result.scalars().all())
+
+
+async def get_backtest_cached_async(run_id: str) -> Dict[str, Any] | None:
+    cached = await load_backtest_from_db(run_id)
+    if cached:
+        if _needs_disk_payload(cached):
+            disk = load_backtest_from_disk(run_id)
+            if disk:
+                return _merge_disk_payload(cached, disk)
+        return cached
+    return get_backtest_cached(run_id)
 
 
 def list_cached_backtests() -> List[str]:
@@ -182,6 +253,10 @@ class BacktestConfig(BaseModel):
     judge_cadence_hours: Optional[float] = Field(
         default=4.0, ge=0.5, le=24.0,
         description="Minimum hours between judge evaluations (default: 4.0)"
+    )
+    judge_check_after_trades: Optional[int] = Field(
+        default=3, ge=1, le=100,
+        description="Trigger judge after N trades, regardless of cadence (default: 3)"
     )
     llm_calls_per_day: Optional[int] = Field(
         default=1, ge=1, le=24,
@@ -489,6 +564,22 @@ async def start_backtest(config: BacktestConfig):
         if config.max_daily_risk_budget_pct is not None:
             risk_params["max_daily_risk_budget_pct"] = config.max_daily_risk_budget_pct
 
+        try:
+            async with _db.session() as session:
+                record = BacktestRun(
+                    run_id=run_id,
+                    config=json.dumps(config.model_dump()),
+                    status=BacktestStatus.running,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=None,
+                    candles_total=available_candles,
+                    candles_processed=0,
+                    results=None,
+                )
+                session.add(record)
+        except Exception as exc:
+            logger.warning("Failed to persist backtest run metadata for %s: %s", run_id, exc)
+
         # Start Temporal workflow (non-blocking)
         client = await get_temporal_client()
         await client.start_workflow(
@@ -512,6 +603,7 @@ async def start_backtest(config: BacktestConfig):
                 "max_triggers_per_symbol_per_day": config.max_triggers_per_symbol_per_day,
                 "llm_calls_per_day": config.llm_calls_per_day or 1,
                 "judge_cadence_hours": config.judge_cadence_hours,
+                "judge_check_after_trades": config.judge_check_after_trades,
                 # Whipsaw controls
                 "min_hold_hours": config.min_hold_hours,
                 "min_flat_hours": config.min_flat_hours,
@@ -588,7 +680,9 @@ async def get_backtest_status(run_id: str):
         except RPCError as e:
             # Workflow not found, try disk cache fallback
             logger.warning(f"Workflow {run_id} not found in Temporal, checking disk cache")
-            cached = load_backtest_from_disk(run_id)
+            cached = await load_backtest_from_db(run_id)
+            if not cached:
+                cached = load_backtest_from_disk(run_id)
 
             if cached:
                 # Return cached status
@@ -654,26 +748,28 @@ async def get_backtest_results(run_id: str):
         except RPCError as e:
             # Workflow not found, try disk cache fallback
             logger.warning(f"Workflow {run_id} not found in Temporal, checking disk cache")
-            cached = load_backtest_from_disk(run_id)
+            cached = await load_backtest_from_db(run_id)
+            if not cached:
+                cached = load_backtest_from_disk(run_id)
 
             if cached:
-                # Return results from disk cache
-                result: PortfolioBacktestResult = cached.get("result")
-                if result:
-                    summary = result.summary
-                    return BacktestResults(
-                        run_id=run_id,
-                        status="completed",
-                        final_equity=clean_nan(summary.get("final_equity")),
-                        equity_return_pct=clean_nan(summary.get("return_pct")),
-                        sharpe_ratio=clean_nan(summary.get("sharpe_ratio")),
-                        max_drawdown_pct=clean_nan(summary.get("max_drawdown_pct")),
-                        win_rate=clean_nan(summary.get("win_rate")),
-                        total_trades=summary.get("total_trades"),
-                        avg_win=clean_nan(summary.get("avg_win")),
-                        avg_loss=clean_nan(summary.get("avg_loss")),
-                        profit_factor=clean_nan(summary.get("profit_factor")),
-                    )
+                summary = cached.get("results_summary") or cached.get("summary") or {}
+                if not summary and cached.get("result") is not None and hasattr(cached["result"], "summary"):
+                    summary = cached["result"].summary  # type: ignore[assignment]
+                run_status = cached.get("status", "completed")
+                return BacktestResults(
+                    run_id=run_id,
+                    status=run_status,
+                    final_equity=clean_nan(summary.get("final_equity")),
+                    equity_return_pct=clean_nan(summary.get("return_pct") or summary.get("equity_return_pct")),
+                    sharpe_ratio=clean_nan(summary.get("sharpe_ratio")),
+                    max_drawdown_pct=clean_nan(summary.get("max_drawdown_pct")),
+                    win_rate=clean_nan(summary.get("win_rate")),
+                    total_trades=summary.get("total_trades"),
+                    avg_win=clean_nan(summary.get("avg_win")),
+                    avg_loss=clean_nan(summary.get("avg_loss")),
+                    profit_factor=clean_nan(summary.get("profit_factor")),
+                )
 
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
@@ -692,7 +788,7 @@ async def get_equity_curve(run_id: str):
     Returns time-series data of equity values suitable for line charts.
     """
     try:
-        cached = get_backtest_cached(run_id)
+        cached = await get_backtest_cached_async(run_id)
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -752,7 +848,7 @@ async def get_backtest_trades(
     Returns individual trade records with pagination support.
     """
     try:
-        cached = get_backtest_cached(run_id)
+        cached = await get_backtest_cached_async(run_id)
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -843,7 +939,7 @@ async def get_playback_candles(
     Indicators are computed server-side and cached.
     """
     try:
-        cached = get_backtest_cached(run_id)
+        cached = await get_backtest_cached_async(run_id)
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -952,7 +1048,7 @@ async def get_playback_events(
     Returns all events in chronological order for stepping through backtest history.
     """
     try:
-        cached = get_backtest_cached(run_id)
+        cached = await get_backtest_cached_async(run_id)
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -1046,7 +1142,7 @@ async def get_portfolio_state_snapshot(run_id: str, timestamp: str):
     Shows cash, positions, equity, P&L, and return percentage.
     """
     try:
-        cached = get_backtest_cached(run_id)
+        cached = await get_backtest_cached_async(run_id)
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -1175,7 +1271,7 @@ async def get_backtest_progress(run_id: str):
             handle = client.get_workflow_handle(run_id)
             status_data = await handle.query("get_status")
         except RPCError:
-            cached = get_backtest_cached(run_id)
+            cached = await get_backtest_cached_async(run_id)
             if not cached:
                 raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
             cached_strategy = cached.get("strategy") or (cached.get("config") or {}).get("strategy", "baseline")
@@ -1324,7 +1420,7 @@ async def get_llm_insights(run_id: str):
     used the LLM strategist. Returns 404 if backtest not found or didn't use LLM.
     """
     try:
-        cached = get_backtest_cached(run_id)
+        cached = await get_backtest_cached_async(run_id)
 
         if not cached:
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
@@ -1369,6 +1465,73 @@ async def list_backtests(
     Sorted by completed_at or started_at (newest first).
     """
     try:
+        records = await list_backtests_from_db(status, limit)
+        if records:
+            backtest_list = []
+            for record in records:
+                cached: Dict[str, Any] = {}
+                if record.results:
+                    try:
+                        cached = json.loads(record.results)
+                    except json.JSONDecodeError:
+                        cached = {}
+
+                cached_status = cached.get("status") or record.status.value
+                config = cached.get("config") or (json.loads(record.config) if record.config else {})
+                symbols = config.get("symbols") or []
+                strategy = config.get("strategy")
+                strategy_id = config.get("strategy_id")
+                timeframe = config.get("timeframe")
+                start_date = config.get("start_date") or config.get("requested_start_date")
+                end_date = config.get("end_date") or config.get("requested_end_date")
+                initial_cash = config.get("initial_cash")
+
+                return_pct = None
+                final_equity = None
+                total_trades = None
+                sharpe_ratio = None
+                max_drawdown_pct = None
+                win_rate = None
+
+                if cached_status == "completed":
+                    summary = cached.get("results_summary") or cached.get("summary") or {}
+                    return_pct = summary.get("equity_return_pct") or summary.get("return_pct")
+                    final_equity = summary.get("final_equity")
+                    run_summary = summary.get("run_summary") or {}
+                    metrics = run_summary.get("metrics") or summary.get("metrics") or {}
+                    sharpe_ratio = metrics.get("sharpe_ratio")
+                    max_drawdown_pct = metrics.get("max_drawdown_pct")
+                    win_rate = metrics.get("win_rate")
+                    fills = cached.get("fills") or cached.get("trades") or []
+                    if isinstance(fills, list):
+                        total_trades = len(fills)
+
+                backtest_list.append(
+                    BacktestListItem(
+                        run_id=record.run_id,
+                        status=cached_status,
+                        progress=100.0 if cached_status == "completed" else 0.0,
+                        started_at=record.started_at,
+                        completed_at=record.completed_at,
+                        symbols=symbols,
+                        strategy=strategy,
+                        strategy_id=strategy_id,
+                        timeframe=timeframe,
+                        start_date=start_date,
+                        end_date=end_date,
+                        initial_cash=initial_cash,
+                        return_pct=clean_nan(return_pct),
+                        final_equity=clean_nan(final_equity),
+                        total_trades=total_trades,
+                        sharpe_ratio=clean_nan(sharpe_ratio),
+                        max_drawdown_pct=clean_nan(max_drawdown_pct),
+                        win_rate=clean_nan(win_rate),
+                        error=cached.get("error"),
+                    )
+                )
+
+            return backtest_list[:limit]
+
         # Merge in-memory cache with disk cache
         all_run_ids = set()
 

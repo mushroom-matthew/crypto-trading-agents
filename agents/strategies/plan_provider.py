@@ -154,7 +154,11 @@ class StrategyPlanProvider:
     def _load_cached(self, path: Path) -> StrategyPlan | None:
         if not path.exists():
             return None
-        return StrategyPlan.model_validate_json(path.read_text())
+        try:
+            return StrategyPlan.model_validate_json(path.read_text())
+        except Exception as exc:
+            logger.warning("Cached plan failed validation (%s); ignoring cache %s", exc, path)
+            return None
 
     def get_plan(
         self,

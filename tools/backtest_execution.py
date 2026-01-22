@@ -252,11 +252,15 @@ class BacktestWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
 
+        self.summary = result.get("summary", {})
+        artifact_path = result.get("artifact_path")
+        if artifact_path:
+            self.llm_data = {"artifact_path": artifact_path, "stored": True}
+        else:
+            self.llm_data = result.get("llm_data")
         self.equity_curve = result.get("equity_curve", [])
         self.trades = result.get("trades", [])
-        self.summary = result.get("summary", {})
-        self.llm_data = result.get("llm_data")
-        self.candles_processed = result.get("candles_processed", len(self.equity_curve))
+        self.candles_processed = result.get("candles_processed", 0)
         self.candles_total = result.get("candles_total", self.candles_processed)
         self.progress = 95.0
 

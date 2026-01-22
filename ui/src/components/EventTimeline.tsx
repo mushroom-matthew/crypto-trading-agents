@@ -266,6 +266,7 @@ function renderEventSummary(event: AgentEvent): React.ReactNode {
       return (
         <span>
           Score: {payload.overall_score ?? payload.score ?? 'N/A'}/100
+          {payload.trigger_reason && <> · Trigger: {payload.trigger_reason}</>}
           {payload.recommendations && payload.recommendations.length > 0 && (
             <> - {payload.recommendations[0]}</>
           )}

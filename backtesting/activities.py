@@ -475,19 +475,39 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         "plan_log": result.plan_log,
         "llm_costs": result.llm_costs,
         "daily_reports": result.daily_reports,
+        "bar_decisions": result.bar_decisions,
         "final_cash": result.final_cash,
         "final_positions": result.final_positions,
     }
 
-    candles_processed = len(equity_curve)
-    return {
+    run_id = config.get("run_id", "llm-backtest")
+    full_payload = {
+        "run_id": run_id,
+        "status": "completed",
+        "config": config,
+        "strategy": config.get("strategy"),
         "equity_curve": equity_curve,
         "trades": trades,
-        "candles_processed": candles_processed,
-        "candles_total": total_candles,  # Use actual total, not processed count
-        "has_more": False,
+        "candles_processed": backtester.candles_processed,
+        "candles_total": total_candles,
         "summary": summary,
         "llm_data": llm_data,
+    }
+    try:
+        from ops_api.routers.backtests import save_backtest_to_disk, BACKTEST_CACHE_DIR
+
+        save_backtest_to_disk(run_id, full_payload)
+        artifact_path = str(BACKTEST_CACHE_DIR / f"{run_id}.pkl")
+    except Exception as exc:
+        logger.warning("Failed to persist LLM backtest artifacts for %s: %s", run_id, exc)
+        artifact_path = ""
+
+    return {
+        "summary": summary,
+        "candles_processed": backtester.candles_processed,
+        "candles_total": total_candles,
+        "has_more": False,
+        "artifact_path": artifact_path,
     }
 
 
@@ -505,14 +525,25 @@ async def persist_results_activity(
     Timeout: 10 seconds (disk I/O)
     """
     from ops_api.routers.backtests import save_backtest_to_disk
+    from backtesting.persistence import persist_backtest_results
 
     logger.info(f"Persisting backtest results for {run_id}")
 
-    # Write to disk cache
-    await asyncio.to_thread(
-        save_backtest_to_disk,
-        run_id=run_id,
-        data=results
-    )
+    try:
+        await persist_backtest_results(run_id, results)
+    except Exception as exc:
+        logger.warning("Failed to persist backtest %s to DB: %s", run_id, exc)
+
+    # Write to disk cache unless artifacts were already stored in the activity.
+    llm_data = results.get("llm_data") or {}
+    artifact_path = llm_data.get("artifact_path") if isinstance(llm_data, dict) else None
+    if artifact_path:
+        logger.info("Skipping disk write for %s; artifacts already stored at %s", run_id, artifact_path)
+    else:
+        await asyncio.to_thread(
+            save_backtest_to_disk,
+            run_id=run_id,
+            data=results
+        )
 
     logger.info(f"Successfully persisted backtest {run_id}")

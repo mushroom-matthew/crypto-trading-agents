@@ -84,6 +84,76 @@ def _realized_vol(series: pd.Series, window: int) -> float | None:
     return float(log_returns.tail(window).std(ddof=0))
 
 
+def _roc_series(series: pd.Series, period: int) -> pd.Series:
+    shifted = series.shift(period)
+    return (series - shifted) / shifted.replace(0.0, np.nan)
+
+
+def _realized_vol_series(series: pd.Series, window: int) -> pd.Series:
+    log_returns = np.log(series / series.shift())
+    return log_returns.rolling(window=window, min_periods=window).std(ddof=0)
+
+
+def _cycle_indicator_series(
+    close: pd.Series, high: pd.Series, low: pd.Series, window: int
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    cycle_high = high.rolling(window=window, min_periods=window).max()
+    cycle_low = low.rolling(window=window, min_periods=window).min()
+    range_val = (cycle_high - cycle_low).replace(0.0, np.nan)
+    close_safe = close.replace(0.0, np.nan)
+    cycle_range = range_val / close_safe
+    cycle_position = (close - cycle_low) / range_val
+    return cycle_high, cycle_low, cycle_range, cycle_position
+
+
+def _expansion_contraction_series(
+    high: pd.Series, low: pd.Series, lookback: int
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    size = len(high)
+    expansion = np.full(size, np.nan, dtype="float64")
+    contraction = np.full(size, np.nan, dtype="float64")
+    ratio = np.full(size, np.nan, dtype="float64")
+    highs = high.to_numpy(dtype="float64", copy=False)
+    lows = low.to_numpy(dtype="float64", copy=False)
+
+    if size < lookback or lookback <= 0:
+        return (
+            pd.Series(expansion, index=high.index),
+            pd.Series(contraction, index=high.index),
+            pd.Series(ratio, index=high.index),
+        )
+
+    for idx in range(lookback - 1, size):
+        window_high = highs[idx - lookback + 1 : idx + 1]
+        window_low = lows[idx - lookback + 1 : idx + 1]
+        if np.isnan(window_high).all() or np.isnan(window_low).all():
+            continue
+        high_idx = int(np.nanargmax(window_high))
+        low_idx = int(np.nanargmin(window_low))
+        high_val = window_high[high_idx]
+        low_val = window_low[low_idx]
+        if low_val == 0 or np.isnan(low_val) or np.isnan(high_val):
+            continue
+        if high_idx > low_idx:
+            expansion_pct = (high_val - low_val) / low_val * 100.0
+            low_after = np.nanmin(window_low[high_idx:]) if high_idx < lookback else np.nan
+            contraction_pct = (high_val - low_after) / high_val * 100.0 if high_val else np.nan
+        else:
+            contraction_pct = (high_val - low_val) / high_val * 100.0 if high_val else np.nan
+            high_after = np.nanmax(window_high[low_idx:]) if low_idx < lookback else np.nan
+            expansion_pct = (high_after - low_val) / low_val * 100.0 if low_val else np.nan
+        expansion[idx] = expansion_pct
+        contraction[idx] = contraction_pct
+        if contraction_pct and not np.isnan(contraction_pct) and contraction_pct > 0:
+            ratio[idx] = expansion_pct / contraction_pct
+
+    return (
+        pd.Series(expansion, index=high.index),
+        pd.Series(contraction, index=high.index),
+        pd.Series(ratio, index=high.index),
+    )
+
+
 def _cycle_indicators(
     close: pd.Series, high: pd.Series, low: pd.Series, window: int = 200
 ) -> tuple[float | None, float | None, float | None, float | None]:
@@ -282,6 +352,177 @@ def compute_indicator_snapshot(
         last_expansion_pct=expansion_pct,
         last_contraction_pct=contraction_pct,
         expansion_contraction_ratio=exp_cont_ratio,
+    )
+
+
+def precompute_indicator_frame(
+    df: pd.DataFrame,
+    config: IndicatorWindowConfig | None = None,
+) -> pd.DataFrame:
+    """Precompute indicator series for efficient snapshot lookup."""
+    window = config or IndicatorWindowConfig(timeframe="unknown")
+    prepared = _ensure_timestamp(df)
+    close = prepared["close"]
+    high = prepared["high"]
+    low = prepared["low"]
+    volume_series = prepared["volume"] if "volume" in prepared.columns else None
+
+    sma_short = tech.sma(prepared, period=window.short_window).series_list[0].series
+    sma_medium = tech.sma(prepared, period=window.medium_window).series_list[0].series
+    sma_long = tech.sma(prepared, period=window.long_window).series_list[0].series
+    ema_short = tech.ema(prepared, period=window.short_window).series_list[0].series
+    ema_medium = tech.ema(prepared, period=window.medium_window).series_list[0].series
+    rsi_val = tech.rsi(prepared, period=window.rsi_period).series_list[0].series
+    macd_result = tech.macd(prepared, fast=window.macd_fast, slow=window.macd_slow, signal=window.macd_signal)
+    macd_line = macd_result.series_list[0].series
+    macd_signal = macd_result.series_list[1].series
+    macd_hist = macd_result.series_list[2].series
+    atr_val = tech.atr(prepared, period=window.atr_period).series_list[0].series
+    boll = tech.bollinger_bands(prepared, period=window.short_window, mult=2.0)
+    boll_upper = boll.series_list[1].series
+    boll_lower = boll.series_list[2].series
+    donchian_upper = close.rolling(window=window.short_window, min_periods=window.short_window).max()
+    donchian_lower = close.rolling(window=window.short_window, min_periods=window.short_window).min()
+    roc_short = _roc_series(close, window.roc_short)
+    roc_medium = _roc_series(close, window.roc_medium)
+    realized_short = _realized_vol_series(close, window.realized_vol_short)
+    realized_medium = _realized_vol_series(close, window.realized_vol_medium)
+
+    if volume_series is None:
+        volume_series = pd.Series(np.nan, index=prepared.index, dtype="float64")
+    mean_volume = volume_series.rolling(window=window.short_window, min_periods=window.short_window).mean()
+    volume_multiple = volume_series / mean_volume.replace(0.0, np.nan)
+
+    cycle_high, cycle_low, cycle_range, cycle_position = _cycle_indicator_series(
+        close, high, low, window=window.cycle_window
+    )
+    range_val = (cycle_high - cycle_low)
+    fib_236 = cycle_high - range_val * 0.236
+    fib_382 = cycle_high - range_val * 0.382
+    fib_500 = cycle_high - range_val * 0.500
+    fib_618 = cycle_high - range_val * 0.618
+    fib_786 = cycle_high - range_val * 0.786
+
+    expansion_pct, contraction_pct, exp_ratio = _expansion_contraction_series(
+        high, low, lookback=window.swing_lookback
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": prepared["timestamp"],
+            "close": close,
+            "volume": volume_series,
+            "volume_multiple": volume_multiple,
+            "sma_short": sma_short,
+            "sma_medium": sma_medium,
+            "sma_long": sma_long,
+            "ema_short": ema_short,
+            "ema_medium": ema_medium,
+            "rsi_14": rsi_val,
+            "macd": macd_line,
+            "macd_signal": macd_signal,
+            "macd_hist": macd_hist,
+            "atr_14": atr_val,
+            "roc_short": roc_short,
+            "roc_medium": roc_medium,
+            "realized_vol_short": realized_short,
+            "realized_vol_medium": realized_medium,
+            "donchian_upper_short": donchian_upper,
+            "donchian_lower_short": donchian_lower,
+            "bollinger_upper": boll_upper,
+            "bollinger_lower": boll_lower,
+            "cycle_high_200": cycle_high,
+            "cycle_low_200": cycle_low,
+            "cycle_range_200": cycle_range,
+            "cycle_position": cycle_position,
+            "fib_236": fib_236,
+            "fib_382": fib_382,
+            "fib_500": fib_500,
+            "fib_618": fib_618,
+            "fib_786": fib_786,
+            "last_expansion_pct": expansion_pct,
+            "last_contraction_pct": contraction_pct,
+            "expansion_contraction_ratio": exp_ratio,
+        }
+    )
+    frame.set_index("timestamp", inplace=True)
+    return frame
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
+
+def snapshot_from_frame(
+    frame: pd.DataFrame,
+    timestamp: datetime,
+    symbol: str,
+    timeframe: str,
+) -> IndicatorSnapshot | None:
+    """Build an IndicatorSnapshot from a precomputed indicator frame."""
+    if frame is None or frame.empty:
+        return None
+    ts = pd.Timestamp(timestamp)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+
+    if ts in frame.index:
+        row = frame.loc[ts]
+    else:
+        pos = frame.index.get_indexer([ts], method="pad")
+        if pos[0] == -1:
+            return None
+        row = frame.iloc[pos[0]]
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[-1]
+
+    as_of = row.name
+    if isinstance(as_of, pd.Timestamp):
+        as_of_dt = as_of.to_pydatetime()
+    else:
+        as_of_dt = pd.Timestamp(as_of, utc=True).to_pydatetime()
+
+    return IndicatorSnapshot(
+        symbol=symbol,
+        timeframe=timeframe,
+        as_of=as_of_dt,
+        close=float(row["close"]),
+        volume=_optional_float(row.get("volume")),
+        volume_multiple=_optional_float(row.get("volume_multiple")),
+        sma_short=_optional_float(row.get("sma_short")),
+        sma_medium=_optional_float(row.get("sma_medium")),
+        sma_long=_optional_float(row.get("sma_long")),
+        ema_short=_optional_float(row.get("ema_short")),
+        ema_medium=_optional_float(row.get("ema_medium")),
+        rsi_14=_optional_float(row.get("rsi_14")),
+        macd=_optional_float(row.get("macd")),
+        macd_signal=_optional_float(row.get("macd_signal")),
+        macd_hist=_optional_float(row.get("macd_hist")),
+        atr_14=_optional_float(row.get("atr_14")),
+        roc_short=_optional_float(row.get("roc_short")),
+        roc_medium=_optional_float(row.get("roc_medium")),
+        realized_vol_short=_optional_float(row.get("realized_vol_short")),
+        realized_vol_medium=_optional_float(row.get("realized_vol_medium")),
+        donchian_upper_short=_optional_float(row.get("donchian_upper_short")),
+        donchian_lower_short=_optional_float(row.get("donchian_lower_short")),
+        bollinger_upper=_optional_float(row.get("bollinger_upper")),
+        bollinger_lower=_optional_float(row.get("bollinger_lower")),
+        cycle_high_200=_optional_float(row.get("cycle_high_200")),
+        cycle_low_200=_optional_float(row.get("cycle_low_200")),
+        cycle_range_200=_optional_float(row.get("cycle_range_200")),
+        cycle_position=_optional_float(row.get("cycle_position")),
+        fib_236=_optional_float(row.get("fib_236")),
+        fib_382=_optional_float(row.get("fib_382")),
+        fib_500=_optional_float(row.get("fib_500")),
+        fib_618=_optional_float(row.get("fib_618")),
+        fib_786=_optional_float(row.get("fib_786")),
+        last_expansion_pct=_optional_float(row.get("last_expansion_pct")),
+        last_contraction_pct=_optional_float(row.get("last_contraction_pct")),
+        expansion_contraction_ratio=_optional_float(row.get("expansion_contraction_ratio")),
     )
 
 

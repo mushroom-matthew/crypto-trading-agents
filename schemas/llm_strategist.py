@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SerializableModel(BaseModel):
@@ -144,6 +144,12 @@ class TriggerCondition(SerializableModel):
         "Use to prevent premature exits from minor fluctuations. Emergency exits still fire."
     )
     stop_loss_pct: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def _require_emergency_exit_rule(self) -> "TriggerCondition":
+        if self.category == "emergency_exit" and not (self.exit_rule or "").strip():
+            raise ValueError("emergency_exit triggers must define a non-empty exit_rule")
+        return self
 
 
 class RiskConstraint(SerializableModel):

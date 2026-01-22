@@ -51,6 +51,7 @@ Multi-layer synthesis requirements:
    - Volatility is temporarily elevated but structure intact (e.g., hold_rule="close > sma_short and vol_state != 'extreme'")
    - The trade thesis remains valid despite short-term noise
    Do NOT use hold_rule for emergency_exit triggers - they must always be able to fire.
+   Emergency exits must define a non-empty exit_rule; entry_rule should be empty or always false.
 10. Regime discipline and trigger budgets:
    - State a dominant regime per symbol inside global_view (trend, mean-reversion, volatility-breakout, or defensive) so downstream components can align.
    - Regime-adapt the trigger emphasis: range -> mean_reversion highest confidence, trend/volatility triggers tightened; bull -> trend_continuation highest confidence, reversals guarded; bear -> defensive/exit bias and higher confirmation for longs; high_vol -> volatility_breakout only with strict volatility gates; mixed -> balanced but avoid mirrored logic.
@@ -143,8 +144,8 @@ Trimmed output example:
       "confidence_grade": "A",
       "direction": "flat",
       "timeframe": "1h",
-      "entry_rule": "timeframe=='1h' and (vol_state=='high' or vol_state=='extreme') and atr_14 > tf_4h_atr_14 and close < sma_medium and macd < macd_signal",
-      "exit_rule": ""
+      "entry_rule": "false",
+      "exit_rule": "timeframe=='1h' and (vol_state=='high' or vol_state=='extreme') and atr_14 > tf_4h_atr_14 and close < sma_medium and macd < macd_signal"
     }
   ]
 }

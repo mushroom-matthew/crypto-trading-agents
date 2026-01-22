@@ -30,6 +30,7 @@ export function BacktestControl() {
     max_trades_per_day: 30,
     max_triggers_per_symbol_per_day: 10,
     judge_cadence_hours: 4,
+    judge_check_after_trades: 3,
     // Risk settings defaults
     max_position_risk_pct: 3.0,
     max_symbol_exposure_pct: 40.0,

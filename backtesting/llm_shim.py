@@ -88,8 +88,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "confidence_grade": "A",
         "direction": "exit",
         "timeframe": "1h",
-        "entry_rule": "position != 'flat'",
-        "exit_rule": "",
+        "entry_rule": "false",
+        "exit_rule": "position != 'flat' and vol_state in ['high', 'extreme']",
     },
 ]
 

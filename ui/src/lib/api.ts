@@ -57,6 +57,7 @@ export interface BacktestConfig {
   max_trades_per_day?: number;
   max_triggers_per_symbol_per_day?: number;
   judge_cadence_hours?: number;
+  judge_check_after_trades?: number;
 
   // Whipsaw / Anti-Flip-Flop Controls
   min_hold_hours?: number;
@@ -530,6 +531,7 @@ export interface PaperTradingSessionConfig {
   max_trades_per_day?: number;
   max_triggers_per_symbol_per_day?: number;
   judge_cadence_hours?: number;
+  judge_check_after_trades?: number;
 
   // Whipsaw / Anti-Flip-Flop Controls
   min_hold_hours?: number;

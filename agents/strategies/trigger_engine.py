@@ -51,6 +51,8 @@ class Order:
     reason: str
     timestamp: datetime
     stop_distance: float | None = None
+    emergency: bool = False
+    cooldown_recommendation_bars: int | None = None
 
 
 class TriggerEngine:
@@ -214,7 +216,19 @@ class TriggerEngine:
             self._record_block(block_entries, trigger, decision.reason, "Flatten blocked unexpectedly", bar)
             return None
         side: Literal["buy", "sell"] = "sell" if qty > 0 else "buy"
-        return Order(symbol=trigger.symbol, side=side, quantity=abs(qty), price=bar.close, timeframe=bar.timeframe, reason=reason, timestamp=bar.timestamp)
+        emergency = trigger.category == "emergency_exit"
+        cooldown_bars = self._emergency_cooldown_bars() if emergency else None
+        return Order(
+            symbol=trigger.symbol,
+            side=side,
+            quantity=abs(qty),
+            price=bar.close,
+            timeframe=bar.timeframe,
+            reason=reason,
+            timestamp=bar.timestamp,
+            emergency=emergency,
+            cooldown_recommendation_bars=cooldown_bars,
+        )
 
     def _record_block(
         self,
@@ -223,18 +237,23 @@ class TriggerEngine:
         reason: str,
         detail: str,
         bar: Bar,
+        extra: dict[str, object] | None = None,
     ) -> None:
-        container.append(
-            {
-                "trigger_id": trigger.id,
-                "symbol": trigger.symbol,
-                "timeframe": bar.timeframe,
-                "timestamp": bar.timestamp.isoformat(),
-                "reason": reason,
-                "detail": detail,
-                "price": bar.close,
-            }
-        )
+        payload = {
+            "trigger_id": trigger.id,
+            "symbol": trigger.symbol,
+            "timeframe": bar.timeframe,
+            "timestamp": bar.timestamp.isoformat(),
+            "reason": reason,
+            "detail": detail,
+            "price": bar.close,
+        }
+        if extra:
+            payload.update(extra)
+        container.append(payload)
+
+    def _emergency_cooldown_bars(self) -> int:
+        return max(1, self.trade_cooldown_bars, self.min_hold_bars)
 
     def _entry_order(
         self,
@@ -310,11 +329,22 @@ class TriggerEngine:
             if self.prioritize_by_confidence and triggers_fired_for_symbol >= self.max_triggers_per_symbol_per_bar:
                 # Log that we're skipping lower-confidence triggers
                 detail = f"Max triggers ({self.max_triggers_per_symbol_per_bar}) already fired for {bar.symbol}"
-                self._record_block(block_entries, trigger, "SIGNAL_PRIORITY", detail, bar)
+                self._record_block(block_entries, trigger, "priority_skip", detail, bar)
                 continue
 
             # Exit rule evaluation
             try:
+                if trigger.category == "emergency_exit" and not (trigger.exit_rule or "").strip():
+                    detail = "Emergency exit missing exit_rule"
+                    self._record_block(
+                        block_entries,
+                        trigger,
+                        "emergency_exit_missing_exit_rule",
+                        detail,
+                        bar,
+                        extra={"cooldown_recommendation_bars": self._emergency_cooldown_bars()},
+                    )
+                    continue
                 exit_fired = bool(trigger.exit_rule and self.evaluator.evaluate(trigger.exit_rule, context))
                 # Debug sampling for exit rule
                 self._maybe_sample_evaluation(
@@ -334,7 +364,14 @@ class TriggerEngine:
                     last_entry_ts = self._last_entry_timestamp.get(trigger.symbol)
                     if last_entry_ts and last_entry_ts == bar.timestamp:
                         detail = "Emergency exit blocked on same bar as entry"
-                        self._record_block(block_entries, trigger, "SAME_BAR_ENTRY", detail, bar)
+                        self._record_block(
+                            block_entries,
+                            trigger,
+                            "emergency_exit_veto_same_bar",
+                            detail,
+                            bar,
+                            extra={"cooldown_recommendation_bars": self._emergency_cooldown_bars()},
+                        )
                         continue
                 # Check if hold_rule suppresses this exit (unless emergency category)
                 if trigger.hold_rule and trigger.category != "emergency_exit":
@@ -355,13 +392,22 @@ class TriggerEngine:
                 # Check minimum hold period before allowing exit
                 if self._is_within_hold_period(trigger.symbol):
                     detail = f"Position held for less than {self.min_hold_bars} bars"
-                    self._record_block(block_entries, trigger, "MIN_HOLD_PERIOD", detail, bar)
+                    reason = "MIN_HOLD_PERIOD"
+                    extra = None
+                    if trigger.category == "emergency_exit":
+                        reason = "emergency_exit_veto_min_hold"
+                        extra = {"cooldown_recommendation_bars": self._emergency_cooldown_bars()}
+                    self._record_block(block_entries, trigger, reason, detail, bar, extra=extra)
                     continue
                 exit_order = self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_exit", block_entries)
                 if exit_order:
                     orders.append(exit_order)
                     triggers_fired_for_symbol += 1
                     continue
+
+            if trigger.category == "emergency_exit":
+                # Emergency exits are exit-only; never evaluate entry rules.
+                continue
 
             # Entry rule evaluation
             try:
