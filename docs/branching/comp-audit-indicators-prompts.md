@@ -47,6 +47,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - Confirm momentum/breakout prompts appear in plan output or template review.
 - Paste run id and observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b comp-audit-indicators-prompts ../wt-comp-audit-indicators-prompts comp-audit-indicators-prompts
+cd ../wt-comp-audit-indicators-prompts
+
+# When finished (after merge)
+git worktree remove ../wt-comp-audit-indicators-prompts
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

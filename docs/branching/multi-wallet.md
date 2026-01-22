@@ -59,6 +59,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - Open the UI and verify the wallet card displays blockchain type, truncated address, and balances.
 - Paste CLI output and UI observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b multi-wallet ../wt-multi-wallet multi-wallet
+cd ../wt-multi-wallet
+
+# When finished (after merge)
+git worktree remove ../wt-multi-wallet
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

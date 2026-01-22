@@ -50,6 +50,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - Run leverage comparison and confirm the comparison table/chart renders expected metrics.
 - Paste run id and UI observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b scalper-mode (later) ../wt-scalper-mode (later) scalper-mode (later)
+cd ../wt-scalper-mode (later)
+
+# When finished (after merge)
+git worktree remove ../wt-scalper-mode (later)
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

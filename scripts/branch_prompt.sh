@@ -143,6 +143,7 @@ Assignment
 
 Required behavior
 - Read the runbook first; follow its scope, key files, acceptance criteria, and Git Workflow exactly.
+- Use the Worktree Setup section if working in parallel on the same machine.
 - Do not widen scope without approval.
 - Do not commit until:
   1) tests listed in the runbook pass or the user provides explicit test output, AND

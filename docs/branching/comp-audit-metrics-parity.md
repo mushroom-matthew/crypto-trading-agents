@@ -48,6 +48,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - Run a backtest and confirm win rate and Sharpe align with realized PnL and annualization uses 365.
 - Paste endpoint output or run id and observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b comp-audit-metrics-parity ../wt-comp-audit-metrics-parity comp-audit-metrics-parity
+cd ../wt-comp-audit-metrics-parity
+
+# When finished (after merge)
+git worktree remove ../wt-comp-audit-metrics-parity
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

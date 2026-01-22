@@ -45,6 +45,19 @@ If infra validation cannot run (missing credentials), obtain user-run output and
 - Confirm live trading safety check requires LIVE_TRADING_ACK before orders can be placed.
 - Paste plan summary or review notes in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b aws-deploy ../wt-aws-deploy aws-deploy
+cd ../wt-aws-deploy
+
+# When finished (after merge)
+git worktree remove ../wt-aws-deploy
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

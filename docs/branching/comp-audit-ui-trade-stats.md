@@ -43,6 +43,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - Confirm legacy runs without new fields do not break the UI.
 - Paste a brief UI observation or screenshot description in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b comp-audit-ui-trade-stats ../wt-comp-audit-ui-trade-stats comp-audit-ui-trade-stats
+cd ../wt-comp-audit-ui-trade-stats
+
+# When finished (after merge)
+git worktree remove ../wt-comp-audit-ui-trade-stats
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

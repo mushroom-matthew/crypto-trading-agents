@@ -49,6 +49,19 @@ Do not commit until test output is recorded in the Test Evidence section below. 
 - Confirm in logs or results: trade cap never implies total risk above budget, scale-in blocked when combined risk exceeds cap, short without stop is blocked or capped.
 - Paste run id and observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b comp-audit-risk-core ../wt-comp-audit-risk-core comp-audit-risk-core
+cd ../wt-comp-audit-risk-core
+
+# When finished (after merge)
+git worktree remove ../wt-comp-audit-risk-core
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

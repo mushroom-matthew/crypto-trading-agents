@@ -44,6 +44,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - Confirm heuristic pre-analysis is included in the prompt/logs for non-shim runs.
 - Paste run id and observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b judge-unification (later) ../wt-judge-unification (later) judge-unification (later)
+cd ../wt-judge-unification (later)
+
+# When finished (after merge)
+git worktree remove ../wt-judge-unification (later)
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

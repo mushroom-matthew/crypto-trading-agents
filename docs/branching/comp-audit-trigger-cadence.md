@@ -42,6 +42,19 @@ If any test cannot be run, record the failure reason and obtain user-run output 
 - Confirm execution rate exceeds 50% of valid triggers and no duplicate risk checks occur per symbol per tick (from logs or counters).
 - Paste run id and observed metrics in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b comp-audit-trigger-cadence ../wt-comp-audit-trigger-cadence comp-audit-trigger-cadence
+cd ../wt-comp-audit-trigger-cadence
+
+# When finished (after merge)
+git worktree remove ../wt-comp-audit-trigger-cadence
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

@@ -33,3 +33,8 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 
 ## Change Log
 - Each runbook includes a Change Log section. Agents must update it with a brief summary of changes and files touched before committing.
+## Worktree Usage
+- All parallel branches are intended to run on the same machine from a single clone.
+- Use git worktree to create per-branch working directories.
+- Each runbook includes a Worktree Setup section with exact commands.
+

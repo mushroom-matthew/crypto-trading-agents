@@ -42,6 +42,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - If performance optimizations were made, capture basic response-time or query-count observations.
 - Paste observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b ui-unification (later) ../wt-ui-unification (later) ui-unification (later)
+cd ../wt-ui-unification (later)
+
+# When finished (after merge)
+git worktree remove ../wt-ui-unification (later)
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main

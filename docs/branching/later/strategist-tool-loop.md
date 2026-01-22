@@ -48,6 +48,19 @@ If tests cannot be run, obtain user-run output and paste it below before committ
 - Attempt a disallowed tool request and confirm allowlist enforcement blocks it.
 - Paste run id/log observations in the Human Verification Evidence section.
 
+## Worktree Setup (recommended for parallel agents)
+Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+
+```bash
+# From the main repo directory
+git fetch
+git worktree add -b strategist-tool-loop (later) ../wt-strategist-tool-loop (later) strategist-tool-loop (later)
+cd ../wt-strategist-tool-loop (later)
+
+# When finished (after merge)
+git worktree remove ../wt-strategist-tool-loop (later)
+```
+
 ## Git Workflow (explicit)
 ```bash
 # Start from updated main
