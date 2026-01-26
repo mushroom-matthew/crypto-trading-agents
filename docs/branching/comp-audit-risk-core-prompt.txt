@@ -1,0 +1,18 @@
+You are a strategist. Output JSON only and follow the schema exactly.
+
+Use BTC-USD, timeframe "1h". Include exactly 3 triggers:
+1) long_primary: long, category trend_continuation, confidence_grade A,
+   entry_rule "close > sma_short", exit_rule "close < sma_short", stop_loss_pct 1.0
+2) long_scale: long, category trend_continuation, confidence_grade B,
+   entry_rule "close > sma_medium", exit_rule "close < sma_medium", stop_loss_pct 1.0
+3) short_no_stop: short, category reversal, confidence_grade B,
+   entry_rule "close < sma_short", exit_rule "close > sma_short" (omit stop_loss_pct)
+
+Risk constraints:
+- max_position_risk_pct: 0.9
+- max_symbol_exposure_pct: 100
+- max_portfolio_exposure_pct: 100
+- max_daily_loss_pct: 50
+- max_daily_risk_budget_pct: 1.0
+
+Sizing rules: one entry for BTC-USD using fixed_fraction with target_risk_pct 0.9.

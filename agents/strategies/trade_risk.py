@@ -54,6 +54,7 @@ class TradeRiskEvaluator:
             symbol_lower = trigger.symbol.lower()
             symbol_archetype = symbol_lower.split("-")[0]
         archetype = symbol_archetype or trigger.category
+        side = trigger.direction if trigger.direction in {"long", "short"} else None
         quantity = self.engine.size_position(
             trigger.symbol,
             price,
@@ -62,6 +63,7 @@ class TradeRiskEvaluator:
             stop_distance=stop_distance,
             archetype=archetype,
             hour=hour,
+            side=side,
         )
         if quantity <= 0:
             reason = self.engine.last_block_reason or "sizing_zero"
