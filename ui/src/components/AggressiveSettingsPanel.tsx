@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronUp, AlertTriangle, Info, Zap, Shield, Target } from 'lucide-react';
+import { numberOrFallback, parseOptionalNumber } from '../lib/utils';
 
 // Generic type for aggressive trading settings shared by BacktestConfig and PaperTradingSessionConfig
 export interface AggressiveSettings {
@@ -81,7 +82,8 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
     }
   };
 
-  const isLeveraged = (config.max_portfolio_exposure_pct ?? 80) > 100;
+  const portfolioExposure = numberOrFallback(config.max_portfolio_exposure_pct, 80);
+  const isLeveraged = portfolioExposure > 100;
   const isScalperMode = config.min_hold_hours === 0 && config.min_flat_hours === 0;
 
   return (
@@ -141,8 +143,14 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 </label>
                 <input
                   type="number"
-                  value={config.max_position_risk_pct ?? 2}
-                  onChange={(e) => onChange({ ...config, max_position_risk_pct: parseFloat(e.target.value) })}
+                  value={numberOrFallback(config.max_position_risk_pct, 2)}
+                  onChange={(e) => {
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, max_position_risk_pct: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={0.1}
                   max={20}
@@ -156,16 +164,22 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
               <div>
                 <label className="block text-sm font-medium mb-1">
                   Portfolio Exposure %
-                  {(config.max_portfolio_exposure_pct ?? 80) > 100 && (
+                  {portfolioExposure > 100 && (
                     <span className="ml-2 text-orange-500 font-bold">
-                      ({((config.max_portfolio_exposure_pct ?? 100) / 100).toFixed(1)}x)
+                      ({(portfolioExposure / 100).toFixed(1)}x)
                     </span>
                   )}
                 </label>
                 <input
                   type="number"
-                  value={config.max_portfolio_exposure_pct ?? 80}
-                  onChange={(e) => onChange({ ...config, max_portfolio_exposure_pct: parseFloat(e.target.value) })}
+                  value={portfolioExposure}
+                  onChange={(e) => {
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, max_portfolio_exposure_pct: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={10}
                   max={500}
@@ -182,8 +196,14 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 </label>
                 <input
                   type="number"
-                  value={config.max_symbol_exposure_pct ?? 25}
-                  onChange={(e) => onChange({ ...config, max_symbol_exposure_pct: parseFloat(e.target.value) })}
+                  value={numberOrFallback(config.max_symbol_exposure_pct, 25)}
+                  onChange={(e) => {
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, max_symbol_exposure_pct: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={5}
                   max={100}
@@ -200,8 +220,14 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 </label>
                 <input
                   type="number"
-                  value={config.max_daily_loss_pct ?? 3}
-                  onChange={(e) => onChange({ ...config, max_daily_loss_pct: parseFloat(e.target.value) })}
+                  value={numberOrFallback(config.max_daily_loss_pct, 3)}
+                  onChange={(e) => {
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, max_daily_loss_pct: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={50}
@@ -227,8 +253,14 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 </label>
                 <input
                   type="number"
-                  value={config.min_price_move_pct ?? 0.5}
-                  onChange={(e) => onChange({ ...config, min_price_move_pct: parseFloat(e.target.value) })}
+                  value={numberOrFallback(config.min_price_move_pct, 0.5)}
+                  onChange={(e) => {
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, min_price_move_pct: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={0}
                   max={10}
@@ -283,9 +315,13 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 </label>
                 <input
                   type="number"
-                  value={config.min_hold_hours ?? 2}
+                  value={numberOrFallback(config.min_hold_hours, 2)}
                   onChange={(e) => {
-                    onChange({ ...config, min_hold_hours: parseFloat(e.target.value) });
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, min_hold_hours: next });
                     setWhipsawPreset('custom');
                   }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
@@ -304,9 +340,13 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 </label>
                 <input
                   type="number"
-                  value={config.min_flat_hours ?? 2}
+                  value={numberOrFallback(config.min_flat_hours, 2)}
                   onChange={(e) => {
-                    onChange({ ...config, min_flat_hours: parseFloat(e.target.value) });
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, min_flat_hours: next });
                     setWhipsawPreset('custom');
                   }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
@@ -353,8 +393,14 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 </label>
                 <input
                   type="number"
-                  value={config.walk_away_profit_target_pct ?? 25}
-                  onChange={(e) => onChange({ ...config, walk_away_profit_target_pct: parseFloat(e.target.value) })}
+                  value={numberOrFallback(config.walk_away_profit_target_pct, 25)}
+                  onChange={(e) => {
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, walk_away_profit_target_pct: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={100}

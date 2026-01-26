@@ -36,7 +36,7 @@ async def load_ohlcv_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     Retry: 3 attempts with exponential backoff
     """
     from backtesting.dataset import load_ohlcv
-    from data_loader.utils import ensure_utc
+    from data_loader.utils import ensure_utc, timeframe_to_seconds
 
     symbols = config["symbols"]
     start = ensure_utc(datetime.fromisoformat(config["start_date"]))
@@ -235,14 +235,34 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     flatten_notional_threshold = config.get("flatten_notional_threshold", 0.0)
     strategy_prompt = config.get("strategy_prompt")
 
+    def _default_min_hold_hours(timeframes_input) -> float:
+        base_seconds = None
+        for tf in timeframes_input:
+            try:
+                seconds = timeframe_to_seconds(str(tf))
+            except ValueError:
+                continue
+            if base_seconds is None or seconds < base_seconds:
+                base_seconds = seconds
+        if not base_seconds:
+            return 2.0
+        if base_seconds <= 300:
+            bars = 1
+        elif base_seconds <= 900:
+            bars = 2
+        else:
+            return 2.0
+        return (bars * base_seconds) / 3600.0
+
     # Whipsaw / anti-flip-flop controls (new parameters)
     min_hold_hours = config.get("min_hold_hours")
     if min_hold_hours is None:
-        min_hold_hours = 2.0  # Default
+        min_hold_hours = _default_min_hold_hours(timeframes)
     min_flat_hours = config.get("min_flat_hours")
     if min_flat_hours is None:
         min_flat_hours = 2.0  # Default
     confidence_override_threshold = config.get("confidence_override_threshold", "A")
+    priority_skip_confidence_threshold = config.get("priority_skip_confidence_threshold")
 
     # Walk-away threshold
     walk_away_enabled = config.get("walk_away_enabled", False)
@@ -324,6 +344,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         min_hold_hours=float(min_hold_hours),
         min_flat_hours=float(min_flat_hours),
         confidence_override_threshold=confidence_override_threshold,
+        priority_skip_confidence_threshold=priority_skip_confidence_threshold,
         initial_allocations=initial_allocations,
         strategy_prompt=strategy_prompt,
         # Walk-away threshold (passed to backtester for tracking)

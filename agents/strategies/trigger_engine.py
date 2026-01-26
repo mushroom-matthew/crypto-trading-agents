@@ -74,6 +74,7 @@ class TriggerEngine:
         debug_max_samples: int = 100,
         prioritize_by_confidence: bool = True,
         max_triggers_per_symbol_per_bar: int = 1,
+        priority_skip_confidence_threshold: Literal["A", "B", "C"] | None = None,
     ) -> None:
         """Initialize the trigger engine.
 
@@ -98,6 +99,8 @@ class TriggerEngine:
                 and stop evaluating once a trigger fires for a symbol. Prevents competing signals.
             max_triggers_per_symbol_per_bar: Maximum triggers to fire per symbol per bar (default: 1).
                 Prevents cascade of competing signals.
+            priority_skip_confidence_threshold: Minimum confidence grade to bypass priority skips
+                once max_triggers_per_symbol_per_bar is reached. None disables bypass.
         """
         self.plan = plan
         self.risk_engine = risk_engine
@@ -108,6 +111,7 @@ class TriggerEngine:
         self.trade_cooldown_bars = max(0, trade_cooldown_bars)
         self.prioritize_by_confidence = prioritize_by_confidence
         self.max_triggers_per_symbol_per_bar = max(1, max_triggers_per_symbol_per_bar)
+        self.priority_skip_confidence_threshold = priority_skip_confidence_threshold
         # Store trigger confidence for deduplication
         self._trigger_confidence: dict[str, Literal["A", "B", "C"] | None] = {
             t.id: t.confidence_grade for t in plan.triggers
@@ -311,8 +315,9 @@ class TriggerEngine:
             # Skip all triggers for this symbol during cooldown
             return orders, block_entries
 
-        context = self._context(indicator, asset_state, market_structure, portfolio)
-        current_position = self._position_direction(bar.symbol, portfolio)
+        portfolio_base = portfolio
+        portfolio_for_eval = portfolio_base
+        context = self._context(indicator, asset_state, market_structure, portfolio_for_eval)
 
         # Track how many triggers have fired for this symbol this bar
         # (used for max_triggers_per_symbol_per_bar enforcement)
@@ -327,10 +332,14 @@ class TriggerEngine:
 
             # Early exit if we've hit the max triggers for this symbol
             if self.prioritize_by_confidence and triggers_fired_for_symbol >= self.max_triggers_per_symbol_per_bar:
-                # Log that we're skipping lower-confidence triggers
-                detail = f"Max triggers ({self.max_triggers_per_symbol_per_bar}) already fired for {bar.symbol}"
-                self._record_block(block_entries, trigger, "priority_skip", detail, bar)
-                continue
+                if not self._priority_skip_bypass(trigger.confidence_grade):
+                    # Log that we're skipping lower-confidence triggers
+                    detail = f"Max triggers ({self.max_triggers_per_symbol_per_bar}) already fired for {bar.symbol}"
+                    self._record_block(block_entries, trigger, "priority_skip", detail, bar)
+                    continue
+
+            current_position = self._position_direction(bar.symbol, portfolio_for_eval)
+            context["position"] = current_position
 
             # Exit rule evaluation
             try:
@@ -399,10 +408,12 @@ class TriggerEngine:
                         extra = {"cooldown_recommendation_bars": self._emergency_cooldown_bars()}
                     self._record_block(block_entries, trigger, reason, detail, bar, extra=extra)
                     continue
-                exit_order = self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_exit", block_entries)
+                exit_order = self._flatten_order(trigger, bar, portfolio_for_eval, f"{trigger.id}_exit", block_entries)
                 if exit_order:
                     orders.append(exit_order)
-                    triggers_fired_for_symbol += 1
+                    orders = self._deduplicate_orders(orders, bar.symbol)
+                    triggers_fired_for_symbol = len(orders)
+                    portfolio_for_eval = self._rebuild_portfolio_for_orders(portfolio_base, orders)
                     continue
 
             if trigger.category == "emergency_exit":
@@ -426,10 +437,12 @@ class TriggerEngine:
                 continue
 
             if entry_fired:
-                entry = self._entry_order(trigger, indicator, portfolio, bar, block_entries)
+                entry = self._entry_order(trigger, indicator, portfolio_for_eval, bar, block_entries)
                 if entry:
                     orders.append(entry)
-                    triggers_fired_for_symbol += 1
+                    orders = self._deduplicate_orders(orders, bar.symbol)
+                    triggers_fired_for_symbol = len(orders)
+                    portfolio_for_eval = self._rebuild_portfolio_for_orders(portfolio_base, orders)
 
         # Deduplicate orders per symbol with EXIT PRIORITY:
         # If both exit and entry orders exist for same symbol, only keep the exit.
@@ -475,6 +488,35 @@ class TriggerEngine:
         else:
             # Clear entry bar when position is closed
             self._position_entry_bar.pop(symbol, None)
+
+    def _priority_skip_bypass(self, confidence: Literal["A", "B", "C"] | None) -> bool:
+        if self.priority_skip_confidence_threshold is None:
+            return False
+        if confidence is None:
+            return False
+        threshold_priority = self.CONFIDENCE_PRIORITY.get(self.priority_skip_confidence_threshold, 0)
+        confidence_priority = self.CONFIDENCE_PRIORITY.get(confidence, 0)
+        return confidence_priority >= threshold_priority
+
+    def _apply_order_to_portfolio(self, portfolio: PortfolioState, order: Order) -> PortfolioState:
+        if order.quantity <= 0:
+            return portfolio
+        positions = dict(portfolio.positions)
+        delta_qty = order.quantity if order.side == "buy" else -order.quantity
+        positions[order.symbol] = positions.get(order.symbol, 0.0) + delta_qty
+        if abs(positions.get(order.symbol, 0.0)) <= 1e-9:
+            positions.pop(order.symbol, None)
+        if order.side == "buy":
+            cash = portfolio.cash - (order.price * order.quantity)
+        else:
+            cash = portfolio.cash + (order.price * order.quantity)
+        return portfolio.model_copy(update={"positions": positions, "cash": cash})
+
+    def _rebuild_portfolio_for_orders(self, portfolio: PortfolioState, orders: List[Order]) -> PortfolioState:
+        updated = portfolio
+        for order in orders:
+            updated = self._apply_order_to_portfolio(updated, order)
+        return updated
 
     def _maybe_sample_evaluation(
         self,

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronUp, Calendar } from 'lucide-react';
+import { numberOrFallback, parseOptionalInteger, parseOptionalNumber } from '../lib/utils';
 
 export interface PlanningSettings {
   max_trades_per_day?: number;
@@ -62,10 +63,14 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               </label>
               <input
                 type="number"
-                value={config.max_trades_per_day ?? 10}
-                onChange={(e) =>
-                  onChange({ ...config, max_trades_per_day: parseInt(e.target.value) })
-                }
+                value={numberOrFallback(config.max_trades_per_day, 10)}
+                onChange={(e) => {
+                  const next = parseOptionalInteger(e.target.value);
+                  if (next === undefined) {
+                    return;
+                  }
+                  onChange({ ...config, max_trades_per_day: next });
+                }}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={1}
                 max={200}
@@ -80,10 +85,14 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               </label>
               <input
                 type="number"
-                value={config.max_triggers_per_symbol_per_day ?? 5}
-                onChange={(e) =>
-                  onChange({ ...config, max_triggers_per_symbol_per_day: parseInt(e.target.value) })
-                }
+                value={numberOrFallback(config.max_triggers_per_symbol_per_day, 5)}
+                onChange={(e) => {
+                  const next = parseOptionalInteger(e.target.value);
+                  if (next === undefined) {
+                    return;
+                  }
+                  onChange({ ...config, max_triggers_per_symbol_per_day: next });
+                }}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={1}
                 max={50}
@@ -99,10 +108,14 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                 </label>
                 <input
                   type="number"
-                  value={config.judge_cadence_hours ?? 4}
-                  onChange={(e) =>
-                    onChange({ ...config, judge_cadence_hours: parseFloat(e.target.value) })
-                  }
+                  value={numberOrFallback(config.judge_cadence_hours, 4)}
+                  onChange={(e) => {
+                    const next = parseOptionalNumber(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, judge_cadence_hours: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={24}
@@ -122,10 +135,14 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                 </label>
                 <input
                   type="number"
-                  value={config.judge_check_after_trades ?? 3}
-                  onChange={(e) =>
-                    onChange({ ...config, judge_check_after_trades: parseInt(e.target.value) })
-                  }
+                  value={numberOrFallback(config.judge_check_after_trades, 3)}
+                  onChange={(e) => {
+                    const next = parseOptionalInteger(e.target.value);
+                    if (next === undefined) {
+                      return;
+                    }
+                    onChange({ ...config, judge_check_after_trades: next });
+                  }}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={100}
@@ -144,10 +161,14 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               </label>
               <input
                 type="number"
-                value={config.debug_trigger_sample_rate ?? 0}
-                onChange={(e) =>
-                  onChange({ ...config, debug_trigger_sample_rate: parseFloat(e.target.value) })
-                }
+                value={numberOrFallback(config.debug_trigger_sample_rate, 0)}
+                onChange={(e) => {
+                  const next = parseOptionalNumber(e.target.value);
+                  if (next === undefined) {
+                    return;
+                  }
+                  onChange({ ...config, debug_trigger_sample_rate: next });
+                }}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={0}
                 max={1}
@@ -165,10 +186,14 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               </label>
               <input
                 type="number"
-                value={config.debug_trigger_max_samples ?? 100}
-                onChange={(e) =>
-                  onChange({ ...config, debug_trigger_max_samples: parseInt(e.target.value) })
-                }
+                value={numberOrFallback(config.debug_trigger_max_samples, 100)}
+                onChange={(e) => {
+                  const next = parseOptionalInteger(e.target.value);
+                  if (next === undefined) {
+                    return;
+                  }
+                  onChange({ ...config, debug_trigger_max_samples: next });
+                }}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={1}
                 max={1000}

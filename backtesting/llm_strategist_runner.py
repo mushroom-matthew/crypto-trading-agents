@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+import inspect
 import json
 import logging
 import math
@@ -27,7 +28,7 @@ from agents.analytics import (
     compute_portfolio_state,
 )
 from agents.strategies.llm_client import LLMClient
-from agents.strategies.plan_provider import StrategyPlanProvider
+from agents.strategies.plan_provider import LLMCostTracker, StrategyPlanProvider
 from agents.strategies.risk_engine import RiskEngine, RiskProfile
 from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trade_risk import TradeRiskEvaluator
@@ -55,7 +56,6 @@ from trading_core.trade_quality import (
     assess_position_quality,
     format_position_quality_for_judge,
 )
-from data_loader.utils import timeframe_to_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +356,7 @@ class LLMStrategistBacktester:
         factor_data: pd.DataFrame | None = None,
         auto_hedge_market: bool = False,
         factor_data_path: Path | None = None,
-        min_hold_hours: float = 2.0,
+        min_hold_hours: float | None = None,
         min_flat_hours: float = 2.0,
         confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
         initial_allocations: Dict[str, float] | None = None,
@@ -364,6 +364,7 @@ class LLMStrategistBacktester:
         walk_away_profit_target_pct: float = 25.0,
         max_trades_per_day: int | None = None,
         max_triggers_per_symbol_per_day: int | None = None,
+        priority_skip_confidence_threshold: Literal["A", "B", "C"] | None = None,
         debug_trigger_sample_rate: float = 0.0,
         debug_trigger_max_samples: int = 100,
         use_trigger_vector_store: bool = False,
@@ -396,6 +397,13 @@ class LLMStrategistBacktester:
             if tf not in all_timeframes:
                 all_timeframes.append(tf)
         self.timeframes = all_timeframes
+        self.base_timeframe = base_timeframe
+        self.base_timeframe_seconds = self._timeframe_seconds(base_timeframe)
+        self.is_scalp_profile = 0 < self.base_timeframe_seconds <= 15 * 60
+        scalp_hold_hours = None
+        if self.is_scalp_profile:
+            scalp_bars = self._scalp_hold_bars(self.base_timeframe_seconds)
+            scalp_hold_hours = (scalp_bars * self.base_timeframe_seconds) / 3600.0
         logger.info(
             "Timeframes expanded: configured=%s, derived=%s, final=%s",
             base_timeframes, derived_timeframes, self.timeframes
@@ -438,6 +446,7 @@ class LLMStrategistBacktester:
         self.calls_per_day = max(1, llm_calls_per_day)
         self.plan_interval = timedelta(hours=24 / self.calls_per_day)
         self.plan_provider = plan_provider or StrategyPlanProvider(llm_client, cache_dir=cache_dir, llm_calls_per_day=self.calls_per_day)
+        self.plan_provider = self._ensure_plan_provider_compat(self.plan_provider)
         self.run_registry = run_registry or strategy_run_registry
         self.plan_service = StrategistPlanService(plan_provider=self.plan_provider, registry=self.run_registry)
         self._event_store = EventStore()
@@ -494,6 +503,8 @@ class LLMStrategistBacktester:
         self.flattened_days: set[str] = set()
         self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
         self.flatten_session_boundary_hour = flatten_session_boundary_hour
+        if min_hold_hours is None:
+            min_hold_hours = scalp_hold_hours if scalp_hold_hours is not None else 2.0
         self.min_hold_hours = float(min_hold_hours)
         hold_override = os.environ.get("LLM_MIN_HOLD_HOURS")
         if hold_override:
@@ -502,15 +513,12 @@ class LLMStrategistBacktester:
             except ValueError:
                 logger.warning("Invalid LLM_MIN_HOLD_HOURS=%s; using %.2f", hold_override, self.min_hold_hours)
         self.min_hold_hours = max(0.0, self.min_hold_hours)
+        if scalp_hold_hours is not None and (self.min_hold_hours <= 0 or self.min_hold_hours > scalp_hold_hours):
+            self.min_hold_hours = scalp_hold_hours
         self.min_hold_window = timedelta(hours=self.min_hold_hours)
         self.min_hold_bars = 0
-        if self.timeframes:
-            try:
-                base_seconds = timeframe_to_seconds(str(self.timeframes[0]))
-                if base_seconds > 0:
-                    self.min_hold_bars = int(math.ceil(self.min_hold_hours * 3600 / base_seconds))
-            except ValueError:
-                logger.warning("Invalid timeframe for min_hold_bars: %s", self.timeframes[0])
+        if self.base_timeframe_seconds > 0:
+            self.min_hold_bars = int(math.ceil(self.min_hold_hours * 3600 / self.base_timeframe_seconds))
         self.min_flat_hours = float(min_flat_hours)
         flat_override = os.environ.get("LLM_MIN_FLAT_HOURS")
         if flat_override:
@@ -533,6 +541,9 @@ class LLMStrategistBacktester:
         self.latest_factor_exposures: Dict[str, Dict[str, Any]] = {}
         self.auto_hedge_market = auto_hedge_market
         self.confidence_override_threshold = confidence_override_threshold
+        self.priority_skip_confidence_threshold = priority_skip_confidence_threshold
+        if self.priority_skip_confidence_threshold is None and self.is_scalp_profile:
+            self.priority_skip_confidence_threshold = "B"
 
         # Walk-away threshold: stop trading after hitting daily profit target
         self.walk_away_enabled = walk_away_enabled
@@ -564,8 +575,12 @@ class LLMStrategistBacktester:
         self.adaptive_replanning = adaptive_replanning
         self.judge_check_after_trades = max(1, judge_check_after_trades)
         self.use_judge_shim = use_judge_shim
+        if not self.use_judge_shim:
+            api_key = os.environ.get("OPENAI_API_KEY", "").strip().lower()
+            if not api_key or api_key in {"test", "dummy"}:
+                self.use_judge_shim = True
         # Initialize judge feedback service with transport if shimming
-        if use_judge_shim:
+        if self.use_judge_shim:
             judge_transport = make_judge_shim_transport()
         else:
             judge_transport = None
@@ -813,6 +828,62 @@ class LLMStrategistBacktester:
         suffix = timeframe[-1]
         value = int(timeframe[:-1])
         return value * units[suffix]
+
+    def _scalp_hold_bars(self, base_seconds: int) -> int:
+        if base_seconds <= 300:
+            return 1
+        if base_seconds <= 900:
+            return 2
+        return 3
+
+    def _ensure_plan_provider_compat(self, provider: StrategyPlanProvider) -> StrategyPlanProvider:
+        get_plan = getattr(provider, "get_plan", None)
+        if not callable(get_plan):
+            return provider
+        try:
+            signature = inspect.signature(get_plan)
+        except (TypeError, ValueError):
+            return provider
+        params = signature.parameters
+        has_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+        if has_kwargs or "use_vector_store" in params:
+            return provider
+
+        class _CompatProvider:
+            def __init__(self, wrapped: StrategyPlanProvider) -> None:
+                self._wrapped = wrapped
+
+            @property
+            def cost_tracker(self) -> LLMCostTracker:
+                return self._wrapped.cost_tracker
+
+            @property
+            def cache_dir(self) -> Path:
+                return self._wrapped.cache_dir
+
+            def get_plan(
+                self,
+                run_id: str,
+                plan_date: datetime,
+                llm_input: LLMInput,
+                prompt_template: str | None = None,
+                use_vector_store: bool = False,
+                event_ts: datetime | None = None,
+                emit_events: bool = True,
+            ) -> StrategyPlan:
+                return self._wrapped.get_plan(
+                    run_id,
+                    plan_date,
+                    llm_input,
+                    prompt_template=prompt_template,
+                    event_ts=event_ts,
+                    emit_events=emit_events,
+                )
+
+            def __getattr__(self, name: str):
+                return getattr(self._wrapped, name)
+
+        return _CompatProvider(provider)
 
     def _derive_higher_timeframes(self, base_timeframe: str) -> List[str]:
         """Derive commonly-used higher timeframes from a base timeframe.
@@ -2406,9 +2477,10 @@ class LLMStrategistBacktester:
                         risk_engine,
                         trade_risk=TradeRiskEvaluator(risk_engine),
                         confidence_override_threshold=self.confidence_override_threshold,
-                        min_hold_bars=0,
+                        min_hold_bars=self.min_hold_bars if self.is_scalp_profile else 0,
                         debug_sample_rate=self.debug_trigger_sample_rate,
                         debug_max_samples=self.debug_trigger_max_samples,
+                        priority_skip_confidence_threshold=self.priority_skip_confidence_threshold,
                     )
                 self.current_trigger_engine = trigger_engine
                 llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
@@ -3337,6 +3409,9 @@ class LLMStrategistBacktester:
             }
         if self.adaptive_replanning:
             summary["judge_feedback"] = {}
+            if self.use_judge_shim:
+                summary["judge_feedback"] = self._judge_feedback(summary)
+            summary["risk_adjustments"] = []
         else:
             raw_feedback = self._judge_feedback(summary)
             summary["judge_feedback"] = raw_feedback

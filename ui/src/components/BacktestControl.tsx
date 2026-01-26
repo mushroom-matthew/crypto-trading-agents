@@ -3,7 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info } from 'lucide-react';
 import { backtestAPI, promptsAPI, regimesAPI, type BacktestConfig } from '../lib/api';
-import { cn, formatCurrency, formatPercent, formatDateTime } from '../lib/utils';
+import { cn, formatCurrency, formatPercent, formatDateTime, numberOrFallback, parseOptionalNumber } from '../lib/utils';
 import { BACKTEST_PRESETS } from '../lib/presets';
 import { MarketTicker } from './MarketTicker';
 import { EventTimeline } from './EventTimeline';
@@ -477,10 +477,14 @@ export function BacktestControl() {
               <label className="block text-sm font-medium mb-2">Initial Cash</label>
               <input
                 type="number"
-                value={config.initial_cash}
-                onChange={(e) =>
-                  setConfig({ ...config, initial_cash: parseFloat(e.target.value) })
-                }
+                value={numberOrFallback(config.initial_cash, defaultConfig.initial_cash)}
+                onChange={(e) => {
+                  const next = parseOptionalNumber(e.target.value);
+                  if (next === undefined) {
+                    return;
+                  }
+                  setConfig({ ...config, initial_cash: next });
+                }}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 min="100"
                 step="100"
@@ -743,7 +747,7 @@ export function BacktestControl() {
             <h2 className="text-xl font-semibold mb-4">Performance Metrics</h2>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {results.final_equity !== undefined && (
+              {results.final_equity !== undefined && results.final_equity !== null && (
                 <MetricCard
                   label="Final Equity"
                   value={formatCurrency(results.final_equity)}
@@ -751,7 +755,7 @@ export function BacktestControl() {
                 />
               )}
 
-              {results.equity_return_pct !== undefined && (
+              {results.equity_return_pct !== undefined && results.equity_return_pct !== null && (
                 <MetricCard
                   label="Return"
                   value={formatPercent(results.equity_return_pct)}
@@ -767,7 +771,7 @@ export function BacktestControl() {
                 />
               )}
 
-              {results.max_drawdown_pct !== undefined && (
+              {results.max_drawdown_pct !== undefined && results.max_drawdown_pct !== null && (
                 <MetricCard
                   label="Max Drawdown"
                   value={formatPercent(results.max_drawdown_pct)}
@@ -776,7 +780,7 @@ export function BacktestControl() {
                 />
               )}
 
-              {results.win_rate !== undefined && (
+              {results.win_rate !== undefined && results.win_rate !== null && (
                 <MetricCard
                   label="Win Rate"
                   value={formatPercent(results.win_rate)}
@@ -788,7 +792,7 @@ export function BacktestControl() {
                 <MetricCard label="Total Trades" value={results.total_trades.toString()} />
               )}
 
-              {results.profit_factor !== undefined && (
+              {results.profit_factor !== undefined && results.profit_factor !== null && (
                 <MetricCard
                   label="Profit Factor"
                   value={results.profit_factor.toFixed(2)}
