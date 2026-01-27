@@ -29,7 +29,7 @@ export function formatPercent(value: number | null | undefined, decimals = 2): s
 }
 
 export function numberOrFallback(value: number | null | undefined, fallback: number): number {
-  return Number.isFinite(value) ? value : fallback;
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 export function parseOptionalNumber(value: string): number | undefined {
