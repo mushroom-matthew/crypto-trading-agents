@@ -26,6 +26,7 @@ from agents.analytics import (
     precompute_indicator_frame,
     snapshot_from_frame,
     compute_portfolio_state,
+    scalper_config,
 )
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import LLMCostTracker, StrategyPlanProvider
@@ -450,7 +451,7 @@ class LLMStrategistBacktester:
         self.run_registry = run_registry or strategy_run_registry
         self.plan_service = StrategistPlanService(plan_provider=self.plan_provider, registry=self.run_registry)
         self._event_store = EventStore()
-        self.window_configs = {tf: IndicatorWindowConfig(timeframe=tf) for tf in self.timeframes}
+        self.window_configs = {tf: self._config_for_timeframe(tf) for tf in self.timeframes}
         self.indicator_frames = self._precompute_indicator_frames()
         self.indicator_debug_mode = (indicator_debug_mode or "off").strip().lower()
         self.indicator_debug_keys = [key for key in (indicator_debug_keys or []) if key]
@@ -822,6 +823,17 @@ class LLMStrategistBacktester:
             if timeframe not in tf_map:
                 tf_map[timeframe] = self._resample_timeframe(base_df, base_tf, timeframe)
         return tf_map
+
+    def _config_for_timeframe(self, timeframe: str) -> IndicatorWindowConfig:
+        """Return optimized indicator config for the given timeframe.
+
+        Uses scalper_config for fast timeframes (15m and below) to enable
+        fast indicators (EMA5/8, EWMA vol, VWAP, vol_burst).
+        """
+        seconds = self._timeframe_seconds(timeframe)
+        if seconds <= 900:  # 15m or faster
+            return scalper_config(timeframe)
+        return IndicatorWindowConfig(timeframe=timeframe)
 
     def _timeframe_seconds(self, timeframe: str) -> int:
         units = {"m": 60, "h": 3600, "d": 86400}

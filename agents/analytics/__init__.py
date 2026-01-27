@@ -6,6 +6,7 @@ from .indicator_snapshots import (
     compute_indicator_matrix,
     compute_indicator_snapshot,
     precompute_indicator_frame,
+    scalper_config,
     snapshot_from_frame,
 )
 from .factors import (
@@ -33,6 +34,7 @@ __all__ = [
     "compute_indicator_matrix",
     "compute_indicator_snapshot",
     "precompute_indicator_frame",
+    "scalper_config",
     "snapshot_from_frame",
     "FactorExposure",
     "compute_factor_loadings",

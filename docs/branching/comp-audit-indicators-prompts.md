@@ -95,6 +95,9 @@ git commit -m "Indicators: fast presets, Donchian highs/lows, optimized compute"
   - **prompts/llm_strategist_prompt.txt**: Added scalper-specific guidance for fast indicators.
   - **prompts/strategies/volatility_breakout.txt**: Added vol_burst examples.
   - **prompts/strategies/scalper_fast.txt**: New scalper strategy template.
+- 2026-01-26: Auto-enable scalper_config for fast timeframes in backtester.
+  - **agents/analytics/__init__.py**: Export `scalper_config` function.
+  - **backtesting/llm_strategist_runner.py**: Added `_config_for_timeframe()` method that auto-selects `scalper_config()` for timeframes ≤15m. This ensures fast indicators are computed with optimized parameters for scalper runs.
 
 ## Test Evidence (append results before commit)
 ```
