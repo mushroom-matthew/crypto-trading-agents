@@ -135,5 +135,46 @@ vwap (window=20): 39533.57
 ```
 
 ## Human Verification Evidence (append results before commit when required)
-Pending: Run short backtest with fast indicator preset to verify indicators compute without errors.
+
+### Backtest: backtest-29d0261f-551d-42b6-acf2-d542e176e2a0
+- **Date range**: Jan 31 - Feb 2, 2024
+- **Symbols**: BTC-USD, ETH-USD
+- **Timeframes**: 15m, 30m, 1h, 2h, 4h, 8h, 1d
+
+#### Fast Indicator Usage (CONFIRMED)
+```
+ema_fast: 46 occurrences in trigger rules
+ema_very_fast: 46 occurrences
+vwap_distance_pct: 29 occurrences
+vol_burst: 8 occurrences
+```
+
+#### Slow Indicator Usage (CONFIRMED ZERO)
+```
+sma_medium: 0 occurrences
+sma_short: 0 occurrences
+sma_long: 0 occurrences
+```
+
+#### Sample Trigger Rules Generated
+```
+trigger_1 (mean_reversion): vwap_distance_pct < -0.5 and ema_fast < ema_very_fast and position == 'flat'
+trigger_3 (volatility_breakout): close > donchian_upper_short and vol_burst == true and ema_fast > ema_very_fast
+```
+
+#### Performance vs Previous (OLD backtest bb630623, same period style)
+| Metric | OLD (no fast) | NEW (with fast) |
+|--------|---------------|-----------------|
+| Fast indicators used | 0 | 46+ |
+| Slow indicators used | 10 | 0 |
+| Trades | 48 | 15 |
+| Win rate | 45.8% | 46.7% |
+| Total PnL | -$7.19 | -$2.28 |
+
+#### Verdict
+- Fast indicators ARE being used correctly
+- Slow indicators are NOT being used
+- Scalper prompt auto-loads for 15m timeframe
+- More selective trading (fewer trades, similar win rate, better PnL)
+- Donchian bands confirmed using high/low (see test evidence above)
 
