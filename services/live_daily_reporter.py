@@ -19,6 +19,8 @@ async def generate_live_daily_report(
     db: AsyncSession,
     date: str,
     run_id: Optional[str] = None,
+    equity: Optional[float] = None,
+    budget_pct: float = 5.0,
 ) -> Dict[str, Any]:
     """Generate backtest-style daily report for live trading.
 
@@ -26,13 +28,16 @@ async def generate_live_daily_report(
         db: Database session
         date: Date in YYYY-MM-DD format
         run_id: Optional run ID to filter by (defaults to latest run)
+        equity: Current portfolio equity for dynamic budget calculation.
+            If None, falls back to $10,000 default.
+        budget_pct: Daily risk budget as percentage of equity (default 5%).
 
     Returns:
         Dict matching backtest daily report format with:
         - trade_count: Number of filled orders
         - blocks: Total blocks
         - block_breakdown: Blocks by reason
-        - risk_budget: Budget used/available
+        - risk_budget: Budget used/available (scales with equity)
         - pnl: Profit/loss metrics
         - win_rate: Win percentage
     """
@@ -101,8 +106,9 @@ async def generate_live_daily_report(
     # Risk budget metrics
     total_claimed = sum(Decimal(str(r.claim_amount)) for r in risk_allocations)
 
-    # TODO: Get actual budget from config (hardcoded for now)
-    risk_budget_abs = Decimal("1000.0")
+    # Compute budget from equity * budget_pct (scales with portfolio size)
+    effective_equity = Decimal(str(equity)) if equity else Decimal("10000.0")
+    risk_budget_abs = effective_equity * Decimal(str(budget_pct)) / Decimal("100")
     risk_used_abs = float(total_claimed)
     risk_used_pct = float(total_claimed / risk_budget_abs * 100) if risk_budget_abs > 0 else 0.0
     risk_available_abs = float(risk_budget_abs - total_claimed)

@@ -49,9 +49,13 @@ class PerformanceReport:
 
 class PerformanceAnalyzer:
     """Analyzes trading performance and generates evaluation reports."""
-    
-    def __init__(self):
+
+    # Annualization factor: 365 for crypto (24/7 markets), 252 for equities
+    DEFAULT_ANNUALIZATION_FACTOR = 365
+
+    def __init__(self, annualization_factor: int = DEFAULT_ANNUALIZATION_FACTOR):
         self.risk_free_rate = 0.02  # 2% annual risk-free rate
+        self.annualization_factor = annualization_factor
     
     def calculate_returns(self, transactions: List[Dict]) -> List[float]:
         """Calculate period returns from transaction history."""
@@ -77,21 +81,24 @@ class PerformanceAnalyzer:
         return returns
     
     def calculate_sharpe_ratio(self, returns: List[float]) -> float:
-        """Calculate Sharpe ratio from returns."""
+        """Calculate Sharpe ratio from returns.
+
+        Uses configurable annualization factor (default 365 for crypto).
+        """
         if not returns or len(returns) < 2:
             return 0.0
-        
+
         mean_return = sum(returns) / len(returns)
         variance = sum((r - mean_return) ** 2 for r in returns) / (len(returns) - 1)
         std_dev = math.sqrt(variance) if variance > 0 else 0
-        
+
         if std_dev == 0:
             return 0.0
-        
-        # Annualize assuming daily returns
-        annual_return = mean_return * 252
-        annual_std = std_dev * math.sqrt(252)
-        
+
+        # Annualize assuming daily returns (365 for crypto, 252 for equities)
+        annual_return = mean_return * self.annualization_factor
+        annual_std = std_dev * math.sqrt(self.annualization_factor)
+
         return (annual_return - self.risk_free_rate) / annual_std
     
     def calculate_max_drawdown(self, portfolio_values: List[float]) -> float:

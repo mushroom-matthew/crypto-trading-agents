@@ -32,6 +32,15 @@ def _window_change(series: pd.Series, start: datetime) -> float:
 
 
 def _win_rate_and_profit_factor(trades: pd.DataFrame | None, start: datetime) -> tuple[float, float]:
+    """Compute win rate and profit factor from trade log.
+
+    Win/loss thresholds match trading_core.trade_quality.compute_trade_metrics:
+    - Win: pnl > 0.01 (small threshold to filter noise)
+    - Loss: pnl < -0.01
+    - Breakeven: abs(pnl) <= 0.01
+
+    This ensures consistency between backtest and live metrics.
+    """
     if trades is None or trades.empty:
         return 0.0, 0.0
     df = trades.copy()
@@ -44,9 +53,10 @@ def _win_rate_and_profit_factor(trades: pd.DataFrame | None, start: datetime) ->
     if df.empty or "pnl" not in df.columns:
         return 0.0, 0.0
     pnl = df["pnl"].astype(float)
-    wins = pnl[pnl > 0]
-    losses = pnl[pnl < 0]
-    total = len(pnl)
+    # Use 0.01 threshold to match trade_quality.py
+    wins = pnl[pnl > 0.01]
+    losses = pnl[pnl < -0.01]
+    total = len(pnl[abs(pnl) > 0.01])  # Exclude breakeven trades from denominator
     win_rate = len(wins) / total if total else 0.0
     gross_profit = wins.sum()
     gross_loss = abs(losses.sum())

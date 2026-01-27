@@ -505,12 +505,15 @@ class ExecutionLedgerWorkflow:
     def get_risk_metrics(self) -> Dict[str, float]:
         """Calculate current risk metrics."""
         total_portfolio_value = float(self.cash)
-        
+        total_exposure = 0.0
+
         # Add position values
         for symbol, qty in self.positions.items():
             price = float(self.last_price.get(symbol, Decimal("0")))
-            total_portfolio_value += float(qty) * price
-        
+            position_value = float(qty) * price
+            total_portfolio_value += position_value
+            total_exposure += abs(position_value)
+
         # Calculate position concentration
         position_concentrations = {}
         for symbol, qty in self.positions.items():
@@ -518,18 +521,21 @@ class ExecutionLedgerWorkflow:
             position_value = float(qty) * price
             concentration = position_value / total_portfolio_value if total_portfolio_value > 0 else 0
             position_concentrations[symbol] = concentration
-        
+
         max_position_concentration = max(position_concentrations.values()) if position_concentrations else 0.0
         max_position_concentration = max(0.0, min(1.0, max_position_concentration))
         raw_ratio = float(self.cash) / total_portfolio_value if total_portfolio_value > 0 else 1.0
         cash_ratio = max(0.0, min(1.0, raw_ratio))
-        
+
+        # Leverage = total exposure / equity (portfolio value)
+        leverage = total_exposure / total_portfolio_value if total_portfolio_value > 0 else 0.0
+
         return {
             "total_portfolio_value": total_portfolio_value,
             "cash_ratio": cash_ratio,
             "max_position_concentration": max_position_concentration,
             "num_positions": len(self.positions),
-            "leverage": 1.0  # Assuming no leverage for now
+            "leverage": leverage
         }
     
     @workflow.query
@@ -557,15 +563,18 @@ class ExecutionLedgerWorkflow:
     def get_risk_metrics_with_live_prices(self, live_prices: Dict[str, float]) -> Dict[str, float]:
         """Calculate current risk metrics using live market prices."""
         total_portfolio_value = float(self.cash)
-        
+        total_exposure = 0.0
+
         # Add position values using live prices
         for symbol, qty in self.positions.items():
             if live_prices and symbol in live_prices:
                 price = live_prices[symbol]
             else:
                 price = float(self.last_price.get(symbol, Decimal("0")))
-            total_portfolio_value += float(qty) * price
-        
+            position_value = float(qty) * price
+            total_portfolio_value += position_value
+            total_exposure += abs(position_value)
+
         # Calculate position concentration
         position_concentrations = {}
         for symbol, qty in self.positions.items():
@@ -576,16 +585,19 @@ class ExecutionLedgerWorkflow:
             position_value = float(qty) * price
             concentration = position_value / total_portfolio_value if total_portfolio_value > 0 else 0
             position_concentrations[symbol] = concentration
-        
+
         max_position_concentration = max(position_concentrations.values()) if position_concentrations else 0.0
         cash_ratio = float(self.cash) / total_portfolio_value if total_portfolio_value > 0 else 1.0
-        
+
+        # Leverage = total exposure / equity (portfolio value)
+        leverage = total_exposure / total_portfolio_value if total_portfolio_value > 0 else 0.0
+
         return {
             "total_portfolio_value": total_portfolio_value,
             "cash_ratio": cash_ratio,
             "max_position_concentration": max_position_concentration,
             "num_positions": len(self.positions),
-            "leverage": 1.0  # Assuming no leverage for now
+            "leverage": leverage
         }
 
     @workflow.run
