@@ -1,4 +1,4 @@
-# Branch: comp-audit-risk-followups (later)
+# Branch: comp-audit-risk-followups
 
 ## Purpose
 Track follow-ups discovered during comp-audit-risk-core that were explicitly out of scope (risk-budget test failure and LLM scale-in/short-stop alignment).
@@ -85,8 +85,55 @@ git commit -m "Risk follow-ups: budget reset + short stop + scale-in"
 ```
 
 ## Change Log (update during implementation)
-- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+
+### 2026-01-27: Implementation Complete
+1. **Test Fix** (`tests/risk/test_daily_budget_reset.py`)
+   - Added `bt.initial_cash = 1000.0` to the `_bt_stub()` function
+   - Fix: The test stub used `__new__` without `__init__`, so `initial_cash` was never set
+
+2. **Short Stop Requirement** (prompts)
+   - `prompts/strategy_plan_schema.txt`: Added `stop_loss_pct` to trigger schema with clear requirement for shorts
+   - `prompts/llm_strategist_prompt.txt`: Added short entry stop_loss_pct requirement to position gating section
+   - `prompts/strategies/aggressive_active.txt`: Added explicit short stop_loss_pct requirement
+
+3. **Scale-in Documentation** (`prompts/llm_strategist_prompt.txt`)
+   - Documented that scale-ins ARE allowed, subject to aggregate risk limits
+   - Existing position risk is subtracted from risk cap
+   - Scale-ins blocked when aggregate risk would exceed max_position_risk_pct
+   - Users can prevent scale-ins by using `position == 'flat'` instead of `position != 'short'`
+
+### Files Modified
+- `tests/risk/test_daily_budget_reset.py` - Added initial_cash to stub
+- `prompts/strategy_plan_schema.txt` - stop_loss_pct requirement for shorts
+- `prompts/llm_strategist_prompt.txt` - Short stop + scale-in documentation
+- `prompts/strategies/aggressive_active.txt` - Short stop requirement
 
 ## Test Evidence (append results before commit)
 
+```
+$ uv run pytest tests/risk/ tests/test_trigger_engine.py -vv
+============================= test session starts ==============================
+collected 14 items
+
+tests/risk/test_budget_base_equity.py::test_budget_abs_uses_start_of_day_equity PASSED
+tests/risk/test_budget_base_equity.py::test_first_trade_starts_at_zero_usage PASSED
+tests/risk/test_daily_budget_reset.py::test_day_two_not_blocked_by_day_one_usage PASSED
+tests/risk/test_daily_budget_reset.py::test_day_usage_blocks_when_budget_exhausted_same_day PASSED
+tests/risk/test_daily_budget_reset.py::test_used_pct_monotone_and_bounded PASSED
+tests/risk/test_daily_loss_anchor.py::test_anchor_not_reset_intraday PASSED
+tests/risk/test_daily_loss_anchor.py::test_anchor_resets_on_new_day PASSED
+tests/risk/test_exit_bypass.py::test_exit_does_nothing_when_flat PASSED
+tests/risk/test_exit_bypass.py::test_exit_flattens_when_position_exists PASSED
+tests/risk/test_risk_at_stop.py::test_stop_distance_expands_notional_to_match_risk_cap PASSED
+tests/risk/test_risk_at_stop.py::test_no_stop_uses_notional_cap PASSED
+tests/risk/test_risk_at_stop.py::test_tighter_stop_allows_larger_size PASSED
+tests/test_trigger_engine.py::test_trigger_engine_records_block_when_risk_denies_entry PASSED
+tests/test_trigger_engine.py::test_emergency_exit_trigger_bypasses_risk_checks PASSED
+
+======================== 14 passed, 1 warning in 8.98s =========================
+```
+
 ## Human Verification Evidence (append results before commit when required)
+
+Human verification deferred - requires running LLM backtest with short triggers.
+Implementation is code-complete and tested; prompts now require stop_loss_pct for shorts and document scale-in behavior.

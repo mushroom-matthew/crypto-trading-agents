@@ -26,6 +26,7 @@ def _bt_stub() -> LLMStrategistBacktester:
     bt.active_risk_limits = type("Limits", (), {"max_position_risk_pct": 1.0})()
     bt.sizing_targets = {}
     bt.latest_daily_summary = {"risk_budget": {"used_pct": 100.0}}
+    bt.initial_cash = 1000.0  # Required fallback for _risk_budget_allowance
     return bt
 
 

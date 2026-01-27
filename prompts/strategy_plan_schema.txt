@@ -24,6 +24,11 @@ Trigger schema (each item in triggers MUST include these keys):
 - timeframe (e.g., "1h")
 - entry_rule (string expression - NO subscript syntax like indicator[-1])
 - exit_rule (string expression - NO subscript syntax like indicator[-1], can be empty for emergency exit)
+- stop_loss_pct (REQUIRED for short entries): percentage-based stop distance (e.g., 2.0 means 2% stop)
+
+IMPORTANT - Short entries:
+- All short triggers MUST include stop_loss_pct. Short entries without stop_loss_pct will be BLOCKED.
+- Example short trigger: {"direction": "short", "stop_loss_pct": 2.5, ...}
 
 Do NOT use these keys in triggers: type, risk_grade.
 

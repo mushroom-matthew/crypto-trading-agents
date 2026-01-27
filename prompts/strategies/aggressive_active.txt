@@ -101,7 +101,11 @@ Trigger Permissiveness (IMPORTANT for active trading):
 
 Position Gating (REQUIRED in all entry_rules):
 - For long entries: include "position != 'long'" (prefer "position == 'flat'")
-- For short entries: include "position != 'short'" (prefer "position == 'flat'")
+- For short entries: include "position != 'short'" (prefer "position == 'flat'") AND must include stop_loss_pct (e.g., 2.0 for 2% stop)
 - For exit/flat rules: include "position != 'flat'"
+
+Short Entry Requirement:
+- All short triggers MUST include stop_loss_pct. Example: {"direction": "short", "stop_loss_pct": 2.5, ...}
+- Shorts without stop_loss_pct will be BLOCKED by the risk engine.
 
 Response Format: Valid JSON StrategyPlan with many diverse triggers and aggressive risk parameters.
