@@ -42,6 +42,8 @@ NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like
 - entry_rule = "close > donchian_upper_short and atr_14 > tf_4h_atr_14 * 0.8 and tf_1h_atr_14 > tf_4h_atr_14 and rsi_14 > 55"
 - entry_rule = "bollinger_bandwidth < bollinger_bandwidth_ma * 0.8 and close > bollinger_upper"
 - entry_rule = "high - low > atr_14 * 1.5 and close > open and close > sma_short"
+- entry_rule = "close > donchian_upper_short and vol_burst == true and ewma_vol > realized_vol_short * 1.2"
+- entry_rule = "vwap_distance_pct > 0.5 and vol_burst == true and ema_fast > ema_very_fast"
 
 VALID exit_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
 NOTE: Do NOT use subscript syntax like indicator[-1]. Use current values and cross-indicator logic.

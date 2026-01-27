@@ -89,9 +89,46 @@ git commit -m "Indicators: fast presets, Donchian highs/lows, optimized compute"
 ```
 
 ## Change Log (update during implementation)
-- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+- 2026-01-26: Implemented fast indicator presets and Donchian high/low fix.
+  - **agents/analytics/indicator_snapshots.py**: Fixed Donchian bands to use high/low instead of close. Added `scalper_config()` factory, fast indicator fields (ema_fast, ema_very_fast, realized_vol_fast, ewma_vol, vwap, vwap_distance_pct, vol_burst), EWMA volatility helpers.
+  - **schemas/llm_strategist.py**: Added new IndicatorSnapshot fields for fast indicators.
+  - **prompts/llm_strategist_prompt.txt**: Added scalper-specific guidance for fast indicators.
+  - **prompts/strategies/volatility_breakout.txt**: Added vol_burst examples.
+  - **prompts/strategies/scalper_fast.txt**: New scalper strategy template.
 
 ## Test Evidence (append results before commit)
+```
+$ uv run pytest -k indicator -vv
+tests/test_strategy_executor.py::test_indicator_helpers PASSED
+1 passed, 226 deselected
+
+$ uv run pytest -k technical -vv
+tests/test_metrics_tools.py::test_list_technical_metrics_tool PASSED
+tests/test_metrics_tools.py::test_compute_technical_metrics_from_sample_csv PASSED
+2 passed, 225 deselected
+
+$ uv run python -c "from agents.analytics import indicator_snapshots; from metrics import technical"
+Imports successful
+
+# Verification of new fast indicators:
+=== Standard Config ===
+close: 39480.77
+ema_fast: 39493.80
+ema_very_fast: 39504.39
+vwap: 39674.75
+vwap_distance_pct: -0.49%
+vol_burst: False
+ewma_vol: 0.000772
+realized_vol_fast: 0.000783
+donchian_upper_short: 39630.09 (now uses high)
+donchian_lower_short: 39447.90 (now uses low)
+
+=== Scalper Config ===
+ema_fast (period=3): 39486.76
+ema_very_fast (period=5): 39493.80
+vwap (window=20): 39533.57
+```
 
 ## Human Verification Evidence (append results before commit when required)
+Pending: Run short backtest with fast indicator preset to verify indicators compute without errors.
 

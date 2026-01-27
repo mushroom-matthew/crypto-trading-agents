@@ -33,6 +33,40 @@ class IndicatorWindowConfig:
     macd_signal: int = 9
     cycle_window: int = 200
     swing_lookback: int = 100
+    # Fast indicator presets for scalpers
+    ema_fast: int = 5
+    ema_very_fast: int = 8
+    realized_vol_fast: int = 10
+    ewma_vol_span: int = 10
+    vwap_window: int | None = None  # None = cumulative VWAP
+    vol_burst_threshold: float = 1.5  # volume_multiple threshold for burst detection
+
+
+def scalper_config(timeframe: str) -> IndicatorWindowConfig:
+    """Return optimized config for scalper (1m/5m) timeframes."""
+    return IndicatorWindowConfig(
+        timeframe=timeframe,
+        short_window=10,
+        medium_window=20,
+        long_window=50,
+        rsi_period=7,
+        atr_period=7,
+        roc_short=5,
+        roc_medium=10,
+        realized_vol_short=10,
+        realized_vol_medium=20,
+        macd_fast=6,
+        macd_slow=13,
+        macd_signal=5,
+        cycle_window=50,
+        swing_lookback=30,
+        ema_fast=3,
+        ema_very_fast=5,
+        realized_vol_fast=5,
+        ewma_vol_span=5,
+        vwap_window=20,
+        vol_burst_threshold=1.3,
+    )
 
 
 def _ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
@@ -92,6 +126,36 @@ def _roc_series(series: pd.Series, period: int) -> pd.Series:
 def _realized_vol_series(series: pd.Series, window: int) -> pd.Series:
     log_returns = np.log(series / series.shift())
     return log_returns.rolling(window=window, min_periods=window).std(ddof=0)
+
+
+def _ewma_vol(series: pd.Series, span: int) -> float | None:
+    """Compute exponentially weighted moving average volatility."""
+    log_returns = np.log(series / series.shift()).dropna()
+    if len(log_returns) < span:
+        return None
+    ewma_var = log_returns.ewm(span=span, adjust=False).var()
+    return float(np.sqrt(ewma_var.iloc[-1])) if not pd.isna(ewma_var.iloc[-1]) else None
+
+
+def _ewma_vol_series(series: pd.Series, span: int) -> pd.Series:
+    """Compute EWMA volatility series."""
+    log_returns = np.log(series / series.shift())
+    ewma_var = log_returns.ewm(span=span, adjust=False).var()
+    return np.sqrt(ewma_var)
+
+
+def _vol_burst(volume_multiple: float | None, threshold: float) -> bool:
+    """Detect volume burst (spike above threshold)."""
+    if volume_multiple is None:
+        return False
+    return volume_multiple >= threshold
+
+
+def _vwap_distance(close: float, vwap: float | None) -> float | None:
+    """Compute percentage distance from VWAP."""
+    if vwap is None or vwap == 0:
+        return None
+    return (close - vwap) / vwap * 100.0
 
 
 def _cycle_indicator_series(
@@ -288,8 +352,8 @@ def compute_indicator_snapshot(
     boll = tech.bollinger_bands(prepared, period=window.short_window, mult=2.0)
     boll_upper = _latest(boll.series_list[1].series)
     boll_lower = _latest(boll.series_list[2].series)
-    donchian_upper = float(close.tail(window.short_window).max()) if len(close) >= window.short_window else None
-    donchian_lower = float(close.tail(window.short_window).min()) if len(close) >= window.short_window else None
+    donchian_upper = float(high.tail(window.short_window).max()) if len(high) >= window.short_window else None
+    donchian_lower = float(low.tail(window.short_window).min()) if len(low) >= window.short_window else None
     roc_short = _roc(close, window.roc_short)
     roc_medium = _roc(close, window.roc_medium)
     realized_short = _realized_vol(close, window.realized_vol_short)
@@ -313,6 +377,20 @@ def compute_indicator_snapshot(
     expansion_pct, contraction_pct, exp_cont_ratio = _expansion_contraction(
         high, low, lookback=window.swing_lookback
     )
+
+    # Fast indicators for scalpers
+    ema_fast_val = _result_to_value(tech.ema(prepared, period=window.ema_fast))
+    ema_very_fast_val = _result_to_value(tech.ema(prepared, period=window.ema_very_fast))
+    realized_fast = _realized_vol(close, window.realized_vol_fast)
+    ewma_vol_val = _ewma_vol(close, window.ewma_vol_span)
+
+    # VWAP calculation
+    vwap_result = tech.vwap(prepared, window=window.vwap_window)
+    vwap_val = _result_to_value(vwap_result)
+    vwap_dist = _vwap_distance(float(close.iloc[-1]), vwap_val)
+
+    # Volume burst detection
+    vol_burst_flag = _vol_burst(volume_multiple, window.vol_burst_threshold)
 
     as_of = prepared["timestamp"].iloc[-1].to_pydatetime()
     return IndicatorSnapshot(
@@ -352,6 +430,14 @@ def compute_indicator_snapshot(
         last_expansion_pct=expansion_pct,
         last_contraction_pct=contraction_pct,
         expansion_contraction_ratio=exp_cont_ratio,
+        # Fast indicators for scalpers
+        ema_fast=ema_fast_val,
+        ema_very_fast=ema_very_fast_val,
+        realized_vol_fast=realized_fast,
+        ewma_vol=ewma_vol_val,
+        vwap=vwap_val,
+        vwap_distance_pct=vwap_dist,
+        vol_burst=vol_burst_flag,
     )
 
 
@@ -381,8 +467,8 @@ def precompute_indicator_frame(
     boll = tech.bollinger_bands(prepared, period=window.short_window, mult=2.0)
     boll_upper = boll.series_list[1].series
     boll_lower = boll.series_list[2].series
-    donchian_upper = close.rolling(window=window.short_window, min_periods=window.short_window).max()
-    donchian_lower = close.rolling(window=window.short_window, min_periods=window.short_window).min()
+    donchian_upper = high.rolling(window=window.short_window, min_periods=window.short_window).max()
+    donchian_lower = low.rolling(window=window.short_window, min_periods=window.short_window).min()
     roc_short = _roc_series(close, window.roc_short)
     roc_medium = _roc_series(close, window.roc_medium)
     realized_short = _realized_vol_series(close, window.realized_vol_short)
@@ -406,6 +492,19 @@ def precompute_indicator_frame(
     expansion_pct, contraction_pct, exp_ratio = _expansion_contraction_series(
         high, low, lookback=window.swing_lookback
     )
+
+    # Fast indicators for scalpers
+    ema_fast = tech.ema(prepared, period=window.ema_fast).series_list[0].series
+    ema_very_fast = tech.ema(prepared, period=window.ema_very_fast).series_list[0].series
+    realized_fast = _realized_vol_series(close, window.realized_vol_fast)
+    ewma_vol = _ewma_vol_series(close, window.ewma_vol_span)
+
+    # VWAP calculation
+    vwap_series = tech.vwap(prepared, window=window.vwap_window).series_list[0].series
+    vwap_distance_pct = (close - vwap_series) / vwap_series.replace(0.0, np.nan) * 100.0
+
+    # Volume burst detection
+    vol_burst = volume_multiple >= window.vol_burst_threshold
 
     frame = pd.DataFrame(
         {
@@ -443,6 +542,14 @@ def precompute_indicator_frame(
             "last_expansion_pct": expansion_pct,
             "last_contraction_pct": contraction_pct,
             "expansion_contraction_ratio": exp_ratio,
+            # Fast indicators for scalpers
+            "ema_fast": ema_fast,
+            "ema_very_fast": ema_very_fast,
+            "realized_vol_fast": realized_fast,
+            "ewma_vol": ewma_vol,
+            "vwap": vwap_series,
+            "vwap_distance_pct": vwap_distance_pct,
+            "vol_burst": vol_burst,
         }
     )
     frame.set_index("timestamp", inplace=True)
@@ -453,6 +560,12 @@ def _optional_float(value: Any) -> float | None:
     if value is None or pd.isna(value):
         return None
     return float(value)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    return bool(value)
 
 
 def snapshot_from_frame(
@@ -523,6 +636,14 @@ def snapshot_from_frame(
         last_expansion_pct=_optional_float(row.get("last_expansion_pct")),
         last_contraction_pct=_optional_float(row.get("last_contraction_pct")),
         expansion_contraction_ratio=_optional_float(row.get("expansion_contraction_ratio")),
+        # Fast indicators for scalpers
+        ema_fast=_optional_float(row.get("ema_fast")),
+        ema_very_fast=_optional_float(row.get("ema_very_fast")),
+        realized_vol_fast=_optional_float(row.get("realized_vol_fast")),
+        ewma_vol=_optional_float(row.get("ewma_vol")),
+        vwap=_optional_float(row.get("vwap")),
+        vwap_distance_pct=_optional_float(row.get("vwap_distance_pct")),
+        vol_burst=_optional_bool(row.get("vol_burst")),
     )
 
 

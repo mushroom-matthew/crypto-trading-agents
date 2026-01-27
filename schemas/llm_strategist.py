@@ -64,6 +64,14 @@ class IndicatorSnapshot(SerializableModel):
     last_expansion_pct: float | None = None
     last_contraction_pct: float | None = None
     expansion_contraction_ratio: float | None = None
+    # Fast indicators for scalpers (5m/1m timeframes)
+    ema_fast: float | None = None  # EMA 5
+    ema_very_fast: float | None = None  # EMA 8
+    realized_vol_fast: float | None = None  # Fast vol window (10 or less)
+    ewma_vol: float | None = None  # EWMA volatility
+    vwap: float | None = None  # Volume-weighted average price
+    vwap_distance_pct: float | None = None  # Distance from VWAP as %
+    vol_burst: bool | None = None  # True when volume_multiple >= threshold
 
 
 class AssetState(SerializableModel):

@@ -64,7 +64,17 @@ Available signal inputs:
 - Cycle indicators (200-bar window): cycle_high_200, cycle_low_200, cycle_range_200, cycle_position (0=at low, 1=at high).
 - Fibonacci retracement levels (from cycle high/low): fib_236, fib_382, fib_500, fib_618, fib_786.
 - Expansion/contraction ratios: last_expansion_pct (swing low→high %), last_contraction_pct (swing high→low %), expansion_contraction_ratio.
+- Fast scalper indicators (5m/1m timeframes): ema_fast (EMA 5), ema_very_fast (EMA 8), realized_vol_fast (fast vol window), ewma_vol (EWMA volatility).
+- VWAP signals: vwap (volume-weighted average price), vwap_distance_pct (% distance from VWAP - positive=above, negative=below).
+- Volume burst detection: vol_burst (true when volume_multiple >= burst threshold, typically 1.3-1.5x average).
 - Optional context in global_context and market_structure. Use it only if present.
+
+Scalper-specific guidance (when using 5m or 1m timeframes):
+- Prefer fast EMAs (ema_fast, ema_very_fast) over standard short EMAs for faster signal response.
+- Use ewma_vol instead of realized_vol_short for more reactive volatility measurement.
+- VWAP mean-reversion: entries when vwap_distance_pct < -1.0 (price below VWAP), exits when vwap_distance_pct > 1.0.
+- Volume burst confirmation: require vol_burst == true for breakout entries to confirm institutional participation.
+- Tighter volatility gates: use ewma_vol or realized_vol_fast instead of longer-window volatility metrics.
 
 Optional market-structure telemetry (use if present):
 - market_structure[SYMBOL] or global_context.market_structure[SYMBOL] may include nearest_support/resistance, distance_to_support_pct, distance_to_resistance_pct, trend, support_levels, resistance_levels, recent_tests.
