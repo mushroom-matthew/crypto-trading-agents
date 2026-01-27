@@ -478,10 +478,13 @@ class LLMStrategistBacktester:
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
         self.strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
         # Use strategy_prompt directly if provided, otherwise load from file path
+        # Auto-select scalper prompt for fast timeframes when no explicit prompt given
         if strategy_prompt:
             self.prompt_template = strategy_prompt
         elif prompt_template_path and prompt_template_path.exists():
             self.prompt_template = prompt_template_path.read_text()
+        elif self._has_fast_timeframes():
+            self.prompt_template = self._load_scalper_prompt()
         else:
             self.prompt_template = None
         self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -823,6 +826,20 @@ class LLMStrategistBacktester:
             if timeframe not in tf_map:
                 tf_map[timeframe] = self._resample_timeframe(base_df, base_tf, timeframe)
         return tf_map
+
+    def _has_fast_timeframes(self) -> bool:
+        """Check if any configured timeframe is fast (15m or below)."""
+        for tf in self.timeframes:
+            if self._timeframe_seconds(tf) <= 900:  # 15m or faster
+                return True
+        return False
+
+    def _load_scalper_prompt(self) -> str | None:
+        """Load the scalper_fast.txt prompt template for fast timeframe runs."""
+        scalper_prompt_path = Path(__file__).parent.parent / "prompts" / "strategies" / "scalper_fast.txt"
+        if scalper_prompt_path.exists():
+            return scalper_prompt_path.read_text()
+        return None
 
     def _config_for_timeframe(self, timeframe: str) -> IndicatorWindowConfig:
         """Return optimized indicator config for the given timeframe.

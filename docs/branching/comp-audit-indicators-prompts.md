@@ -98,6 +98,8 @@ git commit -m "Indicators: fast presets, Donchian highs/lows, optimized compute"
 - 2026-01-26: Auto-enable scalper_config for fast timeframes in backtester.
   - **agents/analytics/__init__.py**: Export `scalper_config` function.
   - **backtesting/llm_strategist_runner.py**: Added `_config_for_timeframe()` method that auto-selects `scalper_config()` for timeframes ≤15m. This ensures fast indicators are computed with optimized parameters for scalper runs.
+- 2026-01-26: Auto-load scalper_fast.txt prompt for fast timeframe runs.
+  - **backtesting/llm_strategist_runner.py**: Added `_has_fast_timeframes()` and `_load_scalper_prompt()` methods. When timeframes include 15m or faster and no explicit prompt is provided, automatically loads `prompts/strategies/scalper_fast.txt` which instructs the LLM to use fast indicators (ema_fast, vwap, vol_burst, etc.).
 
 ## Test Evidence (append results before commit)
 ```
