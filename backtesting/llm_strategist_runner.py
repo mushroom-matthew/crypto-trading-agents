@@ -498,6 +498,7 @@ class LLMStrategistBacktester:
         self.last_slot_report: Dict[str, Any] | None = None
         self.memory_history: List[Dict[str, Any]] = []
         self.judge_constraints: Dict[str, Any] = {}
+        self.active_judge_constraints: JudgeConstraints | None = None  # Machine-readable constraints
         self.limit_enforcement_by_day: Dict[str, Dict[str, Any]] = defaultdict(_new_limit_entry)
         self.plan_limits_by_day: Dict[str, Dict[str, Any]] = {}
         self.current_run_id: str | None = None
@@ -2245,6 +2246,10 @@ class LLMStrategistBacktester:
                     judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
                     if judge_constraints:
                         self.judge_constraints = judge_constraints
+                    # Extract machine-readable constraints for trigger enforcement
+                    machine_constraints = summary.get("judge_feedback", {}).get("constraints")
+                    if machine_constraints:
+                        self.active_judge_constraints = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
                     daily_reports.append(summary)
             if self.current_day_key != day_key:
                 self.current_day_key = day_key
@@ -2311,6 +2316,10 @@ class LLMStrategistBacktester:
                     judge_constraints = judge_result.get("feedback", {}).get("strategist_constraints")
                     if judge_constraints:
                         self.judge_constraints = judge_constraints
+                    # Extract machine-readable constraints for trigger enforcement
+                    machine_constraints = judge_result.get("feedback", {}).get("constraints")
+                    if machine_constraints:
+                        self.active_judge_constraints = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
                     logger.info(
                         "Judge triggered replan at %s: %s",
                         ts.isoformat(), judge_result.get("replan_reason")
@@ -2490,11 +2499,27 @@ class LLMStrategistBacktester:
 
                     current_plan_payload = current_plan.model_dump()
                     current_compiled_payload = compiled_plan.model_dump()
+                    # Apply risk_mode scaling from judge constraints
+                    effective_risk_profile = self.risk_profile
+                    if self.active_judge_constraints and self.active_judge_constraints.risk_mode != "normal":
+                        risk_mode = self.active_judge_constraints.risk_mode
+                        # Emergency: 50% reduction, Conservative: 25% reduction
+                        scale_factor = 0.5 if risk_mode == "emergency" else 0.75
+                        effective_risk_profile = RiskProfile(
+                            global_multiplier=self.risk_profile.global_multiplier * scale_factor,
+                            symbol_multipliers=self.risk_profile.symbol_multipliers.copy(),
+                            archetype_multipliers=self.risk_profile.archetype_multipliers.copy(),
+                            archetype_hour_multipliers=self.risk_profile.archetype_hour_multipliers.copy(),
+                        )
+                        logger.info(
+                            "Judge risk_mode=%s: scaling risk profile by %.0f%%",
+                            risk_mode, scale_factor * 100
+                        )
                     risk_engine = RiskEngine(
                         current_plan.risk_constraints,
                         {rule.symbol: rule for rule in current_plan.sizing_rules},
                         daily_anchor_equity=self.daily_loss_anchor_by_day.get(day_key),
-                        risk_profile=self.risk_profile,
+                        risk_profile=effective_risk_profile,
                     )
                     self.latest_risk_engine = risk_engine
                     # Collect samples from previous trigger engine before creating new one
@@ -2510,6 +2535,7 @@ class LLMStrategistBacktester:
                         debug_sample_rate=self.debug_trigger_sample_rate,
                         debug_max_samples=self.debug_trigger_max_samples,
                         priority_skip_confidence_threshold=self.priority_skip_confidence_threshold,
+                        judge_constraints=self.active_judge_constraints,
                     )
                 self.current_trigger_engine = trigger_engine
                 llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
@@ -2734,6 +2760,10 @@ class LLMStrategistBacktester:
                 judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
                 if judge_constraints:
                     self.judge_constraints = judge_constraints
+                # Extract machine-readable constraints for trigger enforcement
+                machine_constraints = summary.get("judge_feedback", {}).get("constraints")
+                if machine_constraints:
+                    self.active_judge_constraints = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
                 daily_reports.append(summary)
 
         # Collect samples from final trigger engine

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, List, Literal
 
+logger = logging.getLogger(__name__)
+
 from schemas.llm_strategist import AssetState, IndicatorSnapshot, PortfolioState, StrategyPlan, TriggerCondition
+from schemas.judge_feedback import JudgeConstraints
 from trading_core.execution_engine import BlockReason
 
 from .risk_engine import RiskEngine
@@ -75,6 +79,7 @@ class TriggerEngine:
         prioritize_by_confidence: bool = True,
         max_triggers_per_symbol_per_bar: int = 1,
         priority_skip_confidence_threshold: Literal["A", "B", "C"] | None = None,
+        judge_constraints: JudgeConstraints | None = None,
     ) -> None:
         """Initialize the trigger engine.
 
@@ -101,11 +106,14 @@ class TriggerEngine:
                 Prevents cascade of competing signals.
             priority_skip_confidence_threshold: Minimum confidence grade to bypass priority skips
                 once max_triggers_per_symbol_per_bar is reached. None disables bypass.
+            judge_constraints: Optional JudgeConstraints with disabled_trigger_ids and
+                disabled_categories to block specific triggers from firing.
         """
         self.plan = plan
         self.risk_engine = risk_engine
         self.evaluator = evaluator or RuleEvaluator()
         self.trade_risk = trade_risk or TradeRiskEvaluator(risk_engine)
+        self.judge_constraints = judge_constraints
         self.confidence_override_threshold = confidence_override_threshold
         self.min_hold_bars = max(0, min_hold_bars)
         self.trade_cooldown_bars = max(0, trade_cooldown_bars)
@@ -329,6 +337,25 @@ class TriggerEngine:
         for trigger in trigger_list:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
                 continue
+
+            # Enforce judge constraints: skip disabled triggers
+            if self.judge_constraints:
+                if trigger.id in self.judge_constraints.disabled_trigger_ids:
+                    detail = f"Trigger {trigger.id} disabled by judge"
+                    logger.info(
+                        "Judge blocked trigger %s (reason: disabled_trigger_ids) at %s",
+                        trigger.id, bar.timestamp.isoformat()
+                    )
+                    self._record_block(block_entries, trigger, BlockReason.SYMBOL_VETO.value, detail, bar)
+                    continue
+                if trigger.category and trigger.category in self.judge_constraints.disabled_categories:
+                    detail = f"Category {trigger.category} disabled by judge"
+                    logger.info(
+                        "Judge blocked trigger %s (reason: disabled_categories, category=%s) at %s",
+                        trigger.id, trigger.category, bar.timestamp.isoformat()
+                    )
+                    self._record_block(block_entries, trigger, BlockReason.CATEGORY.value, detail, bar)
+                    continue
 
             # Early exit if we've hit the max triggers for this symbol
             if self.prioritize_by_confidence and triggers_fired_for_symbol >= self.max_triggers_per_symbol_per_bar:
