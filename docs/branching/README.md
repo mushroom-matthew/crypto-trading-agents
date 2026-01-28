@@ -8,14 +8,21 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 3) Run the Test Plan and paste the output into the Test Evidence section.
 4) Commit only after test evidence is recorded.
 
-## Active Branch Runbooks
+## Active Branch Runbooks (Priority Order)
+
+### Priority 1 (Next)
+- **strategist-simplification.md**: Simplify LLM strategist - allow empty triggers, remove risk redundancy, vector store prep.
+
+### Priority 2+
+- comp-audit-ui-trade-stats.md: Per-trade risk/perf stats in UI and APIs. (IN PROGRESS)
+- aws-deploy.md: AWS infrastructure, secrets, and CI/CD wiring.
+- multi-wallet.md: Multi-wallet architecture (Phantom/Solana/Ethereum read-only), reconciliation, UI.
+
+### Completed
 - comp-audit-risk-core.md: Phase 0 risk correctness and budget integrity.
 - comp-audit-trigger-cadence.md: Scalper cadence and signal serialization.
 - comp-audit-indicators-prompts.md: Fast indicators, Donchian high/low, momentum prompts, compute optimizations.
 - comp-audit-metrics-parity.md: Live/backtest metrics parity and annualization consistency.
-- comp-audit-ui-trade-stats.md: Per-trade risk/perf stats in UI and APIs.
-- aws-deploy.md: AWS infrastructure, secrets, and CI/CD wiring.
-- multi-wallet.md: Multi-wallet architecture (Phantom/Solana/Ethereum read-only), reconciliation, UI.
 
 ## Later/Queued Runbooks
 - later/policy-pivot-phase0.md: No-change replan guard and telemetry (prereq for policy pivot).
