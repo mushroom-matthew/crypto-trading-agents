@@ -422,7 +422,7 @@ class EquityCurvePoint(BaseModel):
 
 
 class BacktestTrade(BaseModel):
-    """Individual backtest trade record."""
+    """Individual backtest trade record with risk stats."""
 
     timestamp: str
     symbol: str
@@ -432,6 +432,13 @@ class BacktestTrade(BaseModel):
     fee: Optional[float] = None
     pnl: Optional[float] = None
     trigger_id: Optional[str] = None
+    # Risk stats (Phase 6 trade-level visibility)
+    risk_used_abs: Optional[float] = Field(default=None, description="Risk budget allocated for this trade")
+    actual_risk_at_stop: Optional[float] = Field(default=None, description="Actual risk at stop distance (qty * stop_distance)")
+    stop_distance: Optional[float] = Field(default=None, description="Distance to stop loss in price units")
+    allocated_risk_abs: Optional[float] = Field(default=None, description="Risk allocated from daily budget")
+    profile_multiplier: Optional[float] = Field(default=None, description="Risk multiplier from profile/regime")
+    r_multiple: Optional[float] = Field(default=None, description="P&L divided by actual risk (risk-adjusted return)")
 
 
 # Playback schemas for time-series navigation
@@ -879,6 +886,13 @@ async def get_backtest_trades(
             # Convert DataFrame to list of BacktestTrade
             trades_list = []
             for _, row in trades_subset.iterrows():
+                # Compute R-multiple if we have actual risk and pnl
+                r_multiple = None
+                pnl_val = float(row["pnl"]) if "pnl" in row and row["pnl"] is not None else None
+                actual_risk = float(row["actual_risk_at_stop"]) if "actual_risk_at_stop" in row and row["actual_risk_at_stop"] is not None else None
+                if pnl_val is not None and actual_risk is not None and actual_risk > 0:
+                    r_multiple = pnl_val / actual_risk
+
                 trades_list.append(
                     BacktestTrade(
                         timestamp=row["time"].isoformat() if hasattr(row["time"], "isoformat") else str(row["time"]),
@@ -887,8 +901,14 @@ async def get_backtest_trades(
                         qty=float(row["qty"]),
                         price=float(row["price"]),
                         fee=float(row["fee"]) if "fee" in row else None,
-                        pnl=float(row["pnl"]) if "pnl" in row else None,
+                        pnl=pnl_val,
                         trigger_id=row.get("trigger_id"),
+                        risk_used_abs=float(row["risk_used_abs"]) if "risk_used_abs" in row and row["risk_used_abs"] is not None else None,
+                        actual_risk_at_stop=actual_risk,
+                        stop_distance=float(row["stop_distance"]) if "stop_distance" in row and row["stop_distance"] is not None else None,
+                        allocated_risk_abs=float(row["allocated_risk_abs"]) if "allocated_risk_abs" in row and row["allocated_risk_abs"] is not None else None,
+                        profile_multiplier=float(row["profile_multiplier"]) if "profile_multiplier" in row and row["profile_multiplier"] is not None else None,
+                        r_multiple=r_multiple,
                     )
                 )
         elif "trades" in cached:
@@ -909,6 +929,13 @@ async def get_backtest_trades(
                 if hasattr(ts, "isoformat"):
                     ts = ts.isoformat()
 
+                # Compute R-multiple if we have actual risk and pnl
+                r_multiple = None
+                pnl_val = float(trade.get("pnl", 0)) if trade.get("pnl") is not None else None
+                actual_risk = float(trade.get("actual_risk_at_stop", 0)) if trade.get("actual_risk_at_stop") is not None else None
+                if pnl_val is not None and actual_risk is not None and actual_risk > 0:
+                    r_multiple = pnl_val / actual_risk
+
                 trades_list.append(
                     BacktestTrade(
                         timestamp=str(ts),
@@ -917,9 +944,15 @@ async def get_backtest_trades(
                         qty=float(trade.get("qty", 0)),
                         price=float(trade.get("price", 0)),
                         fee=float(trade.get("fee", 0)) if trade.get("fee") is not None else None,
-                        pnl=float(trade.get("pnl", 0)) if trade.get("pnl") is not None else None,
+                        pnl=pnl_val,
                         # Try trigger_id first, fall back to reason (LLM strategist uses "reason")
                         trigger_id=trade.get("trigger_id") or trade.get("reason"),
+                        risk_used_abs=float(trade.get("risk_used_abs", 0)) if trade.get("risk_used_abs") is not None else None,
+                        actual_risk_at_stop=actual_risk,
+                        stop_distance=float(trade.get("stop_distance", 0)) if trade.get("stop_distance") is not None else None,
+                        allocated_risk_abs=float(trade.get("allocated_risk_abs", 0)) if trade.get("allocated_risk_abs") is not None else None,
+                        profile_multiplier=float(trade.get("profile_multiplier", 0)) if trade.get("profile_multiplier") is not None else None,
+                        r_multiple=r_multiple,
                     )
                 )
         else:

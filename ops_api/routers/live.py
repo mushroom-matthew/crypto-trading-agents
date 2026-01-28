@@ -47,7 +47,7 @@ class PortfolioSummary(BaseModel):
 
 
 class Fill(BaseModel):
-    """Trade fill record."""
+    """Trade fill record with risk stats."""
 
     order_id: str
     symbol: str
@@ -57,6 +57,14 @@ class Fill(BaseModel):
     timestamp: datetime
     run_id: Optional[str] = None
     correlation_id: Optional[str] = None
+    # Risk stats (Phase 6 trade-level visibility)
+    fee: Optional[float] = None
+    pnl: Optional[float] = None
+    trigger_id: Optional[str] = None
+    risk_used_abs: Optional[float] = Field(default=None, description="Risk budget allocated for this trade")
+    actual_risk_at_stop: Optional[float] = Field(default=None, description="Actual risk at stop distance")
+    stop_distance: Optional[float] = Field(default=None, description="Distance to stop loss in price units")
+    r_multiple: Optional[float] = Field(default=None, description="P&L divided by actual risk")
 
 
 class BlockEvent(BaseModel):
@@ -174,7 +182,14 @@ async def get_fills(
                 price=fill.price,
                 timestamp=fill.ts,
                 run_id=fill.run_id,
-                correlation_id=fill.correlation_id
+                correlation_id=fill.correlation_id,
+                fee=fill.fee,
+                pnl=fill.pnl,
+                trigger_id=fill.trigger_id,
+                risk_used_abs=fill.risk_used_abs,
+                actual_risk_at_stop=fill.actual_risk_at_stop,
+                stop_distance=fill.stop_distance,
+                r_multiple=fill.r_multiple,
             )
             for fill in fills
         ]

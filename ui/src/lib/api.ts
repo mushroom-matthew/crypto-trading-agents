@@ -150,6 +150,13 @@ export interface BacktestTrade {
   fee?: number;
   pnl?: number;
   trigger_id?: string;
+  // Risk stats (Phase 6 trade-level visibility)
+  risk_used_abs?: number;
+  actual_risk_at_stop?: number;
+  stop_distance?: number;
+  allocated_risk_abs?: number;
+  profile_multiplier?: number;
+  r_multiple?: number;
 }
 
 export interface MarketTick {

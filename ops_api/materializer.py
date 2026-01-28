@@ -73,6 +73,13 @@ class Materializer:
             if event.type != "fill":
                 continue
             payload = event.payload
+            # Extract risk stats if available
+            pnl = float(payload["pnl"]) if payload.get("pnl") is not None else None
+            actual_risk = float(payload["actual_risk_at_stop"]) if payload.get("actual_risk_at_stop") is not None else None
+            # Compute R-multiple if we have both pnl and actual risk
+            r_multiple = None
+            if pnl is not None and actual_risk is not None and actual_risk > 0:
+                r_multiple = pnl / actual_risk
             fills.append(
                 FillRecord(
                     order_id=str(payload.get("order_id", event.event_id)),
@@ -83,6 +90,13 @@ class Materializer:
                     ts=event.ts,
                     run_id=event.run_id,
                     correlation_id=event.correlation_id,
+                    fee=float(payload["fee"]) if payload.get("fee") is not None else None,
+                    pnl=pnl,
+                    trigger_id=payload.get("trigger_id") or payload.get("reason"),
+                    risk_used_abs=float(payload["risk_used_abs"]) if payload.get("risk_used_abs") is not None else None,
+                    actual_risk_at_stop=actual_risk,
+                    stop_distance=float(payload["stop_distance"]) if payload.get("stop_distance") is not None else None,
+                    r_multiple=r_multiple,
                 )
             )
         return fills

@@ -35,6 +35,14 @@ interface Fill {
   timestamp: string;
   run_id?: string;
   correlation_id?: string;
+  // Risk stats (Phase 6 trade-level visibility)
+  fee?: number;
+  pnl?: number;
+  trigger_id?: string;
+  risk_used_abs?: number;
+  actual_risk_at_stop?: number;
+  stop_distance?: number;
+  r_multiple?: number;
 }
 
 interface BlockEvent {
@@ -390,20 +398,54 @@ export function LiveTradingMonitor() {
           ) : (
             <div className="space-y-2 max-h-96 overflow-y-auto">
               {displayFills.slice(0, 10).map((fill, idx) => (
-                <div key={idx} className="flex justify-between items-center p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg text-sm">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono font-semibold">{fill.symbol}</span>
-                      <span className={cn('px-2 py-0.5 rounded text-xs font-semibold', fill.side === 'BUY' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400')}>
-                        {fill.side}
-                      </span>
+                <div key={idx} className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg text-sm">
+                  <div className="flex justify-between items-center">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-semibold">{fill.symbol}</span>
+                        <span className={cn('px-2 py-0.5 rounded text-xs font-semibold', fill.side === 'BUY' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400')}>
+                          {fill.side}
+                        </span>
+                        {fill.trigger_id && (
+                          <span className="text-xs text-gray-500 truncate max-w-24" title={fill.trigger_id}>
+                            {fill.trigger_id}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-gray-500 text-xs mt-1">{formatDateTime(fill.timestamp)}</div>
                     </div>
-                    <div className="text-gray-500 text-xs mt-1">{formatDateTime(fill.timestamp)}</div>
+                    <div className="text-right">
+                      <div className="font-semibold">{fill.qty.toFixed(8)}</div>
+                      <div className="text-gray-500 text-xs">@ {formatCurrency(fill.price)}</div>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <div className="font-semibold">{fill.qty.toFixed(8)}</div>
-                    <div className="text-gray-500 text-xs">@ {formatCurrency(fill.price)}</div>
-                  </div>
+                  {/* Risk stats row */}
+                  {(fill.pnl != null || fill.risk_used_abs != null || fill.r_multiple != null) && (
+                    <div className="flex gap-4 mt-2 pt-2 border-t border-gray-200 dark:border-gray-600 text-xs">
+                      {fill.pnl != null && (
+                        <div>
+                          <span className="text-gray-500">P&L: </span>
+                          <span className={cn('font-semibold', fill.pnl >= 0 ? 'text-green-500' : 'text-red-500')}>
+                            {formatCurrency(fill.pnl)}
+                          </span>
+                        </div>
+                      )}
+                      {fill.risk_used_abs != null && (
+                        <div>
+                          <span className="text-gray-500">Risk: </span>
+                          <span className="font-semibold">{formatCurrency(fill.risk_used_abs)}</span>
+                        </div>
+                      )}
+                      {fill.r_multiple != null && (
+                        <div>
+                          <span className="text-gray-500">R: </span>
+                          <span className={cn('font-semibold', fill.r_multiple >= 0 ? 'text-green-500' : 'text-red-500')}>
+                            {fill.r_multiple.toFixed(2)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

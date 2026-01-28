@@ -85,9 +85,26 @@ git commit -m "UI: trade-level risk and performance stats"
 ```
 
 ## Change Log (update during implementation)
-- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+- 2026-01-28: Implemented trade-level risk stats exposure
+  - ops_api/routers/backtests.py: Extended BacktestTrade schema with risk_used_abs, actual_risk_at_stop, stop_distance, allocated_risk_abs, profile_multiplier, r_multiple; updated both trade list builders to populate these fields
+  - ops_api/routers/live.py: Extended Fill schema with fee, pnl, trigger_id, risk_used_abs, actual_risk_at_stop, stop_distance, r_multiple; updated endpoint to map new FillRecord fields
+  - ops_api/schemas.py: Extended FillRecord with fee, pnl, trigger_id, risk_used_abs, actual_risk_at_stop, stop_distance, r_multiple
+  - ops_api/materializer.py: Updated list_fills() to extract risk fields from event payload and compute R-multiple
+  - ui/src/lib/api.ts: Extended BacktestTrade interface with risk_used_abs, actual_risk_at_stop, stop_distance, allocated_risk_abs, profile_multiplier, r_multiple
+  - ui/src/components/BacktestControl.tsx: Added Fee, Risk Used, Actual Risk, R columns to trades table with color-coded R-multiple
+  - ui/src/components/LiveTradingMonitor.tsx: Extended Fill interface; added risk stats row to fill cards showing P&L, Risk, and R when available
 
 ## Test Evidence (append results before commit)
+```
+uv run pytest -k live -vv
+=========== 15 passed, 1 skipped, 249 deselected, 1 warning in 8.81s ===========
+
+uv run python -c "from ops_api.routers.backtests import BacktestTrade; from ops_api.routers.live import Fill; from ops_api.schemas import FillRecord; print('Imports OK')"
+Imports OK
+```
+
+Note: -k backtests returned 0 selected tests (no backtest-specific test files), but import verification passed.
 
 ## Human Verification Evidence (append results before commit when required)
+PENDING: Launch UI and verify trade-level fields render in Backtest and Live views.
 

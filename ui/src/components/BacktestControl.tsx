@@ -878,6 +878,9 @@ export function BacktestControl() {
         {isComplete && trades && trades.length > 0 && (
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
             <h2 className="text-xl font-semibold mb-4">Recent Trades</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              Trade-level risk stats: Risk Used = budget allocated, Actual Risk = qty × stop distance, R = P&L ÷ Actual Risk
+            </p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -888,7 +891,11 @@ export function BacktestControl() {
                     <th className="pb-3">Trigger</th>
                     <th className="pb-3 text-right">Qty</th>
                     <th className="pb-3 text-right">Price</th>
+                    <th className="pb-3 text-right">Fee</th>
                     <th className="pb-3 text-right">P&L</th>
+                    <th className="pb-3 text-right" title="Risk budget allocated for this trade">Risk Used</th>
+                    <th className="pb-3 text-right" title="Actual risk at stop (qty × stop distance)">Actual Risk</th>
+                    <th className="pb-3 text-right" title="R-multiple: P&L ÷ Actual Risk">R</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
@@ -909,11 +916,26 @@ export function BacktestControl() {
                       </td>
                       <td className="py-2 text-right">{trade.qty?.toFixed(6)}</td>
                       <td className="py-2 text-right">{formatCurrency(trade.price)}</td>
+                      <td className="py-2 text-right text-gray-500">
+                        {trade.fee != null ? formatCurrency(trade.fee) : '-'}
+                      </td>
                       <td className={cn(
                         'py-2 text-right font-semibold',
                         trade.pnl && trade.pnl > 0 ? 'text-green-500' : trade.pnl && trade.pnl < 0 ? 'text-red-500' : 'text-gray-500'
                       )}>
-                        {trade.pnl ? formatCurrency(trade.pnl) : '-'}
+                        {trade.pnl != null ? formatCurrency(trade.pnl) : '-'}
+                      </td>
+                      <td className="py-2 text-right text-gray-600 dark:text-gray-400">
+                        {trade.risk_used_abs != null ? formatCurrency(trade.risk_used_abs) : '-'}
+                      </td>
+                      <td className="py-2 text-right text-gray-600 dark:text-gray-400">
+                        {trade.actual_risk_at_stop != null ? formatCurrency(trade.actual_risk_at_stop) : '-'}
+                      </td>
+                      <td className={cn(
+                        'py-2 text-right font-semibold',
+                        trade.r_multiple && trade.r_multiple > 0 ? 'text-green-500' : trade.r_multiple && trade.r_multiple < 0 ? 'text-red-500' : 'text-gray-500'
+                      )}>
+                        {trade.r_multiple != null ? trade.r_multiple.toFixed(2) : '-'}
                       </td>
                     </tr>
                   ))}

@@ -60,6 +60,14 @@ class FillRecord(BaseModel):
     ts: datetime
     run_id: Optional[str] = None
     correlation_id: Optional[str] = None
+    # Risk stats (Phase 6 trade-level visibility)
+    fee: Optional[float] = None
+    pnl: Optional[float] = None
+    trigger_id: Optional[str] = None
+    risk_used_abs: Optional[float] = None
+    actual_risk_at_stop: Optional[float] = None
+    stop_distance: Optional[float] = None
+    r_multiple: Optional[float] = None
 
 
 class RunSummary(BaseModel):
