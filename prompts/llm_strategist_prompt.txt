@@ -45,9 +45,13 @@ Multi-layer synthesis requirements:
 5. BTC/ETH asymmetry: each asset must use unique indicator combinations, timeframes, or volatility gates. No mirrored logic; tie triggers to asset-specific behavior (BTC momentum leadership vs ETH lagging structure).
 6. Composite logic: each trigger must combine at least two indicators into a conceptual condition (example: pullback inside uptrend while MACD histogram stays positive and ATR contracts).
 7. Confidence grading: set confidence_grade per trigger to A, B, or C to drive sizing tiers (A = max allowable risk, B = half of A, C = minimal probe). Never leave confidence_grade null; if uncertain use B. Reflect the grade in your entry/exit rationale.
-8. Position gating: every entry_rule must include a position filter. For long entries require position != 'long' (prefer position == 'flat'); for short entries require position != 'short' (prefer position == 'flat'). For exit/flat rules require position != 'flat'.
+8. Position gating: every entry_rule must include a position filter using boolean indicators (is_flat, is_long, is_short):
+   - For long entries: use "is_flat" (strict) or "not is_long" (allows scale-ins from flat or short)
+   - For short entries: use "is_flat" (strict) or "not is_short" (allows scale-ins from flat or long)
+   - For exit/flat rules: use "not is_flat" to ensure there's a position to exit
+   IMPORTANT: Use boolean indicators (is_flat, is_long, is_short) instead of string comparisons like position == 'flat'. The boolean form is more reliable.
    IMPORTANT - Short entries require stop_loss_pct: All triggers with direction="short" MUST include stop_loss_pct (e.g., 2.0 for a 2% stop). Shorts without stop_loss_pct will be BLOCKED by the risk engine.
-   Scale-in behavior: The risk engine allows scale-ins (adding to existing positions in the same direction) subject to aggregate risk limits. When scaling in, the existing position's risk is subtracted from the risk cap, and only the remaining risk budget is available for the new entry. If aggregate risk would exceed max_position_risk_pct, the scale-in is blocked. Use position == 'flat' in entry_rules if you want to prevent scale-ins; use position != 'short' (for longs) to allow scale-ins.
+   Scale-in behavior: The risk engine allows scale-ins (adding to existing positions in the same direction) subject to aggregate risk limits. When scaling in, the existing position's risk is subtracted from the risk cap, and only the remaining risk budget is available for the new entry. If aggregate risk would exceed max_position_risk_pct, the scale-in is blocked. Use "is_flat" in entry_rules if you want to prevent scale-ins; use "not is_short" (for longs) to allow scale-ins.
 9. Hold rules (optional): Use hold_rule to prevent premature exits from minor fluctuations. When hold_rule evaluates to True, the exit_rule is suppressed and the position is maintained. Emergency exits ALWAYS fire regardless of hold_rule. Use hold_rule when:
    - A trend-following position should ride minor pullbacks (e.g., hold_rule="tf_4h_close > tf_4h_sma_medium and rsi_14 > 40")
    - Volatility is temporarily elevated but structure intact (e.g., hold_rule="close > sma_short and vol_state != 'extreme'")
@@ -63,6 +67,11 @@ Multi-layer synthesis requirements:
 
 Available signal inputs:
 - Precomputed indicator fields (sma/ema, rsi, macd, atr, roc, realized_vol_short/medium, donchian, bollinger, volume, volume_multiple).
+- Position state (boolean indicators - PREFERRED over string comparisons):
+  - is_flat: True if no position held
+  - is_long: True if currently long
+  - is_short: True if currently short
+  NOTE: Use these boolean indicators in entry/exit rules. Example: "is_flat and rsi_14 < 30" for long entry, "not is_flat" for exit.
 - Cycle indicators (200-bar window): cycle_high_200, cycle_low_200, cycle_range_200, cycle_position (0=at low, 1=at high).
 - Fibonacci retracement levels (from cycle high/low): fib_236, fib_382, fib_500, fib_618, fib_786.
 - Expansion/contraction ratios: last_expansion_pct (swing low→high %), last_contraction_pct (swing high→low %), expansion_contraction_ratio.
@@ -145,8 +154,8 @@ Trimmed output example:
       "confidence_grade": "A",
       "direction": "long",
       "timeframe": "1h",
-      "entry_rule": "timeframe=='1h' and trend_state=='uptrend' and close > sma_medium and tf_4h_close > tf_4h_sma_medium and tf_1h_rsi_14 between 48 and 62 and atr_14 < tf_4h_atr_14 and macd_hist > 0",
-      "exit_rule": "close < sma_medium or tf_4h_rsi_14 < 50 or realized_vol_short > tf_4h_realized_vol_medium",
+      "entry_rule": "is_flat and timeframe=='1h' and trend_state=='uptrend' and close > sma_medium and tf_4h_close > tf_4h_sma_medium and tf_1h_rsi_14 between 48 and 62 and atr_14 < tf_4h_atr_14 and macd_hist > 0",
+      "exit_rule": "not is_flat and (close < sma_medium or tf_4h_rsi_14 < 50 or realized_vol_short > tf_4h_realized_vol_medium)",
       "hold_rule": "tf_4h_close > tf_4h_sma_medium and rsi_14 > 40 and vol_state != 'extreme'"
     },
     {
@@ -157,7 +166,7 @@ Trimmed output example:
       "direction": "flat",
       "timeframe": "1h",
       "entry_rule": "false",
-      "exit_rule": "timeframe=='1h' and (vol_state=='high' or vol_state=='extreme') and atr_14 > tf_4h_atr_14 and close < sma_medium and macd < macd_signal"
+      "exit_rule": "not is_flat and timeframe=='1h' and (vol_state=='high' or vol_state=='extreme') and atr_14 > tf_4h_atr_14 and close < sma_medium and macd < macd_signal"
     }
   ]
 }

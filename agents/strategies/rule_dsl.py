@@ -27,6 +27,36 @@ _BETWEEN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Pattern to match string literals with single quotes (for position comparisons)
+# This converts position == 'flat' style expressions to use boolean indicators
+_POSITION_STRING_PATTERN = re.compile(
+    r"\bposition\s*(==|!=)\s*['\"]?(flat|long|short)['\"]?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_position_comparisons(expr: str) -> str:
+    """Convert position string comparisons to boolean indicator checks.
+
+    This handles expressions like:
+        position == 'flat'  -> is_flat
+        position != 'flat'  -> not is_flat
+        position == "long"  -> is_long
+        position != 'short' -> not is_short
+
+    This avoids string literal parsing issues in the AST.
+    """
+    def replacer(match: re.Match[str]) -> str:
+        op = match.group(1)
+        state = match.group(2).lower()
+        indicator = f"is_{state}"
+        if op == "==":
+            return indicator
+        else:  # !=
+            return f"(not {indicator})"
+
+    return _POSITION_STRING_PATTERN.sub(replacer, expr)
+
 
 class MissingIndicatorError(RuleSyntaxError):
     """Raised when a required indicator is missing from the context."""
@@ -39,6 +69,9 @@ class RuleEvaluator:
         self.allowed_names = allowed_names or set()
 
     def _normalize(self, expr: str) -> str:
+        # First, normalize position string comparisons to boolean indicators
+        expr = _normalize_position_comparisons(expr)
+
         def replacer(match: re.Match[str]) -> str:
             field = match.group("field")
             low = match.group("low")

@@ -201,7 +201,13 @@ class TriggerEngine:
             context.setdefault(key, None)
         context.setdefault("recent_tests", [])
         if portfolio:
-            context["position"] = self._position_direction(indicator.symbol, portfolio)
+            position = self._position_direction(indicator.symbol, portfolio)
+            context["position"] = position
+            # Boolean position indicators (preferred over string comparisons)
+            # These avoid quote-escaping issues in trigger expressions
+            context["is_flat"] = position == "flat"
+            context["is_long"] = position == "long"
+            context["is_short"] = position == "short"
         return context
 
     def _position_direction(self, symbol: str, portfolio: PortfolioState) -> Literal["long", "short", "flat"]:
