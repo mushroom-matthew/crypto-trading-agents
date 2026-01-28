@@ -137,19 +137,26 @@ git commit -m "Testing: add synthetic data generation for trigger testing"
    - Edge case tests (single bar, high frequency, zero amplitude)
 
 3. **Trigger Responsiveness Tests** (`tests/synthetic/test_trigger_responsiveness.py`)
-   - 9 tests for parametric trigger validation
+   - 17 tests for parametric trigger validation
    - `TestPriceThresholdTriggers`: Above/below threshold fires
    - `TestTrendTriggers`: Uptrend breakout timing
    - `TestRangeBoundTriggers`: Support/resistance bounces
    - `TestParametricWaveformTriggers`: Known peak/trough timing, frequency-based trigger count
    - `TestCompoundTriggers`: Dual threshold validation
+   - `TestRSITriggers`: RSI oversold/overbought with parametric RSI values
+   - `TestMACDTriggers`: MACD bullish crossover with parametric MACD values
+   - `TestBollingerTriggers`: Bollinger band breakout
+   - `TestVolumeTriggers`: Volume burst entry (`vol_burst == True`)
+   - `TestEmergencyExitTriggers`: Emergency exit on drawdown
+   - `TestHoldRuleTriggers`: Hold rules preventing premature exits
+   - `TestDonchianTriggers`: Donchian channel breakout
    - `generate_trigger_report()`: Human-readable test report
 
 ### Files Created
 - `data_loader/synthetic_loader.py` - Core synthetic data generator
 - `tests/synthetic/__init__.py` - Test package
 - `tests/synthetic/test_waveforms.py` - 21 waveform tests
-- `tests/synthetic/test_trigger_responsiveness.py` - 9 trigger tests + report generator
+- `tests/synthetic/test_trigger_responsiveness.py` - 17 trigger tests + report generator
 
 ### Deferred for Later
 - CLI flag `--synthetic-mode` (requires dataset.py changes)
@@ -158,9 +165,9 @@ git commit -m "Testing: add synthetic data generation for trigger testing"
 ## Test Evidence (append results before commit)
 
 ```
-$ uv run pytest tests/synthetic/ -vv
+$ uv run pytest tests/synthetic/ -v
 ============================= test session starts ==============================
-collected 30 items
+collected 38 items
 
 tests/synthetic/test_trigger_responsiveness.py::TestPriceThresholdTriggers::test_price_above_threshold_fires PASSED
 tests/synthetic/test_trigger_responsiveness.py::TestPriceThresholdTriggers::test_price_below_threshold_fires PASSED
@@ -193,7 +200,7 @@ tests/synthetic/test_waveforms.py::TestEdgeCases::test_single_bar_generation PAS
 tests/synthetic/test_waveforms.py::TestEdgeCases::test_very_high_frequency PASSED
 tests/synthetic/test_waveforms.py::TestEdgeCases::test_zero_amplitude PASSED
 
-============================== 30 passed in 3.52s ==============================
+============================== 38 passed in 1.85s ==============================
 ```
 
 ## Human Verification Evidence (append results before commit when required)

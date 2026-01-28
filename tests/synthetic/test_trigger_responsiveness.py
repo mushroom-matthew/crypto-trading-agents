@@ -56,8 +56,18 @@ def make_indicator_snapshot(
     sma_medium: float | None = None,
     donchian_upper_short: float | None = None,
     donchian_lower_short: float | None = None,
+    bollinger_upper: float | None = None,
+    bollinger_lower: float | None = None,
+    macd: float = 0.0,
+    macd_signal: float = 0.0,
+    macd_hist: float = 0.0,
+    vol_burst: bool | None = None,
+    volume_multiple: float = 1.0,
 ) -> IndicatorSnapshot:
-    """Create a minimal indicator snapshot for testing."""
+    """Create a minimal indicator snapshot for testing.
+
+    All indicator values can be overridden for parametric testing.
+    """
     return IndicatorSnapshot(
         symbol=symbol,
         timeframe=timeframe,
@@ -65,20 +75,21 @@ def make_indicator_snapshot(
         close=close,
         rsi_14=rsi_14,
         atr_14=atr_14,
-        sma_short=sma_short or close * 0.99,
-        sma_medium=sma_medium or close * 0.98,
-        donchian_upper_short=donchian_upper_short or close * 1.02,
-        donchian_lower_short=donchian_lower_short or close * 0.98,
-        bollinger_upper=close * 1.02,
-        bollinger_lower=close * 0.98,
-        macd=0.0,
-        macd_signal=0.0,
-        macd_hist=0.0,
+        sma_short=sma_short if sma_short is not None else close * 0.99,
+        sma_medium=sma_medium if sma_medium is not None else close * 0.98,
+        donchian_upper_short=donchian_upper_short if donchian_upper_short is not None else close * 1.02,
+        donchian_lower_short=donchian_lower_short if donchian_lower_short is not None else close * 0.98,
+        bollinger_upper=bollinger_upper if bollinger_upper is not None else close * 1.02,
+        bollinger_lower=bollinger_lower if bollinger_lower is not None else close * 0.98,
+        macd=macd,
+        macd_signal=macd_signal,
+        macd_hist=macd_hist,
         roc_short=0.0,
         realized_vol_short=0.01,
         realized_vol_medium=0.01,
         volume=1000.0,
-        volume_multiple=1.0,
+        volume_multiple=volume_multiple,
+        vol_burst=vol_burst,
     )
 
 
@@ -490,6 +501,553 @@ class TestCompoundTriggers:
                 if order.side == "buy":
                     # Entry should be in middle band
                     assert 49600 < close < 50400, f"Entry at bar {bar_idx} outside middle band: {close}"
+
+
+# ============================================================================
+# INDICATOR-BASED TRIGGER TESTS (Parametric)
+# ============================================================================
+
+class TestRSITriggers:
+    """Test RSI-based triggers with parametric indicator values."""
+
+    def test_rsi_oversold_buy(self):
+        """Trigger should fire when RSI < 30 (oversold)."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        backend = sin_wave(base_price=50000, amplitude=1000, frequency=2.0, seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        trigger = TriggerCondition(
+            id="rsi_oversold",
+            symbol="SYN-USD",
+            category="mean_reversion",
+            confidence_grade="A",
+            direction="long",
+            timeframe="1h",
+            entry_rule="rsi_14 < 30 and position == 'flat'",
+            exit_rule="rsi_14 > 70",
+            stop_loss_pct=2.0,
+        )
+
+        plan = make_plan_with_triggers([trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        # Simulate RSI oscillating: oversold at troughs, overbought at peaks
+        orders_fired = []
+        for i, (ts, row) in enumerate(df.iterrows()):
+            # Parametric RSI: map price position to RSI (low price = low RSI)
+            price_pct = (row["close"] - 49000) / 2000  # 0 at min, 1 at max
+            rsi = 20 + price_pct * 60  # RSI ranges 20-80
+
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD",
+                timeframe="1h",
+                close=row["close"],
+                rsi_14=rsi,
+            )
+
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            orders, _ = trigger_engine.on_bar(bar, indicator, portfolio)
+            if orders:
+                orders_fired.extend([(i, o, rsi) for o in orders])
+                for o in orders:
+                    if o.side == "buy":
+                        portfolio = make_portfolio(
+                            cash=portfolio.cash - o.quantity * o.price,
+                            positions={"SYN-USD": o.quantity}
+                        )
+                    else:
+                        portfolio = make_portfolio(cash=portfolio.cash + o.quantity * o.price)
+
+        # Should have entries when RSI < 30 (price near trough)
+        buy_orders = [(i, rsi) for i, o, rsi in orders_fired if o.side == "buy"]
+        assert len(buy_orders) >= 1, "Expected at least one RSI oversold entry"
+
+        # Verify RSI was actually < 30 at entry
+        for bar_idx, rsi in buy_orders:
+            assert rsi < 35, f"Entry at bar {bar_idx} with RSI {rsi:.1f} - expected < 35"
+
+    def test_rsi_overbought_sell(self):
+        """Trigger should fire when RSI > 70 (overbought)."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        backend = sin_wave(base_price=50000, amplitude=1000, frequency=2.0, seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        trigger = TriggerCondition(
+            id="rsi_overbought",
+            symbol="SYN-USD",
+            category="reversal",
+            confidence_grade="A",
+            direction="short",
+            timeframe="1h",
+            entry_rule="rsi_14 > 70 and position == 'flat'",
+            exit_rule="rsi_14 < 30",
+            stop_loss_pct=2.0,
+        )
+
+        plan = make_plan_with_triggers([trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        orders_fired = []
+        for i, (ts, row) in enumerate(df.iterrows()):
+            price_pct = (row["close"] - 49000) / 2000
+            rsi = 20 + price_pct * 60
+
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD", timeframe="1h", close=row["close"], rsi_14=rsi,
+            )
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            orders, _ = trigger_engine.on_bar(bar, indicator, portfolio)
+            if orders:
+                orders_fired.extend([(i, o, rsi) for o in orders])
+                for o in orders:
+                    if o.side == "sell":
+                        portfolio = make_portfolio(
+                            cash=portfolio.cash,
+                            positions={"SYN-USD": -o.quantity}
+                        )
+                    else:
+                        portfolio = make_portfolio(cash=portfolio.cash)
+
+        sell_orders = [(i, rsi) for i, o, rsi in orders_fired if o.side == "sell"]
+        assert len(sell_orders) >= 1, "Expected at least one RSI overbought entry"
+
+        for bar_idx, rsi in sell_orders:
+            assert rsi > 65, f"Entry at bar {bar_idx} with RSI {rsi:.1f} - expected > 65"
+
+
+class TestMACDTriggers:
+    """Test MACD crossover triggers with parametric values."""
+
+    def test_macd_bullish_crossover(self):
+        """Trigger fires when MACD crosses above signal."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        backend = sin_wave(base_price=50000, amplitude=1000, frequency=2.0, seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        trigger = TriggerCondition(
+            id="macd_bullish",
+            symbol="SYN-USD",
+            category="trend_continuation",
+            confidence_grade="A",
+            direction="long",
+            timeframe="1h",
+            entry_rule="macd > macd_signal and position == 'flat'",
+            exit_rule="macd < macd_signal",
+            stop_loss_pct=2.0,
+        )
+
+        plan = make_plan_with_triggers([trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        orders_fired = []
+        prev_macd_diff = None
+
+        for i, (ts, row) in enumerate(df.iterrows()):
+            # Parametric MACD: follows price momentum
+            # MACD positive when price rising, negative when falling
+            price_momentum = (row["close"] - 50000) / 1000  # -1 to +1
+            macd = price_momentum * 50  # MACD ranges -50 to +50
+            macd_signal = macd * 0.8  # Signal lags slightly
+
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD", timeframe="1h", close=row["close"],
+                macd=macd, macd_signal=macd_signal, macd_hist=macd - macd_signal,
+            )
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            macd_diff = macd - macd_signal
+            orders, _ = trigger_engine.on_bar(bar, indicator, portfolio)
+
+            if orders:
+                orders_fired.extend([(i, o, macd, macd_signal) for o in orders])
+                for o in orders:
+                    if o.side == "buy":
+                        portfolio = make_portfolio(
+                            cash=portfolio.cash - o.quantity * o.price,
+                            positions={"SYN-USD": o.quantity}
+                        )
+                    else:
+                        portfolio = make_portfolio(cash=portfolio.cash + o.quantity * o.price)
+
+            prev_macd_diff = macd_diff
+
+        buy_orders = [(i, macd, sig) for i, o, macd, sig in orders_fired if o.side == "buy"]
+        assert len(buy_orders) >= 1, "Expected at least one MACD bullish crossover"
+
+        for bar_idx, macd, signal in buy_orders:
+            assert macd > signal, f"Bar {bar_idx}: MACD {macd:.1f} should be > signal {signal:.1f}"
+
+
+class TestBollingerTriggers:
+    """Test Bollinger Band triggers with parametric values."""
+
+    def test_bollinger_breakout(self):
+        """Trigger fires when price breaks above upper band."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        backend = sin_wave(base_price=50000, amplitude=1000, frequency=2.0, seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        trigger = TriggerCondition(
+            id="bollinger_breakout",
+            symbol="SYN-USD",
+            category="volatility_breakout",
+            confidence_grade="A",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > bollinger_upper and position == 'flat'",
+            exit_rule="close < bollinger_middle",
+            stop_loss_pct=2.0,
+        )
+
+        plan = make_plan_with_triggers([trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        orders_fired = []
+        for i, (ts, row) in enumerate(df.iterrows()):
+            # Parametric Bollinger: bands narrow then widen
+            # Upper band at 50700, lower at 49300 (tighter than price range)
+            bb_middle = 50000
+            bb_upper = 50700
+            bb_lower = 49300
+
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD", timeframe="1h", close=row["close"],
+                bollinger_upper=bb_upper, bollinger_lower=bb_lower,
+            )
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            orders, _ = trigger_engine.on_bar(bar, indicator, portfolio)
+            if orders:
+                orders_fired.extend([(i, o, row["close"], bb_upper) for o in orders])
+                for o in orders:
+                    if o.side == "buy":
+                        portfolio = make_portfolio(
+                            cash=portfolio.cash - o.quantity * o.price,
+                            positions={"SYN-USD": o.quantity}
+                        )
+                    else:
+                        portfolio = make_portfolio(cash=portfolio.cash + o.quantity * o.price)
+
+        buy_orders = [(i, close, upper) for i, o, close, upper in orders_fired if o.side == "buy"]
+        assert len(buy_orders) >= 1, "Expected at least one Bollinger breakout"
+
+        for bar_idx, close, upper in buy_orders:
+            assert close > upper, f"Bar {bar_idx}: close {close:.0f} should be > upper {upper:.0f}"
+
+
+class TestVolumeTriggers:
+    """Test volume-based triggers with parametric values."""
+
+    def test_volume_burst_entry(self):
+        """Trigger fires when vol_burst is True."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        backend = sin_wave(base_price=50000, amplitude=1000, frequency=2.0, seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        trigger = TriggerCondition(
+            id="volume_burst",
+            symbol="SYN-USD",
+            category="volatility_breakout",
+            confidence_grade="A",
+            direction="long",
+            timeframe="1h",
+            entry_rule="vol_burst == True and close > sma_short and position == 'flat'",
+            exit_rule="close < sma_short",
+            stop_loss_pct=2.0,
+        )
+
+        plan = make_plan_with_triggers([trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        orders_fired = []
+        burst_bars = [5, 11, 17, 23]  # Parametric: volume bursts at these bars
+
+        for i, (ts, row) in enumerate(df.iterrows()):
+            vol_burst = i in burst_bars
+            vol_multiple = 3.0 if vol_burst else 1.0
+
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD", timeframe="1h", close=row["close"],
+                vol_burst=vol_burst, volume_multiple=vol_multiple,
+            )
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            orders, _ = trigger_engine.on_bar(bar, indicator, portfolio)
+            if orders:
+                orders_fired.extend([(i, o, vol_burst) for o in orders])
+                for o in orders:
+                    if o.side == "buy":
+                        portfolio = make_portfolio(
+                            cash=portfolio.cash - o.quantity * o.price,
+                            positions={"SYN-USD": o.quantity}
+                        )
+                    else:
+                        portfolio = make_portfolio(cash=portfolio.cash + o.quantity * o.price)
+
+        buy_orders = [(i, burst) for i, o, burst in orders_fired if o.side == "buy"]
+        assert len(buy_orders) >= 1, "Expected at least one volume burst entry"
+
+        # Entries should occur at or near burst bars (when price is also > sma_short)
+        for bar_idx, burst in buy_orders:
+            # Entry may be at burst bar or shortly after depending on price condition
+            assert any(abs(bar_idx - b) <= 1 for b in burst_bars), \
+                f"Entry at bar {bar_idx} not near any burst bar {burst_bars}"
+
+
+class TestEmergencyExitTriggers:
+    """Test emergency exit triggers."""
+
+    def test_emergency_exit_on_drawdown(self):
+        """Emergency exit fires on significant drawdown."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        # Downtrend for testing stop-loss
+        backend = trend(base_price=50000, slope=2000, direction="down", seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        # Entry trigger (will enter early)
+        entry_trigger = TriggerCondition(
+            id="trend_entry",
+            symbol="SYN-USD",
+            category="trend_continuation",
+            confidence_grade="B",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > 49000 and position == 'flat'",
+            exit_rule="close > 55000",  # Won't hit in downtrend
+            stop_loss_pct=2.0,
+        )
+
+        # Emergency exit trigger
+        emergency_trigger = TriggerCondition(
+            id="emergency_stop",
+            symbol="SYN-USD",
+            category="emergency_exit",
+            confidence_grade="A",
+            direction="long",
+            timeframe="1h",
+            entry_rule="False",  # Never enters
+            exit_rule="close < 48500",  # Exit if price drops significantly
+            stop_loss_pct=1.0,
+        )
+
+        plan = make_plan_with_triggers([entry_trigger, emergency_trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        entry_bar = None
+        exit_bar = None
+
+        for i, (ts, row) in enumerate(df.iterrows()):
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD", timeframe="1h", close=row["close"],
+            )
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            orders, _ = trigger_engine.on_bar(bar, indicator, portfolio)
+            for o in orders:
+                if o.side == "buy" and entry_bar is None:
+                    entry_bar = i
+                    portfolio = make_portfolio(
+                        cash=portfolio.cash - o.quantity * o.price,
+                        positions={"SYN-USD": o.quantity}
+                    )
+                elif o.side == "sell" and exit_bar is None:
+                    exit_bar = i
+                    portfolio = make_portfolio(cash=portfolio.cash + o.quantity * o.price)
+
+        assert entry_bar is not None, "Expected an entry"
+        assert exit_bar is not None, "Expected emergency exit to fire"
+        assert exit_bar > entry_bar, "Exit should be after entry"
+
+        # Verify exit was at a lower price
+        entry_price = df["close"].iloc[entry_bar]
+        exit_price = df["close"].iloc[exit_bar]
+        assert exit_price < entry_price, f"Exit price {exit_price} should be < entry {entry_price}"
+
+
+class TestHoldRuleTriggers:
+    """Test hold rules that prevent premature exits."""
+
+    def test_hold_rule_prevents_exit(self):
+        """Hold rule should suppress exit when active."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        backend = sin_wave(base_price=50000, amplitude=1000, frequency=2.0, seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        # Trigger with hold rule: don't exit while RSI is in neutral zone
+        # RSI formula: RSI = 20 + ((close - 49000) / 2000) * 60
+        # RSI 40-60 corresponds to close 49666-50333
+        # Exit rule triggers at close > 49800 (RSI ~44), which is in hold range
+        trigger = TriggerCondition(
+            id="hold_test",
+            symbol="SYN-USD",
+            category="mean_reversion",
+            confidence_grade="A",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close < 49300 and position == 'flat'",
+            exit_rule="close > 49800",  # Triggers when RSI ~44 (in hold range)
+            hold_rule="rsi_14 > 40 and rsi_14 < 60",  # Hold in neutral RSI zone
+            stop_loss_pct=2.0,
+        )
+
+        plan = make_plan_with_triggers([trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        entry_bar = None
+        exit_bar = None
+        hold_blocks = 0
+
+        for i, (ts, row) in enumerate(df.iterrows()):
+            price_pct = (row["close"] - 49000) / 2000
+            rsi = 20 + price_pct * 60
+
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD", timeframe="1h", close=row["close"], rsi_14=rsi,
+            )
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            orders, blocks = trigger_engine.on_bar(bar, indicator, portfolio)
+
+            # Count hold rule blocks
+            for block in blocks:
+                if "HOLD_RULE" in str(block.get("reason", "")):
+                    hold_blocks += 1
+
+            for o in orders:
+                if o.side == "buy" and entry_bar is None:
+                    entry_bar = i
+                    portfolio = make_portfolio(
+                        cash=portfolio.cash - o.quantity * o.price,
+                        positions={"SYN-USD": o.quantity}
+                    )
+                elif o.side == "sell" and exit_bar is None:
+                    exit_bar = i
+
+        assert entry_bar is not None, "Expected an entry"
+        # Hold rule should have blocked at least one exit attempt
+        assert hold_blocks >= 1, f"Expected hold rule to block exits, got {hold_blocks} blocks"
+
+
+class TestDonchianTriggers:
+    """Test Donchian channel triggers."""
+
+    def test_donchian_breakout(self):
+        """Trigger fires when price breaks Donchian upper channel."""
+        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+        backend = sin_wave(base_price=50000, amplitude=1000, frequency=2.0, seed=42)
+        df = backend.fetch_history("SYN-USD", start, end, "1h")
+
+        trigger = TriggerCondition(
+            id="donchian_breakout",
+            symbol="SYN-USD",
+            category="volatility_breakout",
+            confidence_grade="A",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > donchian_upper_short and position == 'flat'",
+            exit_rule="close < donchian_lower_short",
+            stop_loss_pct=2.0,
+        )
+
+        plan = make_plan_with_triggers([trigger])
+        risk_engine = make_risk_engine(plan)
+        trigger_engine = TriggerEngine(plan, risk_engine)
+        portfolio = make_portfolio()
+
+        orders_fired = []
+        # Track rolling high/low for Donchian (simplified: last 10 bars)
+        lookback = 10
+
+        for i, (ts, row) in enumerate(df.iterrows()):
+            start_idx = max(0, i - lookback)
+            donchian_upper = df["close"].iloc[start_idx:i+1].max() if i > 0 else row["close"]
+            donchian_lower = df["close"].iloc[start_idx:i+1].min() if i > 0 else row["close"]
+
+            indicator = make_indicator_snapshot(
+                symbol="SYN-USD", timeframe="1h", close=row["close"],
+                donchian_upper_short=donchian_upper * 0.99,  # Slightly below actual for breakout
+                donchian_lower_short=donchian_lower * 1.01,
+            )
+            bar = Bar(
+                symbol="SYN-USD", timeframe="1h", timestamp=ts,
+                open=row["open"], high=row["high"], low=row["low"],
+                close=row["close"], volume=row["volume"],
+            )
+
+            orders, _ = trigger_engine.on_bar(bar, indicator, portfolio)
+            if orders:
+                orders_fired.extend([(i, o) for o in orders])
+                for o in orders:
+                    if o.side == "buy":
+                        portfolio = make_portfolio(
+                            cash=portfolio.cash - o.quantity * o.price,
+                            positions={"SYN-USD": o.quantity}
+                        )
+                    else:
+                        portfolio = make_portfolio(cash=portfolio.cash + o.quantity * o.price)
+
+        buy_orders = [i for i, o in orders_fired if o.side == "buy"]
+        assert len(buy_orders) >= 1, "Expected at least one Donchian breakout"
 
 
 # ============================================================================
