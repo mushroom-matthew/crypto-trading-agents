@@ -441,6 +441,27 @@ class BacktestTrade(BaseModel):
     r_multiple: Optional[float] = Field(default=None, description="P&L divided by actual risk (risk-adjusted return)")
 
 
+class PairedTrade(BaseModel):
+    """Round-trip trade record pairing entry and exit fills."""
+
+    symbol: str
+    side: str = Field(description="Entry side (buy/sell)")
+    entry_timestamp: str
+    exit_timestamp: str
+    entry_price: Optional[float] = None
+    exit_price: Optional[float] = None
+    entry_trigger: Optional[str] = None
+    exit_trigger: Optional[str] = None
+    entry_timeframe: Optional[str] = None
+    qty: Optional[float] = None
+    pnl: Optional[float] = None
+    fees: Optional[float] = Field(default=None, description="Sum of entry + exit fees")
+    hold_duration_hours: Optional[float] = None
+    risk_used_abs: Optional[float] = None
+    actual_risk_at_stop: Optional[float] = None
+    r_multiple: Optional[float] = None
+
+
 # Playback schemas for time-series navigation
 class CandleWithIndicators(BaseModel):
     """OHLCV candle with pre-computed technical indicators."""
@@ -936,6 +957,12 @@ async def get_backtest_trades(
                 if pnl_val is not None and actual_risk is not None and actual_risk > 0:
                     r_multiple = pnl_val / actual_risk
 
+                # Map field names: backtest stores "risk_used", API exposes "risk_used_abs"
+                risk_used = trade.get("risk_used")
+                if risk_used is None:
+                    risk_used = trade.get("risk_used_abs")
+                allocated_risk = trade.get("allocated_risk_abs")
+
                 trades_list.append(
                     BacktestTrade(
                         timestamp=str(ts),
@@ -947,10 +974,10 @@ async def get_backtest_trades(
                         pnl=pnl_val,
                         # Try trigger_id first, fall back to reason (LLM strategist uses "reason")
                         trigger_id=trade.get("trigger_id") or trade.get("reason"),
-                        risk_used_abs=float(trade.get("risk_used_abs", 0)) if trade.get("risk_used_abs") is not None else None,
+                        risk_used_abs=float(risk_used) if risk_used is not None else None,
                         actual_risk_at_stop=actual_risk,
                         stop_distance=float(trade.get("stop_distance", 0)) if trade.get("stop_distance") is not None else None,
-                        allocated_risk_abs=float(trade.get("allocated_risk_abs", 0)) if trade.get("allocated_risk_abs") is not None else None,
+                        allocated_risk_abs=float(allocated_risk) if allocated_risk is not None else None,
                         profile_multiplier=float(trade.get("profile_multiplier", 0)) if trade.get("profile_multiplier") is not None else None,
                         r_multiple=r_multiple,
                     )
@@ -964,6 +991,109 @@ async def get_backtest_trades(
         raise
     except Exception as e:
         logger.error("Failed to get backtest trades: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/paired_trades", response_model=List[PairedTrade])
+async def get_paired_trades(run_id: str):
+    """
+    Get round-trip (entry/exit paired) trade records from backtest.
+
+    Returns paired trade data from the portfolio tracker's trade_log.
+    For legacy runs without trade_log, returns an empty list.
+    """
+    try:
+        cached = await get_backtest_cached_async(run_id)
+        if not cached:
+            raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
+
+        trade_log = cached.get("trade_log")
+        if not trade_log:
+            return []
+
+        # Build a lookup of fills by (symbol, timestamp) for fee/risk enrichment
+        fills = cached.get("trades", [])
+        fill_index: Dict[tuple, Dict[str, Any]] = {}
+        for fill in fills:
+            ts = fill.get("timestamp") or fill.get("time")
+            if hasattr(ts, "isoformat"):
+                ts = ts.isoformat()
+            sym = fill.get("symbol", "")
+            fill_index[(sym, str(ts))] = fill
+
+        paired: List[PairedTrade] = []
+        for entry in trade_log:
+            exit_ts = entry.get("timestamp")
+            if hasattr(exit_ts, "isoformat"):
+                exit_ts = exit_ts.isoformat()
+            entry_ts = entry.get("entry_timestamp")
+            if hasattr(entry_ts, "isoformat"):
+                entry_ts = entry_ts.isoformat()
+
+            symbol = entry.get("symbol", "UNKNOWN")
+            entry_side = entry.get("entry_side", "buy")
+
+            # Look up matching fills for fee/risk data
+            entry_fill = fill_index.get((symbol, str(entry_ts)), {})
+            exit_fill = fill_index.get((symbol, str(exit_ts)), {})
+
+            entry_fee = float(entry_fill.get("fee", 0)) if entry_fill.get("fee") is not None else 0.0
+            exit_fee = float(exit_fill.get("fee", 0)) if exit_fill.get("fee") is not None else 0.0
+            total_fees = entry_fee + exit_fee
+
+            # Compute hold duration
+            hold_duration_hours = None
+            if entry_ts and exit_ts:
+                try:
+                    from dateutil.parser import isoparse
+                    entry_dt = isoparse(str(entry_ts))
+                    exit_dt = isoparse(str(exit_ts))
+                    delta = (exit_dt - entry_dt).total_seconds()
+                    hold_duration_hours = round(delta / 3600, 2)
+                except Exception:
+                    pass
+
+            # Risk fields from entry fill
+            risk_used_raw = entry_fill.get("risk_used")
+            if risk_used_raw is None:
+                risk_used_raw = entry_fill.get("risk_used_abs")
+            actual_risk = entry_fill.get("actual_risk_at_stop")
+
+            pnl_val = float(entry.get("pnl", 0)) if entry.get("pnl") is not None else None
+            r_multiple = None
+            if pnl_val is not None and actual_risk is not None:
+                actual_risk_f = float(actual_risk)
+                if actual_risk_f > 0:
+                    r_multiple = pnl_val / actual_risk_f
+
+            # Compute qty from entry fill if available
+            qty = entry_fill.get("qty") or exit_fill.get("qty")
+
+            paired.append(PairedTrade(
+                symbol=symbol,
+                side=entry_side,
+                entry_timestamp=str(entry_ts) if entry_ts else "",
+                exit_timestamp=str(exit_ts) if exit_ts else "",
+                entry_price=float(entry.get("entry_price")) if entry.get("entry_price") is not None else None,
+                exit_price=float(entry.get("exit_price")) if entry.get("exit_price") is not None else None,
+                entry_trigger=entry.get("entry_reason"),
+                exit_trigger=entry.get("reason"),
+                entry_timeframe=entry.get("entry_timeframe"),
+                qty=float(qty) if qty is not None else None,
+                pnl=pnl_val,
+                fees=total_fees if total_fees > 0 else None,
+                hold_duration_hours=hold_duration_hours,
+                risk_used_abs=float(risk_used_raw) if risk_used_raw is not None else None,
+                actual_risk_at_stop=float(actual_risk) if actual_risk is not None else None,
+                r_multiple=r_multiple,
+            ))
+
+        return paired
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get paired trades: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

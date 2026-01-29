@@ -520,6 +520,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         "strategy": config.get("strategy"),
         "equity_curve": equity_curve,
         "trades": trades,
+        "trade_log": result.trade_log,
         "candles_processed": backtester.candles_processed,
         "candles_total": total_candles,
         "summary": summary,

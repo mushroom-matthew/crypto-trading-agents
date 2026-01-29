@@ -94,8 +94,8 @@ git commit -m "Risk: enforce daily budget and aggregate stop risk"
 
 ## Change Log (update during implementation)
 - 2026-01-22: Reworked derived trade cap math to avoid budget overshoot with an optional legacy floor; added scale-in aggregate risk/short-stop guardrails and expanded risk snapshots; updated simulator risk_used_abs/actual_risk_at_stop to use stop-distance proxies. Files: agents/strategies/plan_provider.py, services/strategist_plan_service.py, agents/strategies/risk_engine.py, agents/strategies/trade_risk.py, backtesting/simulator.py.
-- 2026-01-22: Added targeted backtest prompt file and logged follow-up observations. Files: docs/branching/comp-audit-risk-core-prompt.txt, docs/branching/comp-audit-risk-core.md.
-- 2026-01-22: Added follow-up branch doc for out-of-scope items (budget reset failure, LLM short stop + scale-in alignment). File: docs/branching/later/comp-audit-risk-followups.md.
+- 2026-01-22: Added targeted backtest prompt file and logged follow-up observations. Files: docs/branching/comp-audit-risk-core-prompt.txt, docs/branching/X-comp-audit-risk-core.md.
+- 2026-01-22: Added follow-up branch doc for out-of-scope items (budget reset failure, LLM short stop + scale-in alignment). File: docs/branching/later/_comp-audit-risk-followups.md.
 
 ## Notes / Follow-Ups (out of scope)
 - Strategist prompt/schema does not require `stop_loss_pct` on triggers, so shorts can omit stops unless the prompt is tightened.

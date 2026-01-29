@@ -98,6 +98,24 @@ const liveAPI = {
   },
 };
 
+const mergeFill = (base: Fill, incoming: Fill): Fill => ({
+  order_id: incoming.order_id ?? base.order_id,
+  symbol: incoming.symbol ?? base.symbol,
+  side: incoming.side ?? base.side,
+  qty: incoming.qty ?? base.qty,
+  price: incoming.price ?? base.price,
+  timestamp: incoming.timestamp ?? base.timestamp,
+  run_id: incoming.run_id ?? base.run_id,
+  correlation_id: incoming.correlation_id ?? base.correlation_id,
+  fee: incoming.fee ?? base.fee,
+  pnl: incoming.pnl ?? base.pnl,
+  trigger_id: incoming.trigger_id ?? base.trigger_id,
+  risk_used_abs: incoming.risk_used_abs ?? base.risk_used_abs,
+  actual_risk_at_stop: incoming.actual_risk_at_stop ?? base.actual_risk_at_stop,
+  stop_distance: incoming.stop_distance ?? base.stop_distance,
+  r_multiple: incoming.r_multiple ?? base.r_multiple,
+});
+
 export function LiveTradingMonitor() {
   // WebSocket state for real-time updates
   const [liveFills, setLiveFills] = useState<Fill[]>([]);
@@ -113,14 +131,21 @@ export function LiveTradingMonitor() {
     switch (message.type) {
       case 'fill':
         const fill: Fill = {
-          order_id: message.payload.order_id,
+          order_id: message.payload.order_id || message.event_id,
           symbol: message.payload.symbol,
           side: message.payload.side,
           qty: message.payload.qty,
-          price: message.payload.price,
-          timestamp: message.payload.timestamp || new Date().toISOString(),
+          price: message.payload.price ?? message.payload.fill_price,
+          timestamp: message.payload.timestamp || message.timestamp || new Date().toISOString(),
           run_id: message.payload.run_id,
           correlation_id: message.payload.correlation_id,
+          fee: message.payload.fee,
+          pnl: message.payload.pnl,
+          trigger_id: message.payload.trigger_id,
+          risk_used_abs: message.payload.risk_used_abs,
+          actual_risk_at_stop: message.payload.actual_risk_at_stop,
+          stop_distance: message.payload.stop_distance,
+          r_multiple: message.payload.r_multiple,
         };
         setLiveFills((prev) => [fill, ...prev].slice(0, 50));
         break;
@@ -223,16 +248,30 @@ export function LiveTradingMonitor() {
   }, [livePositions, positions]);
 
   const displayFills = useMemo(() => {
-    if (liveFills.length > 0) {
-      const merged = [...liveFills];
-      fills.forEach(fill => {
-        if (!merged.some(f => f.order_id === fill.order_id)) {
-          merged.push(fill);
-        }
-      });
-      return merged.slice(0, 50);
+    if (liveFills.length === 0) {
+      return fills;
     }
-    return fills;
+    const merged = [...liveFills];
+    const indexById = new Map<string, number>();
+    merged.forEach((fill, idx) => {
+      if (fill.order_id) {
+        indexById.set(fill.order_id, idx);
+      }
+    });
+    fills.forEach((fill) => {
+      if (!fill.order_id) {
+        merged.push(fill);
+        return;
+      }
+      const existingIndex = indexById.get(fill.order_id);
+      if (existingIndex !== undefined) {
+        merged[existingIndex] = mergeFill(merged[existingIndex], fill);
+      } else {
+        indexById.set(fill.order_id, merged.length);
+        merged.push(fill);
+      }
+    });
+    return merged.slice(0, 50);
   }, [liveFills, fills]);
 
   const displayBlocks = useMemo(() => {

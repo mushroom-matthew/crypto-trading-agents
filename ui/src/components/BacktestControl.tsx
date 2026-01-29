@@ -154,6 +154,12 @@ export function BacktestControl() {
     enabled: backtest?.status === 'completed',
   });
 
+  const { data: pairedTrades = [] } = useQuery({
+    queryKey: ['pairedTrades', selectedRun],
+    queryFn: () => backtestAPI.getPairedTrades(selectedRun!),
+    enabled: backtest?.status === 'completed',
+  });
+
   const symbolsFromTrades = useMemo(() => {
     const unique = new Set(trades.map((trade) => trade.symbol).filter(Boolean));
     return Array.from(unique).sort();
@@ -874,74 +880,148 @@ export function BacktestControl() {
         </div>
       )}
 
-        {/* Recent Trades */}
-        {isComplete && trades && trades.length > 0 && (
+        {/* Recent Trades — Round-trips when available, fills as fallback */}
+        {isComplete && (pairedTrades.length > 0 || (trades && trades.length > 0)) && (
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">Recent Trades</h2>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Trade-level risk stats: Risk Used = budget allocated, Actual Risk = qty × stop distance, R = P&L ÷ Actual Risk
-            </p>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
-                    <th className="pb-3">Time</th>
-                    <th className="pb-3">Symbol</th>
-                    <th className="pb-3">Side</th>
-                    <th className="pb-3">Trigger</th>
-                    <th className="pb-3 text-right">Qty</th>
-                    <th className="pb-3 text-right">Price</th>
-                    <th className="pb-3 text-right">Fee</th>
-                    <th className="pb-3 text-right">P&L</th>
-                    <th className="pb-3 text-right" title="Risk budget allocated for this trade">Risk Used</th>
-                    <th className="pb-3 text-right" title="Actual risk at stop (qty × stop distance)">Actual Risk</th>
-                    <th className="pb-3 text-right" title="R-multiple: P&L ÷ Actual Risk">R</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                  {trades.slice(0, 20).map((trade, idx) => (
-                    <tr key={idx}>
-                      <td className="py-2 text-gray-500">{formatDateTime(trade.timestamp)}</td>
-                      <td className="py-2 font-mono">{trade.symbol}</td>
-                      <td className="py-2">
-                        <span className={cn(
-                          'px-2 py-0.5 rounded text-xs font-semibold',
-                          trade.side?.toLowerCase() === 'buy' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
-                        )}>
-                          {trade.side?.toUpperCase()}
-                        </span>
-                      </td>
-                      <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-32 truncate" title={trade.trigger_id}>
-                        {trade.trigger_id || '-'}
-                      </td>
-                      <td className="py-2 text-right">{trade.qty?.toFixed(6)}</td>
-                      <td className="py-2 text-right">{formatCurrency(trade.price)}</td>
-                      <td className="py-2 text-right text-gray-500">
-                        {trade.fee != null ? formatCurrency(trade.fee) : '-'}
-                      </td>
-                      <td className={cn(
-                        'py-2 text-right font-semibold',
-                        trade.pnl && trade.pnl > 0 ? 'text-green-500' : trade.pnl && trade.pnl < 0 ? 'text-red-500' : 'text-gray-500'
-                      )}>
-                        {trade.pnl != null ? formatCurrency(trade.pnl) : '-'}
-                      </td>
-                      <td className="py-2 text-right text-gray-600 dark:text-gray-400">
-                        {trade.risk_used_abs != null ? formatCurrency(trade.risk_used_abs) : '-'}
-                      </td>
-                      <td className="py-2 text-right text-gray-600 dark:text-gray-400">
-                        {trade.actual_risk_at_stop != null ? formatCurrency(trade.actual_risk_at_stop) : '-'}
-                      </td>
-                      <td className={cn(
-                        'py-2 text-right font-semibold',
-                        trade.r_multiple && trade.r_multiple > 0 ? 'text-green-500' : trade.r_multiple && trade.r_multiple < 0 ? 'text-red-500' : 'text-gray-500'
-                      )}>
-                        {trade.r_multiple != null ? trade.r_multiple.toFixed(2) : '-'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <h2 className="text-xl font-semibold mb-4">
+              {pairedTrades.length > 0 ? 'Round-Trip Trades' : 'Recent Trades'}
+            </h2>
+
+            {pairedTrades.length > 0 ? (
+              <>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                  Round-trip trades pairing entry and exit fills. Hold = duration in hours, R = P&L / Actual Risk
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                        <th className="pb-3">Symbol</th>
+                        <th className="pb-3">Side</th>
+                        <th className="pb-3">Entry Time</th>
+                        <th className="pb-3">Exit Time</th>
+                        <th className="pb-3 text-right">Entry Price</th>
+                        <th className="pb-3 text-right">Exit Price</th>
+                        <th className="pb-3 text-right">Qty</th>
+                        <th className="pb-3 text-right">Fees</th>
+                        <th className="pb-3 text-right">P&L</th>
+                        <th className="pb-3 text-right" title="Hold duration in hours">Hold (h)</th>
+                        <th className="pb-3 text-right" title="Risk budget allocated">Risk Used</th>
+                        <th className="pb-3 text-right" title="R-multiple: P&L / Actual Risk">R</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                      {pairedTrades.slice(0, 20).map((pt, idx) => (
+                        <tr key={idx}>
+                          <td className="py-2 font-mono">{pt.symbol}</td>
+                          <td className="py-2">
+                            <span className={cn(
+                              'px-2 py-0.5 rounded text-xs font-semibold',
+                              pt.side?.toLowerCase() === 'buy' || pt.side?.toLowerCase() === 'long' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                            )}>
+                              {pt.side?.toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="py-2 text-gray-500 text-xs">{formatDateTime(pt.entry_timestamp)}</td>
+                          <td className="py-2 text-gray-500 text-xs">{formatDateTime(pt.exit_timestamp)}</td>
+                          <td className="py-2 text-right">{pt.entry_price != null ? formatCurrency(pt.entry_price) : '-'}</td>
+                          <td className="py-2 text-right">{pt.exit_price != null ? formatCurrency(pt.exit_price) : '-'}</td>
+                          <td className="py-2 text-right">{pt.qty != null ? pt.qty.toFixed(6) : '-'}</td>
+                          <td className="py-2 text-right text-gray-500">
+                            {pt.fees != null ? formatCurrency(pt.fees) : '-'}
+                          </td>
+                          <td className={cn(
+                            'py-2 text-right font-semibold',
+                            pt.pnl && pt.pnl > 0 ? 'text-green-500' : pt.pnl && pt.pnl < 0 ? 'text-red-500' : 'text-gray-500'
+                          )}>
+                            {pt.pnl != null ? formatCurrency(pt.pnl) : '-'}
+                          </td>
+                          <td className="py-2 text-right text-gray-600 dark:text-gray-400">
+                            {pt.hold_duration_hours != null ? pt.hold_duration_hours.toFixed(1) : '-'}
+                          </td>
+                          <td className="py-2 text-right text-gray-600 dark:text-gray-400">
+                            {pt.risk_used_abs != null ? formatCurrency(pt.risk_used_abs) : '-'}
+                          </td>
+                          <td className={cn(
+                            'py-2 text-right font-semibold',
+                            pt.r_multiple && pt.r_multiple > 0 ? 'text-green-500' : pt.r_multiple && pt.r_multiple < 0 ? 'text-red-500' : 'text-gray-500'
+                          )}>
+                            {pt.r_multiple != null ? pt.r_multiple.toFixed(2) : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                  Trade-level risk stats: Risk Used = budget allocated, Actual Risk = qty x stop distance, R = P&L / Actual Risk
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                        <th className="pb-3">Time</th>
+                        <th className="pb-3">Symbol</th>
+                        <th className="pb-3">Side</th>
+                        <th className="pb-3">Trigger</th>
+                        <th className="pb-3 text-right">Qty</th>
+                        <th className="pb-3 text-right">Price</th>
+                        <th className="pb-3 text-right">Fee</th>
+                        <th className="pb-3 text-right">P&L</th>
+                        <th className="pb-3 text-right" title="Risk budget allocated for this trade">Risk Used</th>
+                        <th className="pb-3 text-right" title="Actual risk at stop (qty x stop distance)">Actual Risk</th>
+                        <th className="pb-3 text-right" title="R-multiple: P&L / Actual Risk">R</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                      {trades.slice(0, 20).map((trade, idx) => (
+                        <tr key={idx}>
+                          <td className="py-2 text-gray-500">{formatDateTime(trade.timestamp)}</td>
+                          <td className="py-2 font-mono">{trade.symbol}</td>
+                          <td className="py-2">
+                            <span className={cn(
+                              'px-2 py-0.5 rounded text-xs font-semibold',
+                              trade.side?.toLowerCase() === 'buy' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                            )}>
+                              {trade.side?.toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-32 truncate" title={trade.trigger_id}>
+                            {trade.trigger_id || '-'}
+                          </td>
+                          <td className="py-2 text-right">{trade.qty?.toFixed(6)}</td>
+                          <td className="py-2 text-right">{formatCurrency(trade.price)}</td>
+                          <td className="py-2 text-right text-gray-500">
+                            {trade.fee != null ? formatCurrency(trade.fee) : '-'}
+                          </td>
+                          <td className={cn(
+                            'py-2 text-right font-semibold',
+                            trade.pnl && trade.pnl > 0 ? 'text-green-500' : trade.pnl && trade.pnl < 0 ? 'text-red-500' : 'text-gray-500'
+                          )}>
+                            {trade.pnl != null ? formatCurrency(trade.pnl) : '-'}
+                          </td>
+                          <td className="py-2 text-right text-gray-600 dark:text-gray-400">
+                            {trade.risk_used_abs != null ? formatCurrency(trade.risk_used_abs) : '-'}
+                          </td>
+                          <td className="py-2 text-right text-gray-600 dark:text-gray-400">
+                            {trade.actual_risk_at_stop != null ? formatCurrency(trade.actual_risk_at_stop) : '-'}
+                          </td>
+                          <td className={cn(
+                            'py-2 text-right font-semibold',
+                            trade.r_multiple && trade.r_multiple > 0 ? 'text-green-500' : trade.r_multiple && trade.r_multiple < 0 ? 'text-red-500' : 'text-gray-500'
+                          )}>
+                            {trade.r_multiple != null ? trade.r_multiple.toFixed(2) : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
           </div>
         )}
 

@@ -326,6 +326,7 @@ class StrategistBacktestResult:
     final_positions: Dict[str, float]
     daily_reports: List[Dict[str, Any]]
     bar_decisions: Dict[str, List[Dict[str, Any]]]
+    trade_log: List[Dict[str, Any]] = field(default_factory=list)
     intraday_judge_history: List[Dict[str, Any]] = field(default_factory=list)
     judge_triggered_replans: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -2704,10 +2705,22 @@ class LLMStrategistBacktester:
                         market_structure=market_structure_briefs,
                     )
                     slot_orders.extend(executed_records)
-                    # Track trades for adaptive judge
+                    # Enrich portfolio fills with risk data from executed records
                     fills_after = len(self.portfolio.fills)
-                    if fills_after > fills_before:
-                        for _ in range(fills_after - fills_before):
+                    new_fill_count = fills_after - fills_before
+                    if new_fill_count > 0 and executed_records:
+                        for i, rec in enumerate(executed_records):
+                            fill_idx = fills_before + i
+                            if fill_idx < fills_after:
+                                fill = self.portfolio.fills[fill_idx]
+                                fill["risk_used"] = rec.get("risk_used")
+                                fill["allocated_risk_abs"] = rec.get("allocated_risk_abs")
+                                fill["actual_risk_at_stop"] = rec.get("actual_risk_at_stop")
+                                fill["stop_distance"] = rec.get("stop_distance")
+                                fill["profile_multiplier"] = rec.get("profile_multiplier")
+                    # Track trades for adaptive judge
+                    if new_fill_count > 0:
+                        for _ in range(new_fill_count):
                             self._on_trade_executed(ts)
                     if timeframe == self.timeframes[0]:
                         latest_prices[pair] = bar.close
@@ -2811,6 +2824,19 @@ class LLMStrategistBacktester:
             "trigger_evaluation_samples": self._all_trigger_evaluation_samples if self.debug_trigger_sample_rate > 0 else None,
             "trigger_evaluation_sample_count": len(self._all_trigger_evaluation_samples) if self.debug_trigger_sample_rate > 0 else 0,
         }
+        # Serialize trade_log with datetime→isoformat conversion, excluding market_structure_entry to avoid bloat
+        serialized_trade_log = []
+        for entry in self.portfolio.trade_log:
+            record = {}
+            for k, v in entry.items():
+                if k == "market_structure_entry":
+                    continue
+                if hasattr(v, "isoformat"):
+                    record[k] = v.isoformat()
+                else:
+                    record[k] = v
+            serialized_trade_log.append(record)
+
         return StrategistBacktestResult(
             equity_curve=equity_curve,
             fills=fills_df,
@@ -2821,6 +2847,7 @@ class LLMStrategistBacktester:
             final_positions=dict(self.portfolio.positions),
             daily_reports=daily_reports,
             bar_decisions=dict(self.bar_decisions_by_day),
+            trade_log=serialized_trade_log,
             intraday_judge_history=list(self.intraday_judge_history),
             judge_triggered_replans=list(self.judge_triggered_replans),
         )

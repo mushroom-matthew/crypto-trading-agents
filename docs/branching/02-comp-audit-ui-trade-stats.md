@@ -93,6 +93,13 @@ git commit -m "UI: trade-level risk and performance stats"
   - ui/src/lib/api.ts: Extended BacktestTrade interface with risk_used_abs, actual_risk_at_stop, stop_distance, allocated_risk_abs, profile_multiplier, r_multiple
   - ui/src/components/BacktestControl.tsx: Added Fee, Risk Used, Actual Risk, R columns to trades table with color-coded R-multiple
   - ui/src/components/LiveTradingMonitor.tsx: Extended Fill interface; added risk stats row to fill cards showing P&L, Risk, and R when available
+- 2026-01-29: Added round-trip paired trades and risk data plumbing
+  - backtesting/llm_strategist_runner.py: Added trade_log field to StrategistBacktestResult; enriched portfolio fills with risk data from executed records; serialized trade_log with datetime conversion
+  - backtesting/activities.py: Passed trade_log through to backtest result dict
+  - ops_api/routers/backtests.py: Added PairedTrade schema and GET /{run_id}/paired_trades endpoint; fixed risk_used/risk_used_abs field name mapping
+  - ui/src/lib/api.ts: Added PairedTrade interface and getPairedTrades API method
+  - ui/src/components/BacktestControl.tsx: Round-trip trades table (entry/exit paired) with hold duration, falls back to fill-level table for legacy runs
+  - ui/src/components/LiveTradingMonitor.tsx: Added mergeFill helper; improved WebSocket fill parsing for fee/risk/trigger fields
 
 ## Test Evidence (append results before commit)
 ```
@@ -104,6 +111,17 @@ Imports OK
 ```
 
 Note: -k backtests returned 0 selected tests (no backtest-specific test files), but import verification passed.
+
+```
+# 2026-01-29: Post paired-trades implementation
+uv run python -c "from ops_api.routers.backtests import BacktestTrade, PairedTrade; from ops_api.routers.live import Fill; from ops_api.schemas import FillRecord; from backtesting.llm_strategist_runner import StrategistBacktestResult; print('All imports OK')"
+All imports OK
+
+uv run pytest tests/test_trigger_deterministic.py -vv
+============================== 13 passed in 1.12s ==============================
+```
+
+Note: -k live and -k backtests fail at collection due to missing OPENAI_API_KEY (pre-existing env issue, unrelated to changes).
 
 ## Human Verification Evidence (append results before commit when required)
 PENDING: Launch UI and verify trade-level fields render in Backtest and Live views.

@@ -5,7 +5,7 @@ Track follow-ups discovered during comp-audit-risk-core that were explicitly out
 
 ## Source Plans
 - docs/analysis/COMPUTATION_AUDIT_PLAN.md (Phase 0 follow-ups)
-- docs/branching/comp-audit-risk-core.md (Out-of-scope notes and test failures)
+- docs/branching/X-comp-audit-risk-core.md (Out-of-scope notes and test failures)
 
 ## Scope
 - Fix LLMStrategistBacktester risk-budget allowance fallback when initial_cash is missing (tests/risk/test_daily_budget_reset).

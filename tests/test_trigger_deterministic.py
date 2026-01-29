@@ -181,15 +181,25 @@ class TestRuleEvaluatorDeterministic:
         assert evaluator.evaluate("rsi_14 between 60 and 80", context) is False
 
     def test_position_filter(self):
-        """Test position filter in rules."""
+        """Test position filter in rules using boolean indicators.
+
+        String comparisons like position == 'flat' are normalized to
+        boolean indicators (is_flat) by _normalize_position_comparisons.
+        """
         evaluator = RuleEvaluator()
 
-        context_flat = {"position": "flat", "close": 50000.0, "sma_short": 49000.0}
-        context_long = {"position": "long", "close": 50000.0, "sma_short": 49000.0}
+        context_flat = {"position": "flat", "is_flat": True, "is_long": False, "is_short": False, "close": 50000.0, "sma_short": 49000.0}
+        context_long = {"position": "long", "is_flat": False, "is_long": True, "is_short": False, "close": 50000.0, "sma_short": 49000.0}
 
+        # String comparisons are auto-normalized to boolean indicators
         rule = "position == 'flat' and close > sma_short"
         assert evaluator.evaluate(rule, context_flat) is True
         assert evaluator.evaluate(rule, context_long) is False
+
+        # Direct boolean form also works
+        assert evaluator.evaluate("is_flat and close > sma_short", context_flat) is True
+        assert evaluator.evaluate("not is_flat", context_flat) is False
+        assert evaluator.evaluate("not is_flat", context_long) is True
 
     def test_vol_state_filter(self):
         """Test vol_state filter in rules."""

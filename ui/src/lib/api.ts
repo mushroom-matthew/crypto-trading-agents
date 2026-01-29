@@ -159,6 +159,25 @@ export interface BacktestTrade {
   r_multiple?: number;
 }
 
+export interface PairedTrade {
+  symbol: string;
+  side: string;
+  entry_timestamp: string;
+  exit_timestamp: string;
+  entry_price?: number;
+  exit_price?: number;
+  entry_trigger?: string;
+  exit_trigger?: string;
+  entry_timeframe?: string;
+  qty?: number;
+  pnl?: number;
+  fees?: number;
+  hold_duration_hours?: number;
+  risk_used_abs?: number;
+  actual_risk_at_stop?: number;
+  r_multiple?: number;
+}
+
 export interface MarketTick {
   symbol: string;
   price: number;
@@ -271,6 +290,12 @@ export const backtestAPI = {
     const response = await api.get(`/backtests/${runId}/trades`, {
       params: { limit, offset },
     });
+    return response.data;
+  },
+
+  // Get paired (round-trip) trades
+  getPairedTrades: async (runId: string): Promise<PairedTrade[]> => {
+    const response = await api.get(`/backtests/${runId}/paired_trades`);
     return response.data;
   },
 
