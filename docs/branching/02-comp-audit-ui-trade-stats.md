@@ -124,5 +124,55 @@ uv run pytest tests/test_trigger_deterministic.py -vv
 Note: -k live and -k backtests fail at collection due to missing OPENAI_API_KEY (pre-existing env issue, unrelated to changes).
 
 ## Human Verification Evidence (append results before commit when required)
-PENDING: Launch UI and verify trade-level fields render in Backtest and Live views.
+2026-01-29: User verified backtest backtest-b836ce01-d8ef-402e-a74d-4afa241f3344
+- Round-Trip Trades table renders correctly with 5 paired trades.
+- Legacy fill-level fallback view confirmed working.
+- Issues found and addressed below.
+
+## Backtest Analysis: backtest-b836ce01-d8ef-402e-a74d-4afa241f3344
+
+**Run:** 3-day backtest (2024-02-14 to 2024-02-16), BTC-USD + ETH-USD, $10,000 starting equity.
+
+### Issue 1: Risk Used column shows $0.00
+
+**Root cause:** The "Risk Used" column mapped to `risk_used_abs`, which tracks risk *budget* consumption from `_check_risk_budget()`. When risk budgets are not configured (the default), `allowance` is always 0. The meaningful risk metric is `actual_risk_at_stop` (qty × stop distance), which IS populated (e.g. $5.07, $4.89).
+
+**Fix:** Replaced "Risk Used" column with "Risk" showing `actual_risk_at_stop`. Added entry/exit trigger columns.
+
+### Issue 2: No trades after first 8 hours (06:45 UTC day 1)
+
+**Root cause:** The intraday judge evaluated performance at 06:45 UTC after 5 round-trips (10 fills), all losers (0% win rate, -$6.88 gross P&L, -0.15% return). The judge:
+1. Scored the strategy at **17.8/100** (below the 40.0 replan threshold).
+2. Disabled triggers: `BTC-2`, `BTC-3`, `ETH-2`, `ETH-3` (trend_continuation + mean_reversion categories).
+3. Disabled categories: `trend_continuation`, `mean_reversion`.
+4. The remaining triggers (`BTC-1` = trend_continuation) were also blocked by category veto.
+5. Only `volatility_breakout` and `emergency_exit` triggers remained theoretically enabled, but `volatility_breakout` never fired, and `emergency_exit` only fires with open positions (there were none).
+
+**Result:** 100% of subsequent trigger attempts were blocked by `symbol_veto` (177 blocks day 1, 264 blocks day 2, similar day 3). The judge's second evaluation at 18:45 UTC doubled down, also disabling `BTC-1`, leaving zero entry triggers active for the remainder of the backtest.
+
+**Structural problem:** The judge's "disable low-confidence triggers" feedback creates an irreversible death spiral — once all triggers are disabled, no new trades execute, so the judge sees the same stale snapshot and keeps triggers disabled. There is no re-enablement mechanism or minimum-trigger floor.
+
+### Issue 3: All trades hold exactly 0.5 hours
+
+**Root cause:** The plan sets `min_hold` to 0.5 hours. Exit triggers fire on the 15m or 30m timeframe. Every entry on the 1h bar gets its exit trigger on the very next 30m bar (0.5h later), which is the earliest the `min_hold` constraint allows. This means `min_hold` is the *binding constraint* on hold duration, not the strategy's intended exit logic.
+
+4 additional exit attempts were blocked by `min_hold` (tried to exit at 15m = 0.25h, before the 0.5h floor).
+
+### Gaps Highlighted by This Analysis
+
+1. **Judge death spiral (critical):** No floor on minimum enabled triggers. Once the judge disables all entry triggers, trading halts permanently. Need either:
+   - Minimum trigger count floor (e.g. at least 2 entry triggers must remain enabled)
+   - Automatic re-enablement after N bars of zero activity
+   - Judge self-correction: detect "no trades since last eval" and re-enable conservatively
+
+2. **`risk_used_abs` always zero without risk budgets:** The `allowance` field from `_check_risk_budget()` is 0 when risk budgets aren't configured. Either:
+   - Default to `actual_risk_at_stop` as the primary risk metric
+   - Only show `risk_used_abs` when risk budgets are explicitly configured
+   - Populate `risk_used_abs` with the actual position risk even without budgets
+
+3. **`min_hold` dominates exit timing:** When `min_hold` equals the smallest exit timeframe, exits are mechanically forced at exactly `min_hold`. The strategy's exit signal quality can't be assessed because holds are never longer than the floor. Consider:
+   - Validating that `min_hold` < smallest exit timeframe
+   - Warning in daily reports when `min_hold` blocks > N% of exit attempts
+
+4. **Judge snapshot staleness:** The second judge eval at 18:45 used the exact same snapshot as the 06:45 eval (same equity, same trade count) because no new trades occurred. The judge should detect unchanged snapshots and either skip evaluation or try a different intervention.
 

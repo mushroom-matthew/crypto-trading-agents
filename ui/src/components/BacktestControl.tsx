@@ -898,6 +898,8 @@ export function BacktestControl() {
                       <tr className="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
                         <th className="pb-3">Symbol</th>
                         <th className="pb-3">Side</th>
+                        <th className="pb-3">Entry Trigger</th>
+                        <th className="pb-3">Exit Trigger</th>
                         <th className="pb-3">Entry Time</th>
                         <th className="pb-3">Exit Time</th>
                         <th className="pb-3 text-right">Entry Price</th>
@@ -906,7 +908,7 @@ export function BacktestControl() {
                         <th className="pb-3 text-right">Fees</th>
                         <th className="pb-3 text-right">P&L</th>
                         <th className="pb-3 text-right" title="Hold duration in hours">Hold (h)</th>
-                        <th className="pb-3 text-right" title="Risk budget allocated">Risk Used</th>
+                        <th className="pb-3 text-right" title="Actual risk at stop (qty x stop distance)">Risk</th>
                         <th className="pb-3 text-right" title="R-multiple: P&L / Actual Risk">R</th>
                       </tr>
                     </thead>
@@ -921,6 +923,12 @@ export function BacktestControl() {
                             )}>
                               {pt.side?.toUpperCase()}
                             </span>
+                          </td>
+                          <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-28 truncate" title={pt.entry_trigger}>
+                            {pt.entry_trigger || '-'}
+                          </td>
+                          <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-28 truncate" title={pt.exit_trigger}>
+                            {pt.exit_trigger || '-'}
                           </td>
                           <td className="py-2 text-gray-500 text-xs">{formatDateTime(pt.entry_timestamp)}</td>
                           <td className="py-2 text-gray-500 text-xs">{formatDateTime(pt.exit_timestamp)}</td>
@@ -940,7 +948,7 @@ export function BacktestControl() {
                             {pt.hold_duration_hours != null ? pt.hold_duration_hours.toFixed(1) : '-'}
                           </td>
                           <td className="py-2 text-right text-gray-600 dark:text-gray-400">
-                            {pt.risk_used_abs != null ? formatCurrency(pt.risk_used_abs) : '-'}
+                            {pt.actual_risk_at_stop != null ? formatCurrency(pt.actual_risk_at_stop) : '-'}
                           </td>
                           <td className={cn(
                             'py-2 text-right font-semibold',
