@@ -1,29 +1,82 @@
 # Runbook: Emergency Exit Bypass and Override
 
 ## Overview
-Split runbook for emergency-exit test gaps tied to bypass or override behavior. Source: backtest `backtest-d94320c0`.
+Emergency exits have special bypass behavior (hold-rule ignore, risk checks, judge overrides). This runbook locks down the intended bypass semantics with explicit tests and ensures judge category disabling works for `emergency_exit`.
 
-## Working rules
-- File issues per group; avoid a single mega-branch.
-- Judge/strategist loop gaps are design items, not test gaps. Track them separately.
-- After issues are filed, delete this runbook.
+**Source:** backtest `backtest-d94320c0`.
 
-## Scope (items 3, 5, 6)
-### 3. Hold rule bypass
-No test confirms emergency exits ignore `hold_rule` (trigger_engine.py:419) while regular exits respect it. This is an intentional design decision that needs test coverage.
+## Scope
+1. **Hold-rule bypass:** Emergency exits should ignore `hold_rule` while regular exits respect it.
+2. **Risk budget bypass:** Define and test whether emergency exits bypass risk budget checks or consume budget.
+3. **Judge category disabling:** `disabled_categories=["emergency_exit"]` must block emergency exits with an explicit veto record.
 
-### 5. Risk bypass confirmation
-TradeRiskEvaluator interaction with emergency flatten is unclear. No test verifies whether emergency exits bypass risk budget checks or consume budget.
+## Key Files
+- `agents/strategies/trigger_engine.py` (hold-rule bypass, judge constraints)
+- `agents/strategies/trade_risk.py` (risk evaluation semantics)
+- `trading_core/execution_engine.py` (execution gating, emergency exit handling)
+- `tests/test_trigger_engine.py` (trigger engine unit coverage)
+- `tests/risk/test_exit_bypass.py` (risk bypass invariants)
+- `tests/test_execution_engine.py` (execution-level bypass checks)
 
-### 6. Judge category disabling
-No test for `disabled_categories=["emergency_exit"]`. The judge should be able to disable emergency exits as a category, and this path needs coverage.
+## Acceptance Criteria
+- Emergency exits bypass `hold_rule`, while non-emergency exits still respect it.
+- Emergency exits either bypass risk budgets or consume budget, with tests documenting the chosen behavior.
+- Judge category disabling blocks emergency exits and records a block with reason `CATEGORY`.
 
-## Acceptance
-- Tests lock down what emergency exits bypass (hold_rule, risk checks) vs respect.
-- Tests confirm judge category disabling works for `emergency_exit`.
+## Out of Scope
+- Min-hold and cooldown metadata enforcement (covered in runbook 04).
+- Missing `exit_rule` handling (covered in runbook 06).
+- Judge/strategist design changes (tracked separately).
 
-## Out of scope
-Judge/strategist loop design gaps:
-- Judge "competing signals" diagnosis not actionable.
-- No mechanism for judge to alter trigger conflict detection logic.
-- Emergency exit metrics (count, pct) computation not tested.
+## Test Plan (required before commit)
+```bash
+uv run pytest tests/test_trigger_engine.py -vv
+uv run pytest tests/risk/test_exit_bypass.py -vv
+uv run pytest tests/test_execution_engine.py -vv
+```
+
+If tests cannot run locally, obtain user-run output and paste it into the Test Evidence section before committing.
+
+## Human Verification (required)
+- Inspect block entries for judge category disables to confirm category-level veto is surfaced.
+- Confirm hold-rule bypass is only applied to emergency exits.
+
+## Worktree Setup (recommended for parallel agents)
+```bash
+git fetch
+git worktree add -b emergency-exit-bypass-override ../wt-emergency-exit-bypass-override main
+cd ../wt-emergency-exit-bypass-override
+
+# When finished
+git worktree remove ../wt-emergency-exit-bypass-override
+```
+
+## Git Workflow (explicit)
+```bash
+git checkout main
+git pull
+git checkout -b emergency-exit-bypass-override
+
+git status
+git diff
+
+git add agents/strategies/trigger_engine.py \
+  agents/strategies/trade_risk.py \
+  trading_core/execution_engine.py \
+  tests/test_trigger_engine.py \
+  tests/risk/test_exit_bypass.py \
+  tests/test_execution_engine.py
+
+uv run pytest tests/test_trigger_engine.py -vv
+uv run pytest tests/risk/test_exit_bypass.py -vv
+uv run pytest tests/test_execution_engine.py -vv
+
+git commit -m "Emergency exit: bypass and override tests"
+```
+
+## Change Log (update during implementation)
+- 2026-01-29: Expanded runbook format with scope, acceptance, test plan, and git workflow details.
+
+## Test Evidence (append results before commit)
+
+## Human Verification Evidence (append results before commit)
