@@ -229,7 +229,10 @@ class ExecutionEngine:
                 detail=f"Reached max trades per day ({max_trades_cap}){suffix}",
             )
 
-        if constraints and not is_emergency_exit:
+        # Judge constraints (disabled triggers/categories) apply to ALL triggers
+        # including emergency exits.  This gives the judge an explicit kill-switch
+        # for emergency exits via disabled_categories=["emergency_exit"].
+        if constraints:
             if trigger.trigger_id in constraints.disabled_trigger_ids:
                 state.log_skip(BlockReason.SYMBOL_VETO.value)
                 return TradeEvent(

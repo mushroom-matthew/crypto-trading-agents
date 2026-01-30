@@ -98,3 +98,67 @@ def test_exit_flattens_when_position_exists() -> None:
     assert isinstance(orders[0], Order)
     assert orders[0].side == "sell"
     assert orders[0].quantity == pytest.approx(1.0)
+
+
+# --- Runbook 05: Risk budget bypass invariants ---
+
+
+def test_emergency_exit_bypasses_risk_budget() -> None:
+    """Emergency exits bypass risk sizing — TradeRiskEvaluator returns allowed=True
+    with quantity=0.0 (flatten uses absolute position size, not risk-sized qty)."""
+    from agents.strategies.trade_risk import TradeRiskEvaluator
+
+    plan = _plan("exit")
+    risk = RiskEngine(
+        plan.risk_constraints,
+        {rule.symbol: rule for rule in plan.sizing_rules},
+        daily_anchor_equity=1000.0,
+        risk_profile=RiskProfile(),
+    )
+    evaluator = TradeRiskEvaluator(risk)
+    trigger = plan.triggers[0]
+
+    result = evaluator.evaluate(trigger, "flatten", 100.0, _portfolio(1.0), _indicator())
+    assert result.allowed is True, "Flatten must always be allowed for emergency exits"
+
+
+def test_regular_entry_blocked_by_zero_risk_budget() -> None:
+    """Regular entries are blocked when risk constraints prevent sizing."""
+    from agents.strategies.trade_risk import TradeRiskEvaluator
+
+    now = datetime(2024, 1, 1)
+    entry_trigger = TriggerCondition(
+        id="entry_trigger",
+        symbol="BTC",
+        direction="long",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="False",
+        category="trend_continuation",
+    )
+    plan = StrategyPlan(
+        generated_at=now,
+        valid_until=now,
+        global_view=None,
+        regime="range",
+        triggers=[entry_trigger],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=0.0,  # zero risk budget blocks entries
+            max_symbol_exposure_pct=100.0,
+            max_portfolio_exposure_pct=100.0,
+            max_daily_loss_pct=100.0,
+            max_daily_risk_budget_pct=None,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="BTC", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=10,
+    )
+    risk = RiskEngine(
+        plan.risk_constraints,
+        {rule.symbol: rule for rule in plan.sizing_rules},
+        daily_anchor_equity=1000.0,
+        risk_profile=RiskProfile(),
+    )
+    evaluator = TradeRiskEvaluator(risk)
+
+    result = evaluator.evaluate(entry_trigger, "entry", 100.0, _portfolio(0.0), _indicator())
+    assert result.allowed is False, "Entry must be blocked when risk budget is zero"

@@ -6,6 +6,7 @@ import pytest
 
 from agents.strategies.risk_engine import RiskEngine
 from agents.strategies.trigger_engine import Bar, TriggerEngine
+from schemas.judge_feedback import JudgeConstraints
 from schemas.llm_strategist import IndicatorSnapshot, PortfolioState, RiskConstraint, StrategyPlan, TriggerCondition
 
 
@@ -357,3 +358,117 @@ def test_emergency_exit_dedup_wins_even_with_permissive_risk():
     assert orders[0].emergency is True
     preempt_blocks = [b for b in blocks if b["reason"] == "emergency_exit_preempts_entry"]
     assert len(preempt_blocks) == 1
+
+
+# --- Runbook 05: Hold-rule bypass ---
+
+
+def test_emergency_exit_bypasses_hold_rule():
+    """Emergency exits must ignore hold_rule and fire even when hold_rule is active."""
+    trigger = TriggerCondition(
+        id="btc_emergency_exit",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        hold_rule="True",  # hold_rule always active — would suppress a normal exit
+        category="emergency_exit",
+    )
+    plan = _plan(trigger)
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders, "Emergency exit should fire despite active hold_rule"
+    assert orders[0].emergency is True
+    hold_blocks = [b for b in blocks if b["reason"] == "HOLD_RULE"]
+    assert not hold_blocks, "Emergency exits must not produce HOLD_RULE blocks"
+
+
+def test_regular_exit_respects_hold_rule():
+    """Non-emergency exits must be suppressed when hold_rule evaluates True."""
+    trigger = TriggerCondition(
+        id="btc_exit",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        hold_rule="True",  # hold_rule always active
+        category="trend_continuation",
+    )
+    plan = _plan(trigger)
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert not orders, "Regular exit should be suppressed by active hold_rule"
+    hold_blocks = [b for b in blocks if b["reason"] == "HOLD_RULE"]
+    assert len(hold_blocks) == 1
+
+
+# --- Runbook 05: Judge category disabling ---
+
+
+def test_judge_disabled_category_blocks_emergency_exit():
+    """disabled_categories=['emergency_exit'] must block emergency exits with CATEGORY reason."""
+    trigger = TriggerCondition(
+        id="btc_emergency_exit",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        category="emergency_exit",
+    )
+    plan = _plan(trigger)
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    constraints = JudgeConstraints(
+        disabled_trigger_ids=[],
+        disabled_categories=["emergency_exit"],
+        risk_mode="normal",
+    )
+    engine = TriggerEngine(
+        plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0,
+        judge_constraints=constraints,
+    )
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert not orders, "Emergency exit must be blocked when its category is disabled"
+    cat_blocks = [b for b in blocks if b["reason"] == "category"]
+    assert len(cat_blocks) == 1
+    assert "emergency_exit" in cat_blocks[0]["detail"]

@@ -214,3 +214,91 @@ def test_timeframe_trigger_cap_enforced(tmp_path, monkeypatch):
     result = execution_tools.simulate_day_tool(run.run_id, plan.model_dump(), compiled.model_dump(), _events(3))
     assert result["executed"] == 1
     assert result["skipped"][BlockReason.PLAN_LIMIT.value] == 2
+
+
+# --- Runbook 05: Judge category disabling blocks emergency exits ---
+
+
+def test_judge_disabled_category_blocks_emergency_exit_in_execution_engine(tmp_path, monkeypatch):
+    """disabled_categories=['emergency_exit'] must block emergency exits at the
+    execution engine level with CATEGORY reason, even though emergency exits
+    normally bypass daily caps and other operational limits."""
+    registry, engine = _setup(monkeypatch, tmp_path)
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7)
+    )
+    run.latest_judge_feedback = JudgeFeedback(
+        constraints=JudgeConstraints(
+            max_trades_per_day=None,
+            disabled_trigger_ids=[],
+            disabled_categories=["emergency_exit"],
+            risk_mode="normal",
+        )
+    )
+    registry.update_strategy_run(run)
+    plan = _strategy_plan(run.run_id, plan_limit=5)
+    emergency = TriggerCondition(
+        id="btc_exit",
+        symbol="BTC-USD",
+        direction="flat",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="timeframe=='1h'",
+        category="emergency_exit",
+    )
+    plan.triggers.append(emergency)
+    plan.allowed_trigger_categories.append("emergency_exit")
+    compiled = compile_plan(plan)
+
+    exit_event = [{"trigger_id": "btc_exit", "timestamp": "2024-01-01T00:00:00+00:00"}]
+    result = execution_tools.run_live_step_tool(
+        run.run_id, plan.model_dump(), compiled.model_dump(), exit_event
+    )
+    assert result["executed"] == 0
+    assert result["skipped"].get(BlockReason.CATEGORY.value, 0) == 1
+
+
+def test_emergency_exit_still_bypasses_daily_cap_when_category_not_disabled(tmp_path, monkeypatch):
+    """Emergency exits bypass daily cap but only when their category is NOT disabled.
+    This confirms the daily-cap bypass still works normally."""
+    registry, engine = _setup(monkeypatch, tmp_path)
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7)
+    )
+    # Judge disables trend_continuation only, NOT emergency_exit
+    run.latest_judge_feedback = JudgeFeedback(
+        constraints=JudgeConstraints(
+            max_trades_per_day=1,
+            disabled_trigger_ids=[],
+            disabled_categories=["trend_continuation"],
+            risk_mode="normal",
+        )
+    )
+    registry.update_strategy_run(run)
+    plan = _strategy_plan(run.run_id, plan_limit=1)
+    emergency = TriggerCondition(
+        id="btc_exit",
+        symbol="BTC-USD",
+        direction="flat",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="timeframe=='1h'",
+        category="emergency_exit",
+    )
+    plan.triggers = [emergency]
+    plan.allowed_trigger_categories = ["emergency_exit"]
+    compiled = compile_plan(plan)
+
+    # First call fills daily cap
+    first_event = [{"trigger_id": "btc_exit", "timestamp": "2024-01-01T00:00:00+00:00"}]
+    first = execution_tools.run_live_step_tool(
+        run.run_id, plan.model_dump(), compiled.model_dump(), first_event
+    )
+    assert first["executed"] == 1
+
+    # Second call: emergency exit should still bypass the daily cap
+    second_event = [{"trigger_id": "btc_exit", "timestamp": "2024-01-01T01:00:00+00:00"}]
+    second = execution_tools.run_live_step_tool(
+        run.run_id, plan.model_dump(), compiled.model_dump(), second_event
+    )
+    assert second["executed"] == 1
