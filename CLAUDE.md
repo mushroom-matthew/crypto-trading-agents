@@ -11,6 +11,15 @@ This is a 24×7 multi-agent crypto trading system built on Temporal workflows an
 - **Execution Agent** (`agents/execution_agent_client.py`) - Autonomous trading decisions with dynamic prompt loading
 - **Judge Agent** (`agents/judge_agent_client.py`) - LLM as Judge pattern for performance optimization
 
+## Runbook Workflow Order (Mandatory)
+
+When a task references a runbook in `docs/branching/`, follow this order:
+1) Run the Worktree Setup and create the branch **before** editing any files.
+2) Implement changes.
+3) Run the Test Plan and paste output into the runbook Test Evidence section.
+4) Fill Human Verification Evidence and Change Log entries.
+5) Commit only after evidence is recorded, using the runbook Git Workflow.
+
 ## Development Commands
 
 ### Environment Setup

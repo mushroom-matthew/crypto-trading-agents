@@ -4,9 +4,11 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 
 ## How To Use
 1) Pick the branch runbook.
-2) Follow the Git Workflow section exactly.
-3) Run the Test Plan and paste the output into the Test Evidence section.
-4) Commit only after test evidence is recorded.
+2) Run the Worktree Setup and create the branch **before** editing any files.
+3) Implement the changes.
+4) Run the Test Plan and paste the output into the Test Evidence section.
+5) Fill out Human Verification Evidence and Change Log entries.
+6) Follow the Git Workflow section to add and commit (only after evidence is recorded).
 
 ## Naming Scheme
 - `NN-` prefix = priority order (lower is higher priority).

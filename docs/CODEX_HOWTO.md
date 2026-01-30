@@ -68,6 +68,16 @@ grep -r "field_name" --include="*.py" .
 grep -r "\.field_name\." --include="*.py" .
 ```
 
+### 5. Runbook Order Is Mandatory
+
+When a task references a runbook in `docs/branching/`, follow this order:
+
+1. Run the Worktree Setup and create the branch **before** editing any files.
+2. Implement the changes.
+3. Run the Test Plan and paste output into the runbook Test Evidence section.
+4. Fill Human Verification Evidence and Change Log entries.
+5. Commit only after evidence is recorded, using the runbook Git Workflow.
+
 ## Architecture Quick Reference
 
 ### Two Servers, Two Purposes
