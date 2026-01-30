@@ -444,7 +444,7 @@ class TriggerEngine:
                 exit_order = self._flatten_order(trigger, bar, portfolio_for_eval, f"{trigger.id}_exit", block_entries)
                 if exit_order:
                     orders.append(exit_order)
-                    orders = self._deduplicate_orders(orders, bar.symbol)
+                    orders = self._deduplicate_orders(orders, bar.symbol, block_entries)
                     triggers_fired_for_symbol = len(orders)
                     portfolio_for_eval = self._rebuild_portfolio_for_orders(portfolio_base, orders)
                     continue
@@ -473,14 +473,14 @@ class TriggerEngine:
                 entry = self._entry_order(trigger, indicator, portfolio_for_eval, bar, block_entries)
                 if entry:
                     orders.append(entry)
-                    orders = self._deduplicate_orders(orders, bar.symbol)
+                    orders = self._deduplicate_orders(orders, bar.symbol, block_entries)
                     triggers_fired_for_symbol = len(orders)
                     portfolio_for_eval = self._rebuild_portfolio_for_orders(portfolio_base, orders)
 
         # Deduplicate orders per symbol with EXIT PRIORITY:
         # If both exit and entry orders exist for same symbol, only keep the exit.
         # This prevents whipsawing (entering then immediately exiting).
-        orders = self._deduplicate_orders(orders, bar.symbol)
+        orders = self._deduplicate_orders(orders, bar.symbol, block_entries)
 
         return orders, block_entries
 
@@ -613,11 +613,17 @@ class TriggerEngine:
             })
         return summaries
 
-    def _deduplicate_orders(self, orders: List[Order], bar_symbol: str) -> List[Order]:
+    def _deduplicate_orders(
+        self,
+        orders: List[Order],
+        bar_symbol: str,
+        block_entries: List[dict] | None = None,
+    ) -> List[Order]:
         """Deduplicate orders per symbol using confidence-aware exit priority.
 
         Rules:
-        1. Emergency exits always win when present.
+        1. Emergency exits are safety interrupts — they always win dedup,
+           regardless of regime or competing entry confidence.
         2. Default: Exit orders (reason ending in _exit or _flat) take priority.
         3. Exception: High-confidence entries can override non-emergency exits if confidence >= threshold.
         4. Only one order per symbol per bar is allowed.
@@ -650,6 +656,23 @@ class TriggerEngine:
 
             if emergency_exits:
                 result.append(emergency_exits[0])
+                # Record preemption of competing entries for auditability
+                if entries and block_entries is not None:
+                    for entry_order in entries:
+                        conf = self._trigger_confidence.get(entry_order.reason)
+                        block_entries.append({
+                            "trigger_id": entry_order.reason,
+                            "symbol": entry_order.symbol,
+                            "timeframe": entry_order.timeframe,
+                            "timestamp": entry_order.timestamp.isoformat(),
+                            "reason": "emergency_exit_preempts_entry",
+                            "detail": (
+                                f"Emergency exit preempted entry "
+                                f"(trigger={entry_order.reason}, confidence={conf})"
+                            ),
+                            "price": entry_order.price,
+                            "preempted_by": emergency_exits[0].reason,
+                        })
                 continue
 
             # Get confidence levels for entries

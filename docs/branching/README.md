@@ -30,6 +30,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [14-risk-used-default-to-actual.md](14-risk-used-default-to-actual.md): Default risk_used_abs to actual_risk_at_stop when budgets are off.
 - [15-min-hold-exit-timing-validation.md](15-min-hold-exit-timing-validation.md): Validate min_hold vs exit timeframe; track min_hold_binding_pct.
 - [16-judge-stale-snapshot-skip.md](16-judge-stale-snapshot-skip.md): Skip or adapt judge evals when snapshot is unchanged since last eval.
+- [17-graduated-derisk-taxonomy.md](17-graduated-derisk-taxonomy.md): Exit taxonomy & partial exit ladder. Adds `risk_reduce` (partial trim) and `risk_off` (defensive flatten) categories with strict precedence tiering, `exit_fraction` field, and full guardrails. Five phases: schema → partial exit execution → risk_reduce → risk_off → strategist integration + backtest.
 
 Learning-risk runbooks (09-12) should be worked in order: wiring → learning book → experiment specs → no-learn zones.
 
@@ -53,6 +54,13 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 
 ### Phase 1 — Learning-risk wiring (exploration isolation)
 7. **09-12**: Learning-risk series in order (wiring → learning book → experiment specs → no-learn zones)
+
+### Phase 1B — Graduated de-risk (after safety case, before strategist rework)
+- **17**: Exit taxonomy & partial exit ladder — six internal phases:
+  - **Phase A** (TradeSet groundwork): position lifecycle accounting, TradeLeg/TradeSet types, WAC, fill IDs. **Hard prerequisite** for partial exits.
+  - Phases 1-3 (schema + partial exit + risk_reduce): Phase 1 can start alongside Phase A; Phase 2 requires Phase A complete.
+  - Phase 4 (risk_off with latch) runs independently after Phase 3.
+  - Phase 5 (strategist integration) should be coordinated with runbook 01 below.
 
 ### Phase 2 — Strategy architecture
 8. **01**: Strategist simplification (LLM becomes slower controller; supports "wait" stance, regime alerts, RAG)

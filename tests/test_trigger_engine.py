@@ -291,6 +291,69 @@ def test_emergency_exit_dedup_overrides_high_conf_entry():
     portfolio.positions = {"BTC-USD": -1.0}
 
     orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
-    assert not blocks
     assert len(orders) == 1
     assert orders[0].emergency is True
+    # Preemption should be recorded as a block event
+    preempt_blocks = [b for b in blocks if b["reason"] == "emergency_exit_preempts_entry"]
+    assert len(preempt_blocks) == 1
+    assert preempt_blocks[0]["trigger_id"] == "btc_entry"
+    assert preempt_blocks[0]["preempted_by"] == "btc_emergency_exit_exit"
+
+
+def test_emergency_exit_dedup_wins_even_with_permissive_risk():
+    """Guardrail: emergency exits win dedup unconditionally, even when risk
+    constraints are fully permissive (simulating a 'risk-on' regime).
+    This invariant must never be weakened.
+
+    Trigger order: emergency first so it generates a flatten order, then
+    the entry fires on the rebuilt (zero) portfolio.  Dedup must still
+    pick the emergency exit and preempt the entry."""
+    emergency_trigger = TriggerCondition(
+        id="btc_emergency_exit",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        category="emergency_exit",
+        confidence_grade="A",
+    )
+    entry_trigger = TriggerCondition(
+        id="btc_entry",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="False",
+        category="trend_continuation",
+        confidence_grade="A",
+    )
+    # Emergency first: produces flatten, then entry fires on rebuilt portfolio
+    plan = _plan_with_triggers([emergency_trigger, entry_trigger])
+    # Fully permissive risk constraints — "risk-on" regime
+    plan.risk_constraints = RiskConstraint(
+        max_position_risk_pct=100.0,
+        max_symbol_exposure_pct=100.0,
+        max_portfolio_exposure_pct=100.0,
+        max_daily_loss_pct=100.0,
+    )
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, max_triggers_per_symbol_per_bar=2)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio()
+    portfolio.positions = {"BTC-USD": 1.0}
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert len(orders) == 1
+    assert orders[0].emergency is True
+    preempt_blocks = [b for b in blocks if b["reason"] == "emergency_exit_preempts_entry"]
+    assert len(preempt_blocks) == 1
