@@ -63,7 +63,31 @@ git commit -m "Emergency exit: min-hold and cooldown tests"
 
 ## Change Log (update during implementation)
 - 2026-01-29: Expanded runbook format with scope, acceptance, test plan, and git workflow details.
+- 2026-01-30: Added emergency-exit min-hold/cooldown tests in `tests/test_trigger_engine.py`.
 
 ## Test Evidence (append results before commit)
+```bash
+uv run pytest tests/test_trigger_engine.py -vv
+```
+```
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.4.2, pluggy-1.6.0 -- /home/getzinmw/crypto-trading-agents/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/getzinmw/crypto-trading-agents
+configfile: pyproject.toml
+plugins: anyio-4.11.0, respx-0.22.0, asyncio-1.2.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 6 items
+
+tests/test_trigger_engine.py::test_trigger_engine_records_block_when_risk_denies_entry PASSED [ 16%]
+tests/test_trigger_engine.py::test_emergency_exit_trigger_bypasses_risk_checks PASSED [ 33%]
+tests/test_trigger_engine.py::test_emergency_exit_vetoes_same_bar_entry PASSED [ 50%]
+tests/test_trigger_engine.py::test_emergency_exit_vetoes_min_hold_on_next_bar PASSED [ 66%]
+tests/test_trigger_engine.py::test_emergency_exit_min_hold_allows_on_threshold_bar PASSED [ 83%]
+tests/test_trigger_engine.py::test_emergency_exit_dedup_overrides_high_conf_entry PASSED [100%]
+
+============================== 6 passed in 0.32s ===============================
+```
 
 ## Human Verification Evidence (append results before commit)
+- 2026-01-30: Verified same-bar and min-hold veto tests assert `cooldown_recommendation_bars` and multi-bar test covers blocked (bars 1-2) and allowed (bar 3) emergency exits.

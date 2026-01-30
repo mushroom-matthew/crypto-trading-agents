@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -142,6 +142,115 @@ def test_emergency_exit_vetoes_same_bar_entry():
     assert not orders
     assert blocks
     assert blocks[0]["reason"] == "emergency_exit_veto_same_bar"
+    assert blocks[0]["cooldown_recommendation_bars"] == max(1, engine.trade_cooldown_bars, engine.min_hold_bars)
+
+
+def test_emergency_exit_vetoes_min_hold_on_next_bar():
+    trigger = TriggerCondition(
+        id="btc_emergency_exit",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        category="emergency_exit",
+    )
+    plan = _plan(trigger)
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=3, trade_cooldown_bars=0)
+    entry_time = _portfolio().timestamp
+    entry_bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=entry_time,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    engine.record_fill("BTC-USD", is_entry=True, timestamp=entry_bar.timestamp)
+
+    next_bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=entry_time + timedelta(hours=1),
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(next_bar, _indicator(), portfolio)
+    assert not orders
+    assert blocks
+    assert blocks[0]["reason"] == "emergency_exit_veto_min_hold"
+    assert blocks[0]["cooldown_recommendation_bars"] == max(1, engine.trade_cooldown_bars, engine.min_hold_bars)
+
+
+def test_emergency_exit_min_hold_allows_on_threshold_bar():
+    trigger = TriggerCondition(
+        id="btc_emergency_exit",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        category="emergency_exit",
+    )
+    plan = _plan(trigger)
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=3, trade_cooldown_bars=0)
+    entry_time = _portfolio().timestamp
+    engine.record_fill("BTC-USD", is_entry=True, timestamp=entry_time)
+    portfolio = _portfolio_with_position()
+
+    bar_1 = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=entry_time + timedelta(hours=1),
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    bar_2 = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=entry_time + timedelta(hours=2),
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    bar_3 = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=entry_time + timedelta(hours=3),
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+
+    orders, blocks = engine.on_bar(bar_1, _indicator(), portfolio)
+    assert not orders
+    assert blocks
+    assert blocks[0]["reason"] == "emergency_exit_veto_min_hold"
+
+    orders, blocks = engine.on_bar(bar_2, _indicator(), portfolio)
+    assert not orders
+    assert blocks
+    assert blocks[0]["reason"] == "emergency_exit_veto_min_hold"
+
+    orders, blocks = engine.on_bar(bar_3, _indicator(), portfolio)
+    assert orders
+    assert not blocks
 
 
 def test_emergency_exit_dedup_overrides_high_conf_entry():
