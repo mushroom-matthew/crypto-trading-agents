@@ -15,7 +15,6 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 
 ## Priority Runbooks (Numbered)
 - [01-strategist-simplification.md](01-strategist-simplification.md): Simplify LLM strategist - allow empty triggers, remove risk redundancy, vector store prep.
-- [03-emergency-exit-runbook-same-bar-dedup.md](03-emergency-exit-runbook-same-bar-dedup.md): Same-bar competition and deduplication priority.
 - [04-emergency-exit-runbook-hold-cooldown.md](04-emergency-exit-runbook-hold-cooldown.md): Min-hold and cooldown enforcement.
 - [05-emergency-exit-runbook-bypass-override.md](05-emergency-exit-runbook-bypass-override.md): Bypass and override behavior.
 - [06-emergency-exit-runbook-edge-cases.md](06-emergency-exit-runbook-edge-cases.md): Emergency-exit edge cases.
@@ -80,6 +79,7 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 - [later/_model-integration.md](later/_model-integration.md): Directional probability source / ML p_hat (Phase 2 policy pivot). **Deferred until policy engine is stable.**
 
 ## Completed Runbooks (X)
+- [X-emergency-exit-runbook-same-bar-dedup.md](X-emergency-exit-runbook-same-bar-dedup.md): Same-bar competition and deduplication priority.
 - [X-comp-audit-risk-core.md](X-comp-audit-risk-core.md): Phase 0 risk correctness and budget integrity.
 - [X-comp-audit-trigger-cadence.md](X-comp-audit-trigger-cadence.md): Scalper cadence and signal serialization.
 - [X-comp-audit-indicators-prompts.md](X-comp-audit-indicators-prompts.md): Fast indicators, Donchian high/low, momentum prompts, compute optimizations.

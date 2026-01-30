@@ -617,10 +617,11 @@ class TriggerEngine:
         """Deduplicate orders per symbol using confidence-aware exit priority.
 
         Rules:
-        1. Default: Exit orders (reason ending in _exit or _flat) take priority
-        2. Exception: High-confidence entries can override exits if confidence >= threshold
-        3. Only one order per symbol per bar is allowed
-        4. If multiple competing orders exist, use highest confidence then first-in-list
+        1. Emergency exits always win when present.
+        2. Default: Exit orders (reason ending in _exit or _flat) take priority.
+        3. Exception: High-confidence entries can override non-emergency exits if confidence >= threshold.
+        4. Only one order per symbol per bar is allowed.
+        5. If multiple competing orders exist, use highest confidence then first-in-list.
 
         The confidence_override_threshold determines when entries can override exits:
         - "A": Only A-grade entries override exits
@@ -645,6 +646,11 @@ class TriggerEngine:
             # Separate exits from entries
             exits = [o for o in symbol_orders if o.reason.endswith("_exit") or o.reason.endswith("_flat")]
             entries = [o for o in symbol_orders if o not in exits]
+            emergency_exits = [o for o in exits if o.emergency]
+
+            if emergency_exits:
+                result.append(emergency_exits[0])
+                continue
 
             # Get confidence levels for entries
             def get_confidence(order: Order) -> Literal["A", "B", "C"] | None:
