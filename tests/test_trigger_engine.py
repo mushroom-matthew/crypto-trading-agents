@@ -472,3 +472,87 @@ def test_judge_disabled_category_blocks_emergency_exit():
     cat_blocks = [b for b in blocks if b["reason"] == "category"]
     assert len(cat_blocks) == 1
     assert "emergency_exit" in cat_blocks[0]["detail"]
+
+
+# --- Runbook 06: Missing exit_rule edge cases ---
+
+
+@pytest.mark.parametrize("exit_rule", ["", "   "], ids=["empty", "whitespace"])
+def test_emergency_exit_missing_exit_rule_rejected_by_schema(exit_rule):
+    """Pydantic schema rejects emergency_exit triggers with empty/whitespace exit_rule."""
+    with pytest.raises(Exception):
+        TriggerCondition(
+            id="btc_emergency_exit",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="False",
+            exit_rule=exit_rule,
+            category="emergency_exit",
+        )
+
+
+def test_emergency_exit_none_exit_rule_rejected_by_schema():
+    """Pydantic schema rejects emergency_exit triggers with exit_rule=None."""
+    with pytest.raises(Exception):
+        TriggerCondition(
+            id="btc_emergency_exit",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="False",
+            exit_rule=None,
+            category="emergency_exit",
+        )
+
+
+@pytest.mark.parametrize("exit_rule", ["", "   "], ids=["empty", "whitespace"])
+def test_emergency_exit_missing_exit_rule_runtime_defense(exit_rule):
+    """Defense-in-depth: if a TriggerCondition with empty exit_rule bypasses
+    schema validation, the trigger engine blocks it safely with
+    'emergency_exit_missing_exit_rule' and cooldown metadata."""
+    # Bypass Pydantic validation via model_construct for both trigger and plan
+    trigger = TriggerCondition.model_construct(
+        id="btc_emergency_exit",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule=exit_rule,
+        category="emergency_exit",
+        confidence_grade=None,
+        stop_loss_pct=None,
+        hold_rule=None,
+    )
+    # Use a valid plan then swap triggers bypassing Pydantic validate_assignment
+    valid_trigger = TriggerCondition(
+        id="placeholder",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        category="emergency_exit",
+    )
+    plan = _plan_with_triggers([valid_trigger])
+    plan.__dict__["triggers"] = [trigger]
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=4, trade_cooldown_bars=2)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert not orders, "Missing exit_rule must not produce orders"
+    assert len(blocks) == 1
+    assert blocks[0]["reason"] == "emergency_exit_missing_exit_rule"
+    assert "cooldown_recommendation_bars" in blocks[0]
+    assert blocks[0]["cooldown_recommendation_bars"] == max(1, engine.trade_cooldown_bars, engine.min_hold_bars)
