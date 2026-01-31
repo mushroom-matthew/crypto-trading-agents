@@ -26,15 +26,15 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [10-runbook-learning-book.md](10-runbook-learning-book.md): Learning Book config, tagging, accounting, acceptance criteria.
 - [11-runbook-experiment-specs.md](11-runbook-experiment-specs.md): ExperimentSpec schemas, exposure taxonomy, metric definitions.
 - [12-runbook-no-learn-zones-and-killswitches.md](12-runbook-no-learn-zones-and-killswitches.md): Enforceable no-learn policies and kill switches.
-- [13-judge-death-spiral-floor.md](13-judge-death-spiral-floor.md): Minimum trigger floor to prevent judge death spirals (zero-activity re-enablement).
+- ~~13-judge-death-spiral-floor.md~~: Minimum trigger floor to prevent judge death spirals (zero-activity re-enablement). → Completed, see [X-judge-death-spiral-floor.md](X-judge-death-spiral-floor.md).
 - [14-risk-used-default-to-actual.md](14-risk-used-default-to-actual.md): Default risk_used_abs to actual_risk_at_stop when budgets are off.
 - [15-min-hold-exit-timing-validation.md](15-min-hold-exit-timing-validation.md): Validate min_hold vs exit timeframe; track min_hold_binding_pct.
-- [16-judge-stale-snapshot-skip.md](16-judge-stale-snapshot-skip.md): Skip or adapt judge evals when snapshot is unchanged since last eval.
+- ~~16-judge-stale-snapshot-skip.md~~: Skip or adapt judge evals when snapshot is unchanged since last eval. → Completed, see [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md).
 - [17-graduated-derisk-taxonomy.md](17-graduated-derisk-taxonomy.md): Exit taxonomy & partial exit ladder. Adds `risk_reduce` (partial trim) and `risk_off` (defensive flatten) categories with strict precedence tiering, `exit_fraction` field, and full guardrails. Five phases: schema → partial exit execution → risk_reduce → risk_off → strategist integration + backtest.
 
 Learning-risk runbooks (09-12) should be worked in order: wiring → learning book → experiment specs → no-learn zones.
 
-Judge robustness runbooks (13, 16) are closely related — 13 prevents death spirals, 16 prevents stale re-evaluation.
+Judge robustness runbooks (13, 16) are both complete — implemented together on branch `judge-death-spiral-floor`. Runbook 13 prevents death spirals (trigger floor, zero-activity re-enablement). Runbook 16 adds stale snapshot skip, forced re-enablement after consecutive stale evals, and `stale_judge_evals` daily metric.
 
 ## Recommended Execution Order
 
@@ -99,6 +99,8 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 - [X-emergency-exit-runbook-hold-cooldown.md](X-emergency-exit-runbook-hold-cooldown.md): Emergency exit min-hold and cooldown enforcement.
 - [X-emergency-exit-runbook-bypass-override.md](X-emergency-exit-runbook-bypass-override.md): Emergency exit bypass/override semantics + judge category kill-switch fix.
 - [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md): Emergency exit edge cases (missing exit_rule handling).
+- [X-judge-death-spiral-floor.md](X-judge-death-spiral-floor.md): Minimum trigger floor, zero-activity re-enablement, stale snapshot detection.
+- [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md): Stale snapshot skip, forced re-enablement after consecutive stale evals, daily metric.
 
 ## Notes
 - If tests cannot be run locally, obtain user-run output and paste it into the Test Evidence section before committing.

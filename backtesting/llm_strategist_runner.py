@@ -38,7 +38,7 @@ from backtesting.dataset import load_ohlcv
 from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_transport
 from services.judge_feedback_service import JudgeFeedbackService
 from backtesting.reports import write_run_summary
-from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
+from schemas.judge_feedback import JudgeFeedback, JudgeConstraints, apply_trigger_floor
 from schemas.llm_strategist import AssetState, IndicatorSnapshot, LLMInput, PortfolioState, StrategyPlan, TriggerSummary
 from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings
 from services.risk_adjustment_service import apply_judge_risk_feedback, effective_risk_limits, snapshot_adjustments, build_risk_profile
@@ -596,6 +596,15 @@ class LLMStrategistBacktester:
         self.trades_since_last_judge = 0
         self.intraday_judge_history: List[Dict[str, Any]] = []
         self.judge_triggered_replans: List[Dict[str, Any]] = []
+        # Death-spiral floor: zero-activity re-enablement
+        self.bars_since_last_trade: int = 0
+        self.zero_activity_threshold_bars: int = 48  # ~12 hours on 15m bars
+        self.last_judge_intervention_time: datetime | None = None
+        # Death-spiral floor: stale snapshot detection
+        self.last_judge_snapshot_key: tuple[float, int] | None = None
+        self.consecutive_stale_skips: int = 0
+        self.stale_judge_evals_by_day: Dict[str, int] = defaultdict(int)
+        self.stale_reenable_threshold: int = 2  # force re-enable after N consecutive stale skips
 
         if self.flatten_policy == "daily_close":
             self.flatten_positions_daily = True
@@ -2250,7 +2259,8 @@ class LLMStrategistBacktester:
                     # Extract machine-readable constraints for trigger enforcement
                     machine_constraints = summary.get("judge_feedback", {}).get("constraints")
                     if machine_constraints:
-                        self.active_judge_constraints = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                        parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                        self._apply_judge_constraints(parsed, current_plan)
                     daily_reports.append(summary)
             if self.current_day_key != day_key:
                 self.current_day_key = day_key
@@ -2303,6 +2313,28 @@ class LLMStrategistBacktester:
                         self.portfolio.mark_to_market(ts, latest_prices)
                         continue
 
+            # Track bars since last trade for zero-activity re-enablement
+            self.bars_since_last_trade += 1
+            if (
+                self.last_judge_intervention_time is not None
+                and self.bars_since_last_trade >= self.zero_activity_threshold_bars
+                and self.active_judge_constraints is not None
+                and self.active_judge_constraints.disabled_trigger_ids
+            ):
+                logger.info(
+                    "Zero-activity re-enablement at %s: %d bars without trade, clearing disabled_trigger_ids",
+                    ts.isoformat(), self.bars_since_last_trade,
+                )
+                self._add_event("zero_activity_reenable", {
+                    "bars_since_last_trade": self.bars_since_last_trade,
+                    "cleared_trigger_ids": list(self.active_judge_constraints.disabled_trigger_ids),
+                })
+                self.active_judge_constraints = self.active_judge_constraints.model_copy(
+                    update={"disabled_trigger_ids": []}
+                )
+                self.bars_since_last_trade = 0
+                self.last_judge_intervention_time = None
+
             # Check if adaptive judge evaluation should run
             judge_triggered_replan = False
             should_run, trigger_reason = self._judge_trigger_reason(ts)
@@ -2320,7 +2352,8 @@ class LLMStrategistBacktester:
                     # Extract machine-readable constraints for trigger enforcement
                     machine_constraints = judge_result.get("feedback", {}).get("constraints")
                     if machine_constraints:
-                        self.active_judge_constraints = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                        parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                        self._apply_judge_constraints(parsed, current_plan)
                     logger.info(
                         "Judge triggered replan at %s: %s",
                         ts.isoformat(), judge_result.get("replan_reason")
@@ -2776,7 +2809,8 @@ class LLMStrategistBacktester:
                 # Extract machine-readable constraints for trigger enforcement
                 machine_constraints = summary.get("judge_feedback", {}).get("constraints")
                 if machine_constraints:
-                    self.active_judge_constraints = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                    parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                    self._apply_judge_constraints(parsed, current_plan)
                 daily_reports.append(summary)
 
         # Collect samples from final trigger engine
@@ -3335,6 +3369,7 @@ class LLMStrategistBacktester:
             "market_structure": market_structure_context,
             "factor_exposures": self.latest_factor_exposures,
             "intraday_judge_history": intraday_judge_entries,
+            "stale_judge_evals": self.stale_judge_evals_by_day.pop(day_key, 0),
             "top_triggers": top_triggers,
             "skipped_due_to_limits": skipped_limits,
             "attempted_triggers": limit_entry["trades_attempted"],
@@ -4302,6 +4337,50 @@ class LLMStrategistBacktester:
         """
         snapshot = self._get_intraday_performance_snapshot(ts, day_key, latest_prices)
 
+        # Stale snapshot detection: skip evaluation if nothing changed
+        snapshot_key = (round(snapshot["equity"], 2), snapshot["trade_count"])
+        if snapshot_key == self.last_judge_snapshot_key:
+            self.consecutive_stale_skips += 1
+            self.stale_judge_evals_by_day[day_key] += 1
+            # Force trigger re-enablement after consecutive stale skips
+            force_reenable = (
+                self.consecutive_stale_skips >= self.stale_reenable_threshold
+                and self.active_judge_constraints is not None
+                and self.active_judge_constraints.disabled_trigger_ids
+            )
+            if force_reenable:
+                logger.info(
+                    "Stale snapshot re-enablement at %s: %d consecutive stale evals, clearing disabled_trigger_ids",
+                    ts.isoformat(), self.consecutive_stale_skips,
+                )
+                self._add_event("stale_snapshot_reenable", {
+                    "consecutive_stale_skips": self.consecutive_stale_skips,
+                    "cleared_trigger_ids": list(self.active_judge_constraints.disabled_trigger_ids),
+                })
+                self.active_judge_constraints = self.active_judge_constraints.model_copy(
+                    update={"disabled_trigger_ids": []}
+                )
+                self.consecutive_stale_skips = 0
+            else:
+                self._add_event("stale_snapshot_skip", {
+                    "equity": snapshot_key[0],
+                    "trade_count": snapshot_key[1],
+                    "consecutive_stale_skips": self.consecutive_stale_skips,
+                })
+            logger.debug("Stale snapshot, skipping judge evaluation at %s", ts.isoformat())
+            return {
+                "timestamp": ts.isoformat(),
+                "score": None,
+                "should_replan": False,
+                "replan_reason": "stale_snapshot_reenable" if force_reenable else "stale_snapshot_skip",
+                "trigger_reason": trigger_reason,
+                "feedback": {},
+                "snapshot": snapshot,
+                "next_judge_time": (self.next_judge_time.isoformat() if self.next_judge_time else None),
+            }
+        self.last_judge_snapshot_key = snapshot_key
+        self.consecutive_stale_skips = 0
+
         # Compute deterministic trade quality metrics
         day_start = datetime(ts.year, ts.month, ts.day, tzinfo=ts.tzinfo)
         since_ts = day_start
@@ -4497,6 +4576,21 @@ class LLMStrategistBacktester:
 
         return result
 
+    def _apply_judge_constraints(
+        self,
+        constraints: JudgeConstraints,
+        current_plan: "StrategyPlan | None",
+    ) -> JudgeConstraints:
+        """Apply trigger floor and store constraints, trimming disabled IDs if needed."""
+        if current_plan and current_plan.triggers:
+            constraints = apply_trigger_floor(constraints, current_plan.triggers)
+        self.active_judge_constraints = constraints
+        # Track when judge disables triggers (for zero-activity detection)
+        if constraints.disabled_trigger_ids or constraints.disabled_categories:
+            self.last_judge_intervention_time = datetime.now(timezone.utc)
+        return constraints
+
     def _on_trade_executed(self, ts: datetime) -> None:
         """Called after a trade is executed to update judge tracking."""
         self.trades_since_last_judge += 1
+        self.bars_since_last_trade = 0
