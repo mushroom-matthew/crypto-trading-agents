@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Iterable, List, Optional, Set, Tuple
 
+from data_loader.utils import timeframe_to_seconds
 from schemas.llm_strategist import StrategyPlan, TriggerCondition
 from schemas.compiled_plan import CompiledExpression, CompiledPlan, CompiledTrigger
 
@@ -117,6 +118,47 @@ def validate_plan_timeframes(
                 )
 
     return all_warnings, blocked_ids
+
+
+def validate_min_hold_vs_exits(
+    plan: StrategyPlan,
+    min_hold_hours: float,
+) -> list[str]:
+    """Check whether min_hold >= smallest exit trigger timeframe.
+
+    Returns a list of warning strings (empty when OK).
+    """
+    if min_hold_hours <= 0:
+        return []
+
+    exit_timeframe_seconds: list[float] = []
+    for trigger in plan.triggers:
+        if trigger.category == "emergency_exit":
+            continue
+        is_exit = trigger.direction == "exit" or bool(trigger.exit_rule)
+        if not is_exit:
+            continue
+        try:
+            tf_sec = timeframe_to_seconds(trigger.timeframe)
+            exit_timeframe_seconds.append(tf_sec)
+        except (ValueError, TypeError):
+            continue
+
+    if not exit_timeframe_seconds:
+        return []
+
+    smallest_exit_sec = min(exit_timeframe_seconds)
+    smallest_exit_hours = smallest_exit_sec / 3600.0
+    min_hold_sec = min_hold_hours * 3600.0
+
+    warnings: list[str] = []
+    if min_hold_sec >= smallest_exit_sec:
+        warnings.append(
+            f"min_hold ({min_hold_hours:.2f}h) >= smallest exit timeframe "
+            f"({smallest_exit_hours:.2f}h); exits will be mechanically forced "
+            f"at the hold floor, preventing exit signal quality assessment"
+        )
+    return warnings
 
 
 _ALLOWED_NODES = (

@@ -24,3 +24,4 @@ tmp*/
 .debug/
 *summaries.json
 .runs/
+scripts/mermaid_render/

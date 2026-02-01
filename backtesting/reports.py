@@ -169,6 +169,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
     session_cap_samples: dict[str, list[float]] = {}
     strict_days = 0
     legacy_days = 0
+    min_hold_binding_pcts: list[float] = []
 
     for report in daily_reports:
         data_quality = report.get("llm_data_quality") or "ok"
@@ -199,6 +200,9 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
                 block_totals[key] = block_totals.get(key, 0) + int(val or 0)
             except (TypeError, ValueError):
                 continue
+        mh_binding = limit_stats.get("min_hold_binding_pct")
+        if mh_binding is not None:
+            min_hold_binding_pcts.append(float(mh_binding))
         risk_entry = report.get("risk_budget") or {}
         if not risk_entry and report.get("risk_budget_pct"):
             budget_pct = float(report.get("risk_budget_pct") or 0.0)
@@ -594,6 +598,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
         "llm_plan_fail_days": llm_plan_fail_days,
         "llm_rpr_source_days": rpr_source_days,
         "llm_rpr_filtered_days": rpr_filtered_days,
+        "min_hold_binding_pct_mean": _safe_mean(min_hold_binding_pcts) if min_hold_binding_pcts else 0.0,
     }
     cap_summary = {
         "policy": {

@@ -47,7 +47,7 @@ from services.strategist_plan_service import StrategistPlanService
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
 from tools import execution_tools
-from trading_core.trigger_compiler import compile_plan, validate_plan_timeframes
+from trading_core.trigger_compiler import compile_plan, validate_min_hold_vs_exits, validate_plan_timeframes
 from trading_core.trigger_budget import enforce_trigger_budget
 from trading_core.execution_engine import BlockReason
 from trading_core.trade_quality import (
@@ -1761,7 +1761,6 @@ class LLMStrategistBacktester:
                 limit_entry["trades_executed"] += 1
                 trigger_id = order.reason
                 risk_used = allowance or 0.0
-                self.risk_usage_by_day[day_key][(trigger_id, order.timeframe)] += risk_used
                 actual_risk = None
                 if risk_snapshot:
                     actual_risk = risk_snapshot.get("actual_risk_abs")
@@ -1771,6 +1770,10 @@ class LLMStrategistBacktester:
                         actual_risk = max(order.quantity * stop_dist, 0.0)
                 if actual_risk is None:
                     actual_risk = risk_used
+                # Runbook 14: default risk_used to actual_risk when budgets are off
+                if risk_used == 0.0 and actual_risk and actual_risk > 0:
+                    risk_used = actual_risk
+                self.risk_usage_by_day[day_key][(trigger_id, order.timeframe)] += risk_used
                 self.risk_usage_events_by_day[day_key].append(
                     {
                         "trigger_id": trigger_id,
@@ -1817,7 +1820,7 @@ class LLMStrategistBacktester:
                     "price": order.price,
                     "timeframe": order.timeframe,
                     "reason": order.reason,
-                    "risk_used": allowance,
+                    "risk_used": risk_used,
                     "latency_seconds": 0.0,
                     "market_structure_entry": structure_snapshot,
                 }
@@ -2080,7 +2083,6 @@ class LLMStrategistBacktester:
                 if plan_generated_at:
                     latency_seconds = (order.timestamp - plan_generated_at).total_seconds()
                 risk_used = adjusted_allowance or 0.0
-                self.risk_usage_by_day[day_key][(raw_trigger_id, order.timeframe)] += risk_used
                 actual_risk = None
                 if risk_snapshot:
                     actual_risk = risk_snapshot.get("actual_risk_abs")
@@ -2090,6 +2092,10 @@ class LLMStrategistBacktester:
                         actual_risk = max(order.quantity * stop_dist, 0.0)
                 if actual_risk is None:
                     actual_risk = risk_used
+                # Runbook 14: default risk_used to actual_risk when budgets are off
+                if risk_used == 0.0 and actual_risk and actual_risk > 0:
+                    risk_used = actual_risk
+                self.risk_usage_by_day[day_key][(raw_trigger_id, order.timeframe)] += risk_used
                 self.risk_usage_events_by_day[day_key].append(
                     {
                         "trigger_id": raw_trigger_id,
@@ -2530,6 +2536,11 @@ class LLMStrategistBacktester:
                             blocked_trigger_ids,
                             sorted({tf for w in tf_warnings for tf in w.missing_timeframes}),
                         )
+
+                    # Runbook 15: warn when min_hold >= smallest exit timeframe
+                    min_hold_warnings = validate_min_hold_vs_exits(current_plan, self.min_hold_hours)
+                    for mhw in min_hold_warnings:
+                        logger.warning("Plan %s: %s", current_plan.plan_id, mhw)
 
                     current_plan_payload = current_plan.model_dump()
                     current_compiled_payload = compiled_plan.model_dump()
@@ -3446,6 +3457,11 @@ class LLMStrategistBacktester:
             "blocked_by_archetype_load": blocked_archetype_load,
             "blocked_by_min_hold": blocked_min_hold,
             "blocked_by_min_flat": blocked_min_flat,
+            "min_hold_binding_pct": (
+                (blocked_min_hold / (blocked_min_hold + executed)) * 100.0
+                if (blocked_min_hold + executed) > 0
+                else 0.0
+            ),
             "priority_skips": int(limit_entry.get("priority_skips", 0)),
             "execution_rate": execution_rate,
             "active_brake": active_brake,
