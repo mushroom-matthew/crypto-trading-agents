@@ -8,7 +8,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -258,6 +258,10 @@ class BacktestConfig(BaseModel):
         default=3, ge=1, le=100,
         description="Trigger judge after N trades, regardless of cadence (default: 3)"
     )
+    replan_on_day_boundary: Optional[bool] = Field(
+        default=True,
+        description="Allow start-of-day replans in adaptive mode (default: true)"
+    )
     llm_calls_per_day: Optional[int] = Field(
         default=1, ge=1, le=24,
         description="Number of LLM strategist calls per day (1=daily, 24=hourly)"
@@ -289,6 +293,14 @@ class BacktestConfig(BaseModel):
     confidence_override_threshold: Optional[str] = Field(
         default=None,
         description="Min confidence grade for entry to override exit: 'A', 'B', 'C', or null (default: 'A')"
+    )
+    exit_binding_mode: Literal["none", "category"] = Field(
+        default="category",
+        description="Exit binding policy: none (global exits) or category (entry/exit category must match). Emergency exits always allowed."
+    )
+    conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = Field(
+        default="reverse",
+        description="Resolver policy when opposing entry signals fire while in-position."
     )
 
     # ============================================================================
@@ -640,10 +652,15 @@ async def start_backtest(config: BacktestConfig):
                 "llm_calls_per_day": config.llm_calls_per_day or 1,
                 "judge_cadence_hours": config.judge_cadence_hours,
                 "judge_check_after_trades": config.judge_check_after_trades,
+                "replan_on_day_boundary": (
+                    config.replan_on_day_boundary if config.replan_on_day_boundary is not None else True
+                ),
                 # Whipsaw controls
                 "min_hold_hours": config.min_hold_hours,
                 "min_flat_hours": config.min_flat_hours,
                 "confidence_override_threshold": config.confidence_override_threshold,
+                "exit_binding_mode": config.exit_binding_mode,
+                "conflicting_signal_policy": config.conflicting_signal_policy,
                 # Execution gating
                 "min_price_move_pct": config.min_price_move_pct,
                 # Walk-away threshold

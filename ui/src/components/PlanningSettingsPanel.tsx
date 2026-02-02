@@ -7,6 +7,7 @@ export interface PlanningSettings {
   max_triggers_per_symbol_per_day?: number;
   judge_cadence_hours?: number;
   judge_check_after_trades?: number;
+  replan_on_day_boundary?: boolean;
   debug_trigger_sample_rate?: number;
   debug_trigger_max_samples?: number;
   indicator_debug_mode?: string;
@@ -18,6 +19,7 @@ interface PlanningSettingsPanelProps<T extends PlanningSettings> {
   onChange: (config: T) => void;
   disabled?: boolean;
   showJudgeCadence?: boolean;
+  showDayBoundaryReplan?: boolean;
 }
 
 export function PlanningSettingsPanel<T extends PlanningSettings>({
@@ -25,6 +27,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
   onChange,
   disabled,
   showJudgeCadence = true,
+  showDayBoundaryReplan = false,
 }: PlanningSettingsPanelProps<T>) {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -151,6 +154,31 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                 />
                 <p className="text-xs text-slate-400 mt-1">
                   Triggers a judge run after N trades, even if cadence has not elapsed
+                </p>
+              </div>
+            )}
+
+            {showDayBoundaryReplan && (
+              <div className="col-span-2">
+                <label className="block text-sm font-medium mb-1">
+                  Start-of-Day Replan
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={config.replan_on_day_boundary ?? true}
+                    onChange={(e) =>
+                      onChange({ ...config, replan_on_day_boundary: e.target.checked })
+                    }
+                    className="w-4 h-4 text-blue-600 rounded"
+                    disabled={disabled}
+                  />
+                  <span className="text-sm text-slate-700 dark:text-slate-300">
+                    Replan at day boundary (start of day)
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  When off, replans happen only on judge triggers.
                 </p>
               </div>
             )}

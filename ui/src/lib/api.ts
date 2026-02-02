@@ -58,11 +58,14 @@ export interface BacktestConfig {
   max_triggers_per_symbol_per_day?: number;
   judge_cadence_hours?: number;
   judge_check_after_trades?: number;
+  replan_on_day_boundary?: boolean;
 
   // Whipsaw / Anti-Flip-Flop Controls
   min_hold_hours?: number;
   min_flat_hours?: number;
   confidence_override_threshold?: string | null;
+  exit_binding_mode?: 'none' | 'category';
+  conflicting_signal_policy?: 'ignore' | 'exit' | 'reverse' | 'defer';
 
   // Execution Gating
   min_price_move_pct?: number;
@@ -550,6 +553,7 @@ export interface PaperTradingSessionConfig {
   strategy_prompt?: string;
   strategy_id?: string;
   plan_interval_hours?: number;
+  replan_on_day_boundary?: boolean;
   enable_symbol_discovery?: boolean;
   min_volume_24h?: number;
   llm_model?: string;
@@ -571,6 +575,8 @@ export interface PaperTradingSessionConfig {
   min_hold_hours?: number;
   min_flat_hours?: number;
   confidence_override_threshold?: string | null;
+  exit_binding_mode?: 'none' | 'category';
+  conflicting_signal_policy?: 'ignore' | 'exit' | 'reverse' | 'defer';
 
   // Execution Gating
   min_price_move_pct?: number;

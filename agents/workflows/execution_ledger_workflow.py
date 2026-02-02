@@ -29,6 +29,7 @@ class ExecutionLedgerWorkflow:
         self.last_price: Dict[str, Decimal] = {}
         self.last_price_timestamp: Dict[str, int] = {}  # Track when prices were last updated
         self.entry_price: Dict[str, Decimal] = {}
+        self.position_meta: Dict[str, Dict[str, Any]] = {}
         self.fill_count = 0
         self.transaction_history: List[Dict] = []
         self.realized_pnl = Decimal("0")  # Track actual realized gains/losses from closed positions
@@ -51,6 +52,20 @@ class ExecutionLedgerWorkflow:
         except ValueError:
             workflow.logger.warning("Invalid integer for %s environment variable", key)
             return None
+
+    def _format_fill_timestamp(self, value: Any) -> str:
+        if isinstance(value, (int, float)):
+            ts = datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+            return ts.isoformat()
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.isoformat()
+            except ValueError:
+                return datetime.now(timezone.utc).isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
     @workflow.signal
     def set_user_preferences(self, preferences: Dict[str, Any]) -> None:
@@ -105,6 +120,14 @@ class ExecutionLedgerWorkflow:
             qty_decimal = Decimal(str(qty))
             if qty_decimal != 0:
                 self.positions[symbol] = qty_decimal
+                self.position_meta[symbol] = {
+                    "entry_trigger_id": "initial_allocation",
+                    "entry_category": None,
+                    "reason": "initial_allocation",
+                    "category": None,
+                    "opened_at": datetime.now(timezone.utc).isoformat(),
+                    "entry_side": "long" if qty_decimal > 0 else "short",
+                }
                 # Set entry price from provided prices
                 if symbol in prices:
                     self.entry_price[symbol] = Decimal(str(prices[symbol]))
@@ -130,6 +153,7 @@ class ExecutionLedgerWorkflow:
         self.entry_price = {}
         self.last_price = {}
         self.last_price_timestamp = {}
+        self.position_meta = {}
         self.realized_pnl = Decimal("0")
         self.scraped_profits = Decimal("0")
         self.transaction_history = []
@@ -164,6 +188,9 @@ class ExecutionLedgerWorkflow:
         qty = Decimal(str(fill["qty"]))
         price = Decimal(str(fill["fill_price"]))
         cost = Decimal(str(fill["cost"]))
+        trigger_id = fill.get("trigger_id") or fill.get("reason")
+        trigger_category = fill.get("trigger_category")
+        opened_at = self._format_fill_timestamp(fill.get("timestamp"))
         
         # Add transaction to history with timestamp
         transaction = {
@@ -235,8 +262,18 @@ class ExecutionLedgerWorkflow:
         if new_qty <= 0:
             self.positions.pop(symbol, None)
             self.entry_price.pop(symbol, None)
+            self.position_meta.pop(symbol, None)
         else:
             self.positions[symbol] = new_qty
+            if symbol not in self.position_meta or current_qty == 0 or (current_qty > 0) != (new_qty > 0):
+                self.position_meta[symbol] = {
+                    "entry_trigger_id": trigger_id,
+                    "entry_category": trigger_category,
+                    "reason": trigger_id,
+                    "category": trigger_category,
+                    "opened_at": opened_at,
+                    "entry_side": "long" if new_qty > 0 else "short",
+                }
         self.fill_count += 1
 
         # Emit position update event for ops telemetry
@@ -400,6 +437,30 @@ class ExecutionLedgerWorkflow:
     def get_entry_prices(self) -> Dict[str, float]:
         """Return weighted average entry price for each symbol."""
         return {sym: float(p) for sym, p in self.entry_price.items()}
+
+    @workflow.query
+    def get_portfolio_status(self) -> Dict[str, Any]:
+        """Return a consolidated portfolio snapshot for paper trading."""
+        positions = {sym: float(q) for sym, q in self.positions.items()}
+        entry_prices = {sym: float(p) for sym, p in self.entry_price.items()}
+        last_prices = {
+            sym: float(self.last_price.get(sym, self.entry_price.get(sym, Decimal("0"))))
+            for sym in positions
+        }
+        total_equity = float(self.cash)
+        for sym, qty in self.positions.items():
+            price = self.last_price.get(sym, self.entry_price.get(sym, Decimal("0")))
+            total_equity += float(qty) * float(price)
+        return {
+            "cash": float(self.cash),
+            "positions": positions,
+            "entry_prices": entry_prices,
+            "last_prices": last_prices,
+            "total_equity": total_equity,
+            "unrealized_pnl": float(self.get_unrealized_pnl_decimal()),
+            "realized_pnl": float(self.realized_pnl),
+            "position_meta": dict(self.position_meta),
+        }
 
     @workflow.query
     def get_transaction_history(self, params: Dict = None, *, limit: int | None = None, since_ts: int | None = None) -> List[Dict]:

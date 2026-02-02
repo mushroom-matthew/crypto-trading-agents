@@ -556,3 +556,125 @@ def test_emergency_exit_missing_exit_rule_runtime_defense(exit_rule):
     assert blocks[0]["reason"] == "emergency_exit_missing_exit_rule"
     assert "cooldown_recommendation_bars" in blocks[0]
     assert blocks[0]["cooldown_recommendation_bars"] == max(1, engine.trade_cooldown_bars, engine.min_hold_bars)
+
+
+@pytest.mark.parametrize("policy", ["ignore", "defer"])
+def test_conflicting_signal_policy_skips_orders(policy: str):
+    trigger = TriggerCondition(
+        id="btc_short",
+        symbol="BTC-USD",
+        direction="short",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="",
+        category="trend_continuation",
+        confidence_grade="A",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(
+        plan,
+        risk_engine,
+        min_hold_bars=0,
+        trade_cooldown_bars=0,
+        conflicting_signal_policy=policy,
+    )
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert not orders
+    assert blocks
+    assert blocks[0]["reason"] == "conflicting_signal_detected"
+    assert blocks[0]["policy"] == policy
+
+
+def test_conflicting_signal_policy_exit_flattens():
+    trigger = TriggerCondition(
+        id="btc_short",
+        symbol="BTC-USD",
+        direction="short",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="",
+        category="trend_continuation",
+        confidence_grade="A",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(
+        plan,
+        risk_engine,
+        min_hold_bars=0,
+        trade_cooldown_bars=0,
+        conflicting_signal_policy="exit",
+    )
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders
+    assert orders[0].reason == "btc_short_exit"
+    assert orders[0].intent == "conflict_exit"
+    assert orders[0].side == "sell"
+    assert blocks
+    assert blocks[0]["reason"] == "conflicting_signal_detected"
+
+
+def test_conflicting_signal_policy_reverse_flips():
+    trigger = TriggerCondition(
+        id="btc_short",
+        symbol="BTC-USD",
+        direction="short",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="",
+        category="trend_continuation",
+        confidence_grade="A",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(
+        plan,
+        risk_engine,
+        min_hold_bars=0,
+        trade_cooldown_bars=0,
+        conflicting_signal_policy="reverse",
+    )
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders
+    assert orders[0].reason == "btc_short"
+    assert orders[0].intent == "conflict_reverse"
+    assert orders[0].side == "sell"
+    assert blocks
+    assert blocks[0]["reason"] == "conflicting_signal_detected"

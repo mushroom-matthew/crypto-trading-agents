@@ -15,6 +15,7 @@ export interface AggressiveSettings {
   min_hold_hours?: number;
   min_flat_hours?: number;
   confidence_override_threshold?: string | null;
+  conflicting_signal_policy?: 'ignore' | 'exit' | 'reverse' | 'defer';
 
   // Execution Gating
   min_price_move_pct?: number;
@@ -85,6 +86,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
   const portfolioExposure = numberOrFallback(config.max_portfolio_exposure_pct, 80);
   const isLeveraged = portfolioExposure > 100;
   const isScalperMode = config.min_hold_hours === 0 && config.min_flat_hours === 0;
+  const conflictPolicy = config.conflicting_signal_policy ?? 'reverse';
 
   return (
     <div className="border border-orange-200 dark:border-orange-800 rounded-lg overflow-hidden">
@@ -356,6 +358,52 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                   disabled={disabled}
                 />
                 <p className="text-xs text-gray-500 mt-1">0 = immediate re-entry</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section: Conflicting Signal Policy */}
+          <div className="space-y-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+            <h3 className="flex items-center gap-2 font-medium text-gray-900 dark:text-gray-100">
+              <AlertTriangle className="w-4 h-4" />
+              Conflicting Signal Policy
+              <div className="group relative">
+                <Info className="w-4 h-4 text-gray-400 cursor-help" />
+                <div className="invisible group-hover:visible absolute left-0 top-6 z-10 w-64 p-2 bg-gray-800 text-white text-xs rounded shadow-lg">
+                  Decide what happens when an opposing entry signal fires while already in a position.
+                </div>
+              </div>
+            </h3>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Resolver Policy
+              </label>
+              <select
+                value={conflictPolicy}
+                onChange={(e) => onChange({ ...config, conflicting_signal_policy: e.target.value as AggressiveSettings['conflicting_signal_policy'] })}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                disabled={disabled}
+              >
+                <option value="ignore">Ignore (hold)</option>
+                <option value="exit">Exit (flatten)</option>
+                <option value="reverse">Reverse (flip)</option>
+                <option value="defer">Defer (wait)</option>
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs text-gray-500">
+              <div>
+                <span className="font-medium text-gray-700 dark:text-gray-300">Ignore</span>: drawdown during reversals
+              </div>
+              <div>
+                <span className="font-medium text-gray-700 dark:text-gray-300">Exit</span>: missed continuation
+              </div>
+              <div>
+                <span className="font-medium text-gray-700 dark:text-gray-300">Reverse</span>: whipsaw + fees
+              </div>
+              <div>
+                <span className="font-medium text-gray-700 dark:text-gray-300">Defer</span>: opportunity cost
               </div>
             </div>
           </div>

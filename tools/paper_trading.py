@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from schemas.llm_strategist import (
         AssetState,
+        IndicatorSnapshot,
         LLMInput,
         PortfolioState,
         StrategyPlan,
@@ -57,9 +58,12 @@ class PaperTradingConfig(BaseModel):
     initial_allocations: Optional[Dict[str, float]] = None
     strategy_prompt: Optional[str] = None
     plan_interval_hours: float = DEFAULT_PLAN_INTERVAL_HOURS
+    replan_on_day_boundary: bool = True
     enable_symbol_discovery: bool = False
     min_volume_24h: float = 1_000_000
     llm_model: Optional[str] = None
+    exit_binding_mode: Literal["none", "category"] = "category"
+    conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
 
 
 class SessionState(BaseModel):
@@ -69,6 +73,7 @@ class SessionState(BaseModel):
     symbols: List[str]
     strategy_prompt: Optional[str]
     plan_interval_hours: float
+    replan_on_day_boundary: bool = True
     current_plan: Optional[Dict[str, Any]] = None
     last_plan_time: Optional[str] = None
     cycle_count: int = 0
@@ -77,6 +82,8 @@ class SessionState(BaseModel):
     min_volume_24h: float = 1_000_000
     plan_history: List[Dict[str, Any]] = []
     equity_history: List[Dict[str, Any]] = []
+    exit_binding_mode: Literal["none", "category"] = "category"
+    conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
 
 
 # ============================================================================
@@ -177,6 +184,8 @@ def evaluate_triggers_activity(
     plan_dict: Dict[str, Any],
     market_data: Dict[str, Dict[str, Any]],
     portfolio_state: Dict[str, Any],
+    exit_binding_mode: str = "category",
+    conflicting_signal_policy: str = "reverse",
 ) -> List[Dict[str, Any]]:
     """Evaluate strategy triggers against current market data.
 
@@ -200,62 +209,122 @@ def evaluate_triggers_activity(
         plan,
         risk_engine,
         trade_risk=TradeRiskEvaluator(risk_engine),
+        exit_binding_mode=exit_binding_mode if exit_binding_mode else "category",
+        conflicting_signal_policy=conflicting_signal_policy if conflicting_signal_policy else "reverse",
     )
 
     all_orders: List[Dict[str, Any]] = []
 
+    def _parse_timestamp(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    return parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except ValueError:
+                return datetime.now(timezone.utc)
+        return datetime.now(timezone.utc)
+
+    positions = portfolio_state.get("positions") or {}
+    cash = float(portfolio_state.get("cash", 0.0))
+    equity = float(
+        portfolio_state.get("total_equity")
+        or portfolio_state.get("total_portfolio_value")
+        or cash
+    )
+    snapshot_ts = None
+    for data in market_data.values():
+        if isinstance(data, dict) and data.get("timestamp"):
+            snapshot_ts = _parse_timestamp(data.get("timestamp"))
+            break
+    if snapshot_ts is None:
+        snapshot_ts = datetime.now(timezone.utc)
+
+    portfolio_snapshot = PortfolioState(
+        timestamp=snapshot_ts,
+        equity=equity,
+        cash=cash,
+        positions=positions,
+        realized_pnl_7d=0.0,
+        realized_pnl_30d=0.0,
+        sharpe_30d=0.0,
+        max_drawdown_90d=0.0,
+        win_rate_30d=0.0,
+        profit_factor_30d=0.0,
+    )
+    position_meta = portfolio_state.get("position_meta") if isinstance(portfolio_state, dict) else None
+
     for symbol, data in market_data.items():
-        # Build bar from market data
-        bar = Bar(
-            timestamp=datetime.fromisoformat(data.get("timestamp", datetime.now(timezone.utc).isoformat())),
-            open=data.get("open", data.get("price", 0)),
-            high=data.get("high", data.get("price", 0)),
-            low=data.get("low", data.get("price", 0)),
-            close=data.get("close", data.get("price", 0)),
-            volume=data.get("volume", 0),
-        )
+        if not isinstance(data, dict):
+            continue
+        bar_ts = _parse_timestamp(data.get("timestamp"))
+        close_price = float(data.get("close", data.get("price", 0.0)) or 0.0)
+        open_price = float(data.get("open", close_price))
+        high_price = float(data.get("high", close_price))
+        low_price = float(data.get("low", close_price))
+        volume = float(data.get("volume", 0.0) or 0.0)
+        timeframes = sorted({t.timeframe for t in plan.triggers if t.symbol == symbol})
+        if not timeframes:
+            timeframes = [str(data.get("timeframe") or "1m")]
 
-        # Get current position
-        position_qty = portfolio_state.get("positions", {}).get(symbol, 0.0)
+        sma_short = data.get("sma_short") or data.get("sma_20")
+        sma_medium = data.get("sma_medium") or data.get("sma_50")
+        sma_long = data.get("sma_long") or data.get("sma_200")
 
-        # Build indicator context
-        indicators = {
-            "price": bar.close,
-            "close": bar.close,
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "volume": bar.volume,
-            "rsi_14": data.get("rsi_14", 50),
-            "sma_20": data.get("sma_short", bar.close),
-            "sma_50": data.get("sma_medium", bar.close),
-            "sma_200": data.get("sma_long", bar.close),
-            "atr_14": data.get("atr_14", 0),
-            "bollinger_upper": data.get("bollinger_upper", bar.close * 1.02),
-            "bollinger_lower": data.get("bollinger_lower", bar.close * 0.98),
-            "bollinger_middle": data.get("bollinger_middle", bar.close),
-        }
+        for timeframe in timeframes:
+            bar = Bar(
+                symbol=symbol,
+                timeframe=timeframe,
+                timestamp=bar_ts,
+                open=open_price,
+                high=high_price,
+                low=low_price,
+                close=close_price,
+                volume=volume,
+            )
 
-        # Evaluate triggers
-        orders, _ = trigger_engine.on_bar(
-            symbol=symbol,
-            bar=bar,
-            position_qty=position_qty,
-            indicators=indicators,
-            cross_tf_aliases={},
-            asset_state=None,
-            market_structure=None,
-        )
+            indicator = IndicatorSnapshot(
+                symbol=symbol,
+                timeframe=timeframe,
+                as_of=bar_ts,
+                close=close_price,
+                volume=volume,
+                rsi_14=data.get("rsi_14"),
+                sma_short=sma_short,
+                sma_medium=sma_medium,
+                sma_long=sma_long,
+                atr_14=data.get("atr_14"),
+                bollinger_upper=data.get("bollinger_upper"),
+                bollinger_lower=data.get("bollinger_lower"),
+                vwap=data.get("vwap"),
+            )
 
-        for order in orders:
-            all_orders.append({
-                "symbol": order.symbol,
-                "side": order.side,
-                "quantity": order.quantity,
-                "price": order.price,
-                "trigger_id": order.trigger_id,
-                "reason": order.reason,
-            })
+            orders, _ = trigger_engine.on_bar(
+                bar,
+                indicator,
+                portfolio_snapshot,
+                asset_state=None,
+                market_structure=None,
+                position_meta=position_meta,
+            )
+
+            for order in orders:
+                all_orders.append({
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "price": order.price,
+                    "timeframe": order.timeframe,
+                    "trigger_id": order.reason,
+                    "trigger_category": order.trigger_category,
+                    "intent": order.intent,
+                    "reason": order.reason,
+                })
 
     return all_orders
 
@@ -356,6 +425,7 @@ class PaperTradingWorkflow:
         self.symbols: List[str] = []
         self.strategy_prompt: Optional[str] = None
         self.plan_interval_hours: float = DEFAULT_PLAN_INTERVAL_HOURS
+        self.replan_on_day_boundary: bool = True
         self.current_plan: Optional[Dict[str, Any]] = None
         self.last_plan_time: Optional[datetime] = None
         self.cycle_count: int = 0
@@ -366,6 +436,8 @@ class PaperTradingWorkflow:
         self.plan_history: List[Dict[str, Any]] = []
         self.equity_history: List[Dict[str, Any]] = []
         self.last_equity_snapshot: Optional[datetime] = None
+        self.exit_binding_mode: Literal["none", "category"] = "category"
+        self.conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
 
     # -------------------------------------------------------------------------
     # Signals
@@ -459,8 +531,11 @@ class PaperTradingWorkflow:
             self.symbols = list(parsed_config.symbols)
             self.strategy_prompt = parsed_config.strategy_prompt
             self.plan_interval_hours = parsed_config.plan_interval_hours
+            self.replan_on_day_boundary = parsed_config.replan_on_day_boundary
             self.enable_symbol_discovery = parsed_config.enable_symbol_discovery
             self.min_volume_24h = parsed_config.min_volume_24h
+            self.exit_binding_mode = parsed_config.exit_binding_mode
+            self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
 
             # Initialize portfolio with starting allocations
             if parsed_config.initial_allocations:
@@ -511,6 +586,9 @@ class PaperTradingWorkflow:
                     self.last_discovery_date = today
 
             # Generate/update strategy plan
+            if self.replan_on_day_boundary and self.last_plan_time is not None:
+                if self.last_plan_time.date() != now.date():
+                    self.last_plan_time = None
             if self.last_plan_time is None or (now - self.last_plan_time) >= plan_interval:
                 await self._generate_plan()
 
@@ -667,7 +745,13 @@ class PaperTradingWorkflow:
         # Evaluate triggers
         orders = await workflow.execute_activity(
             evaluate_triggers_activity,
-            args=[self.current_plan, market_data, portfolio_state],
+            args=[
+                self.current_plan,
+                market_data,
+                portfolio_state,
+                self.exit_binding_mode,
+                self.conflicting_signal_policy,
+            ],
             schedule_to_close_timeout=timedelta(seconds=30),
         )
 
@@ -678,13 +762,21 @@ class PaperTradingWorkflow:
     async def _execute_order(self, order: Dict[str, Any], ledger_handle) -> None:
         """Execute a single order."""
         # Record fill in ledger
+        fill_price = float(order.get("price", 0.0) or 0.0)
+        quantity = float(order.get("quantity", 0.0) or 0.0)
+        cost = fill_price * quantity
+        fee = cost * 0.001
         await ledger_handle.signal("record_fill", {
             "symbol": order["symbol"],
             "side": order["side"].upper(),
-            "qty": order["quantity"],
-            "price": order["price"],
-            "fee": order["price"] * order["quantity"] * 0.001,  # 0.1% fee
+            "qty": quantity,
+            "fill_price": fill_price,
+            "cost": cost,
+            "fee": fee,  # 0.1% fee for reporting
             "timestamp": int(workflow.now().timestamp() * 1000),
+            "trigger_id": order.get("trigger_id") or order.get("reason"),
+            "trigger_category": order.get("trigger_category"),
+            "intent": order.get("intent"),
         })
 
         # Emit event
@@ -752,6 +844,7 @@ class PaperTradingWorkflow:
             symbols=self.symbols,
             strategy_prompt=self.strategy_prompt,
             plan_interval_hours=self.plan_interval_hours,
+            replan_on_day_boundary=self.replan_on_day_boundary,
             current_plan=self.current_plan,
             last_plan_time=self.last_plan_time.isoformat() if self.last_plan_time else None,
             cycle_count=self.cycle_count,
@@ -760,6 +853,8 @@ class PaperTradingWorkflow:
             min_volume_24h=self.min_volume_24h,
             plan_history=self.plan_history,
             equity_history=self.equity_history[-500:],  # Keep last 500 snapshots across continue-as-new
+            exit_binding_mode=self.exit_binding_mode,
+            conflicting_signal_policy=self.conflicting_signal_policy,
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -769,6 +864,7 @@ class PaperTradingWorkflow:
         self.symbols = parsed.symbols
         self.strategy_prompt = parsed.strategy_prompt
         self.plan_interval_hours = parsed.plan_interval_hours
+        self.replan_on_day_boundary = parsed.replan_on_day_boundary
         self.current_plan = parsed.current_plan
         self.last_plan_time = datetime.fromisoformat(parsed.last_plan_time) if parsed.last_plan_time else None
         self.cycle_count = parsed.cycle_count
@@ -777,3 +873,5 @@ class PaperTradingWorkflow:
         self.min_volume_24h = parsed.min_volume_24h
         self.plan_history = parsed.plan_history
         self.equity_history = parsed.equity_history
+        self.exit_binding_mode = parsed.exit_binding_mode
+        self.conflicting_signal_policy = parsed.conflicting_signal_policy

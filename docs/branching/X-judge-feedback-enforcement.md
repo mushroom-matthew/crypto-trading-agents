@@ -43,15 +43,15 @@ Investigation (2026-01-27) found critical gaps in judge→strategist handoff:
 - trading_core/execution_engine.py (enforce disabled triggers)
 - schemas/judge_feedback.py (may need schema updates)
 
-## Current Flow (What Exists)
+## Current Flow (Updated 2026-02-02)
 ```
 JudgeConstraints {
     max_trades_per_day      → ✓ Enforced in plan
     max_triggers_per_symbol → ✓ Enforced in plan
     symbol_risk_multipliers → ✓ Applied as adjustments
-    disabled_trigger_ids    → ✗ NOT USED
-    disabled_categories     → ✗ NOT USED
-    risk_mode               → ✗ NOT USED
+    disabled_trigger_ids    → ✓ Blocked in trigger engine + stripped post-generation (D5)
+    disabled_categories     → ✓ Blocked in trigger engine + stripped post-generation (D5)
+    risk_mode               → ✓ Scale all limits when emergency
 }
 ```
 
@@ -120,8 +120,15 @@ git commit -m "Judge: enforce disabled triggers and risk mode"
 - `agents/strategies/trigger_engine.py` - Judge constraint enforcement + logging
 - `backtesting/llm_strategist_runner.py` - Constraint extraction + risk_mode scaling
 
+### 2026-02-02: Post-Generation Constraint Stripping (Cross-Backtest Learnings D5)
+Gap 2 partially addressed: LLM still receives constraints as context, but they are now **enforced deterministically** after plan generation.
+
+- **`_strip_judge_constrained_triggers()`** — New method in `backtesting/llm_strategist_runner.py`. After `_apply_trigger_budget()`, filters out triggers whose `id` is in `disabled_trigger_ids` or whose `category` is in `disabled_categories`. This closes the gap where the LLM ignored judge constraints.
+- **Shadow plan logging** — Stripped triggers are recorded as `stripped_by_judge` in the plan_log with `reason` (`disabled_trigger_id` or `disabled_category`).
+- **Wait stance (D6)** — When all triggers are stripped, the system now accepts the empty plan as a "wait" stance rather than reverting to the previous plan. Logged with `"stance": "wait"` in plan_log.
+
 ### Deferred for Later
-- Gap 2 (must_fix/vetoes parsing) - Requires LLM prompt changes
+- Gap 2 remainder (must_fix/vetoes parsing into machine actions) - Requires LLM prompt changes
 - Gap 4 (sizing adjustment parsing) - Fragile regex remains
 
 ## Test Evidence (append results before commit)

@@ -6,7 +6,7 @@ import logging
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, List, Literal
+from typing import Any, Iterable, List, Literal, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,9 @@ from .rule_dsl import EvaluationTrace, MissingIndicatorError, RuleEvaluator, Rul
 
 
 from .trade_risk import TradeRiskEvaluator
+
+ExitBindingMode = Literal["none", "category"]
+ConflictResolution = Literal["ignore", "exit", "reverse", "defer"]
 
 
 @dataclass
@@ -57,6 +60,8 @@ class Order:
     stop_distance: float | None = None
     emergency: bool = False
     cooldown_recommendation_bars: int | None = None
+    trigger_category: str | None = None
+    intent: Literal["entry", "exit", "flat", "conflict_exit", "conflict_reverse"] | None = None
 
 
 class TriggerEngine:
@@ -80,6 +85,8 @@ class TriggerEngine:
         max_triggers_per_symbol_per_bar: int = 1,
         priority_skip_confidence_threshold: Literal["A", "B", "C"] | None = None,
         judge_constraints: JudgeConstraints | None = None,
+        exit_binding_mode: ExitBindingMode = "none",
+        conflicting_signal_policy: ConflictResolution = "reverse",
     ) -> None:
         """Initialize the trigger engine.
 
@@ -108,6 +115,8 @@ class TriggerEngine:
                 once max_triggers_per_symbol_per_bar is reached. None disables bypass.
             judge_constraints: Optional JudgeConstraints with disabled_trigger_ids and
                 disabled_categories to block specific triggers from firing.
+            exit_binding_mode: Exit binding policy ("none" or "category").
+            conflicting_signal_policy: Resolver policy when opposing entries fire ("ignore", "exit", "reverse", "defer").
         """
         self.plan = plan
         self.risk_engine = risk_engine
@@ -120,6 +129,8 @@ class TriggerEngine:
         self.prioritize_by_confidence = prioritize_by_confidence
         self.max_triggers_per_symbol_per_bar = max(1, max_triggers_per_symbol_per_bar)
         self.priority_skip_confidence_threshold = priority_skip_confidence_threshold
+        self.exit_binding_mode = exit_binding_mode
+        self.conflicting_signal_policy = conflicting_signal_policy
         # Store trigger confidence for deduplication
         self._trigger_confidence: dict[str, Literal["A", "B", "C"] | None] = {
             t.id: t.confidence_grade for t in plan.triggers
@@ -218,6 +229,29 @@ class TriggerEngine:
             return "short"
         return "flat"
 
+    def _entry_category(self, position_meta: Mapping[str, dict[str, Any]] | None, symbol: str) -> str | None:
+        if not position_meta:
+            return None
+        meta = position_meta.get(symbol) or {}
+        return meta.get("entry_category") or meta.get("category")
+
+    def _entry_trigger_id(self, position_meta: Mapping[str, dict[str, Any]] | None, symbol: str) -> str | None:
+        if not position_meta:
+            return None
+        meta = position_meta.get(symbol) or {}
+        return meta.get("entry_trigger_id") or meta.get("reason")
+
+    def _exit_binding_allows(self, trigger: TriggerCondition, entry_category: str | None) -> bool:
+        if self.exit_binding_mode == "none":
+            return True
+        if trigger.category == "emergency_exit":
+            return True
+        if not entry_category or not trigger.category:
+            return True
+        if self.exit_binding_mode == "category":
+            return entry_category == trigger.category
+        return True
+
     def _flatten_order(
         self,
         trigger: TriggerCondition,
@@ -225,6 +259,7 @@ class TriggerEngine:
         portfolio: PortfolioState,
         reason: str,
         block_entries: List[dict] | None = None,
+        intent: Literal["exit", "flat", "conflict_exit"] | None = None,
     ) -> Order | None:
         qty = portfolio.positions.get(trigger.symbol, 0.0)
         if abs(qty) <= 1e-9:
@@ -246,6 +281,8 @@ class TriggerEngine:
             timestamp=bar.timestamp,
             emergency=emergency,
             cooldown_recommendation_bars=cooldown_bars,
+            trigger_category=trigger.category,
+            intent=intent or ("exit" if reason.endswith("_exit") else "flat"),
         )
 
     def _record_block(
@@ -280,6 +317,7 @@ class TriggerEngine:
         portfolio: PortfolioState,
         bar: Bar,
         block_entries: List[dict] | None = None,
+        intent: Literal["entry", "conflict_reverse"] | None = None,
     ) -> Order | None:
         desired = trigger.direction
         current = self._position_direction(trigger.symbol, portfolio)
@@ -308,6 +346,8 @@ class TriggerEngine:
             reason=trigger.id,
             timestamp=bar.timestamp,
             stop_distance=stop_distance,
+            trigger_category=trigger.category,
+            intent=intent or "entry",
         )
 
     def on_bar(
@@ -317,6 +357,7 @@ class TriggerEngine:
         portfolio: PortfolioState,
         asset_state: AssetState | None = None,
         market_structure: dict[str, float | str | None] | None = None,
+        position_meta: Mapping[str, dict[str, Any]] | None = None,
     ) -> tuple[List[Order], List[dict]]:
         orders: List[Order] = []
         block_entries: List[dict] = []
@@ -441,6 +482,24 @@ class TriggerEngine:
                         extra = {"cooldown_recommendation_bars": self._emergency_cooldown_bars()}
                     self._record_block(block_entries, trigger, reason, detail, bar, extra=extra)
                     continue
+                entry_category = self._entry_category(position_meta, trigger.symbol)
+                if not self._exit_binding_allows(trigger, entry_category):
+                    entry_trigger_id = self._entry_trigger_id(position_meta, trigger.symbol)
+                    detail = f"Exit category {trigger.category} does not match entry category {entry_category}"
+                    self._record_block(
+                        block_entries,
+                        trigger,
+                        "exit_binding_mismatch",
+                        detail,
+                        bar,
+                        extra={
+                            "entry_category": entry_category,
+                            "entry_trigger_id": entry_trigger_id,
+                            "exit_category": trigger.category,
+                            "exit_trigger_id": trigger.id,
+                        },
+                    )
+                    continue
                 exit_order = self._flatten_order(trigger, bar, portfolio_for_eval, f"{trigger.id}_exit", block_entries)
                 if exit_order:
                     orders.append(exit_order)
@@ -470,7 +529,60 @@ class TriggerEngine:
                 continue
 
             if entry_fired:
-                entry = self._entry_order(trigger, indicator, portfolio_for_eval, bar, block_entries)
+                desired = trigger.direction
+                if desired in {"long", "short"} and current_position in {"long", "short"} and desired != current_position:
+                    detail = f"Conflicting signal: {desired} while {current_position}"
+                    self._record_block(
+                        block_entries,
+                        trigger,
+                        "conflicting_signal_detected",
+                        detail,
+                        bar,
+                        extra={
+                            "current_position": current_position,
+                            "desired_position": desired,
+                            "confidence": trigger.confidence_grade,
+                            "rationale": trigger.entry_rule,
+                            "entry_rule": trigger.entry_rule,
+                            "policy": self.conflicting_signal_policy,
+                        },
+                    )
+                    if self.conflicting_signal_policy in {"ignore", "defer"}:
+                        continue
+                    if self.conflicting_signal_policy == "exit":
+                        if self._is_within_hold_period(trigger.symbol):
+                            self._record_block(
+                                block_entries,
+                                trigger,
+                                "conflict_exit_min_hold",
+                                f"Conflict exit blocked by min_hold ({self.min_hold_bars} bars)",
+                                bar,
+                            )
+                            continue
+                        exit_order = self._flatten_order(
+                            trigger,
+                            bar,
+                            portfolio_for_eval,
+                            f"{trigger.id}_exit",
+                            block_entries,
+                            intent="conflict_exit",
+                        )
+                        if exit_order:
+                            orders.append(exit_order)
+                            orders = self._deduplicate_orders(orders, bar.symbol, block_entries)
+                            triggers_fired_for_symbol = len(orders)
+                            portfolio_for_eval = self._rebuild_portfolio_for_orders(portfolio_base, orders)
+                        continue
+                    entry = self._entry_order(
+                        trigger,
+                        indicator,
+                        portfolio_for_eval,
+                        bar,
+                        block_entries,
+                        intent="conflict_reverse",
+                    )
+                else:
+                    entry = self._entry_order(trigger, indicator, portfolio_for_eval, bar, block_entries)
                 if entry:
                     orders.append(entry)
                     orders = self._deduplicate_orders(orders, bar.symbol, block_entries)

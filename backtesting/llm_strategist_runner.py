@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -33,7 +33,7 @@ from agents.strategies.plan_provider import LLMCostTracker, StrategyPlanProvider
 from agents.strategies.risk_engine import RiskEngine, RiskProfile
 from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trade_risk import TradeRiskEvaluator
-from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
+from agents.strategies.trigger_engine import Bar, ConflictResolution, ExitBindingMode, Order, TriggerEngine
 from backtesting.dataset import load_ohlcv
 from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_transport
 from services.judge_feedback_service import JudgeFeedbackService
@@ -134,6 +134,8 @@ class PortfolioTracker:
                 self.avg_entry_price[symbol] = price
                 self.position_meta[symbol] = {
                     "reason": "initial_allocation",
+                    "entry_trigger_id": "initial_allocation",
+                    "entry_category": None,
                     "timeframe": None,
                     "opened_at": None,
                     "entry_price": price,
@@ -153,6 +155,11 @@ class PortfolioTracker:
         exit_price: float | None = None,
         entry_side: str | None = None,
         market_structure_entry: Dict[str, Any] | None = None,
+        entry_trigger_id: str | None = None,
+        entry_category: str | None = None,
+        exit_trigger_id: str | None = None,
+        exit_category: str | None = None,
+        close_reason: str | None = None,
     ) -> None:
         self.trade_log.append(
             {
@@ -167,6 +174,11 @@ class PortfolioTracker:
                 "exit_price": exit_price,
                 "entry_side": entry_side,
                 "market_structure_entry": market_structure_entry,
+                "entry_trigger_id": entry_trigger_id,
+                "entry_category": entry_category,
+                "exit_trigger_id": exit_trigger_id,
+                "exit_category": exit_category,
+                "close_reason": close_reason,
             }
         )
 
@@ -177,6 +189,30 @@ class PortfolioTracker:
             return timestamp.replace(tzinfo=timezone.utc)
         return timestamp.astimezone(timezone.utc)
 
+    def _base_trigger_id(self, reason: str | None) -> str | None:
+        if not reason:
+            return None
+        for suffix in ("_exit", "_flat"):
+            if reason.endswith(suffix):
+                return reason[: -len(suffix)]
+        return reason
+
+    def _close_reason(self, order: Order, entry_meta: Dict[str, Any]) -> str | None:
+        if order.intent:
+            return order.intent
+        if order.reason == "eod_flatten":
+            return "time_exit"
+        if order.reason.endswith("_exit"):
+            if order.trigger_category == "emergency_exit":
+                return "emergency_exit"
+            return "strategy_exit"
+        if order.reason.endswith("_flat"):
+            return "strategy_flat"
+        entry_side = entry_meta.get("entry_side")
+        if entry_side:
+            return "reversal"
+        return None
+
     def _update_position(
         self,
         symbol: str,
@@ -186,6 +222,8 @@ class PortfolioTracker:
         reason: str | None = None,
         timeframe: str | None = None,
         market_structure_entry: Dict[str, Any] | None = None,
+        trigger_category: str | None = None,
+        intent: str | None = None,
     ) -> None:
         position = self.positions.get(symbol, 0.0)
         avg_price = self.avg_entry_price.get(symbol, price)
@@ -202,6 +240,8 @@ class PortfolioTracker:
                 self.avg_entry_price[symbol] = total_notional / abs(new_position)
                 self.position_meta[symbol] = {
                     "reason": reason,
+                    "entry_trigger_id": reason,
+                    "entry_category": trigger_category,
                     "timeframe": timeframe,
                     "opened_at": timestamp,
                     "entry_price": price,
@@ -211,6 +251,24 @@ class PortfolioTracker:
             return
         closing_qty = min(abs(position), abs(delta_qty))
         if closing_qty > 0:
+            entry_trigger_id = meta.get("entry_trigger_id") or meta.get("reason")
+            entry_category = meta.get("entry_category")
+            exit_trigger_id = self._base_trigger_id(reason)
+            exit_category = trigger_category
+            close_reason = self._close_reason(
+                Order(
+                    symbol=symbol,
+                    side="buy" if delta_qty > 0 else "sell",
+                    quantity=closing_qty,
+                    price=price,
+                    timeframe=timeframe or "",
+                    reason=reason or "",
+                    timestamp=timestamp,
+                    trigger_category=trigger_category,
+                    intent=intent,
+                ),
+                meta,
+            )
             pnl = closing_qty * ((price - avg_price) if position > 0 else (avg_price - price))
             self._record_pnl(
                 symbol,
@@ -224,6 +282,11 @@ class PortfolioTracker:
                 exit_price=price,
                 entry_side=meta.get("entry_side"),
                 market_structure_entry=meta.get("market_structure_entry"),
+                entry_trigger_id=entry_trigger_id,
+                entry_category=entry_category,
+                exit_trigger_id=exit_trigger_id,
+                exit_category=exit_category,
+                close_reason=close_reason,
             )
         remaining = position + delta_qty
         if abs(remaining) <= 1e-9:
@@ -236,6 +299,8 @@ class PortfolioTracker:
             self.avg_entry_price[symbol] = price
             self.position_meta[symbol] = {
                 "reason": reason,
+                "entry_trigger_id": reason,
+                "entry_category": trigger_category,
                 "timeframe": timeframe,
                 "opened_at": timestamp,
                 "entry_price": price,
@@ -280,6 +345,8 @@ class PortfolioTracker:
             order.reason,
             order.timeframe,
             market_structure_entry=market_structure_entry,
+            trigger_category=order.trigger_category,
+            intent=order.intent,
         )
 
         self.fills.append(
@@ -295,6 +362,8 @@ class PortfolioTracker:
                 "realized_pnl": realized_pnl,
                 "timeframe": order.timeframe,
                 "market_structure_entry": market_structure_entry,
+                "trigger_category": order.trigger_category,
+                "intent": order.intent,
             }
         )
 
@@ -378,7 +447,10 @@ class LLMStrategistBacktester:
         judge_replan_threshold: float = 40.0,  # Score below which to trigger immediate replan
         adaptive_replanning: bool = True,  # Enable judge-driven replanning
         judge_check_after_trades: int = 3,  # Check judge after this many trades
+        replan_on_day_boundary: bool = True,
         use_judge_shim: bool = False,
+        exit_binding_mode: ExitBindingMode = "category",
+        conflicting_signal_policy: ConflictResolution = "reverse",
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -509,11 +581,12 @@ class LLMStrategistBacktester:
         self.flattened_days: set[str] = set()
         self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
         self.flatten_session_boundary_hour = flatten_session_boundary_hour
+        min_hold_explicit = min_hold_hours is not None
         if min_hold_hours is None:
             min_hold_hours = scalp_hold_hours if scalp_hold_hours is not None else 2.0
         self.min_hold_hours = float(min_hold_hours)
         hold_override = os.environ.get("LLM_MIN_HOLD_HOURS")
-        if hold_override:
+        if hold_override and not min_hold_explicit:
             try:
                 self.min_hold_hours = float(hold_override)
             except ValueError:
@@ -548,6 +621,8 @@ class LLMStrategistBacktester:
         self.auto_hedge_market = auto_hedge_market
         self.confidence_override_threshold = confidence_override_threshold
         self.priority_skip_confidence_threshold = priority_skip_confidence_threshold
+        self.exit_binding_mode = exit_binding_mode
+        self.conflicting_signal_policy = conflicting_signal_policy
         if self.priority_skip_confidence_threshold is None and self.is_scalp_profile:
             self.priority_skip_confidence_threshold = "B"
 
@@ -580,6 +655,7 @@ class LLMStrategistBacktester:
         self.judge_replan_threshold = judge_replan_threshold
         self.adaptive_replanning = adaptive_replanning
         self.judge_check_after_trades = max(1, judge_check_after_trades)
+        self.replan_on_day_boundary = bool(replan_on_day_boundary)
         self.use_judge_shim = use_judge_shim
         if not self.use_judge_shim:
             api_key = os.environ.get("OPENAI_API_KEY", "").strip().lower()
@@ -1254,6 +1330,26 @@ class LLMStrategistBacktester:
         if ts.tzinfo is None:
             return ts.replace(tzinfo=timezone.utc)
         return ts.astimezone(timezone.utc)
+
+    def _count_fills_between(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[int, int, list[Any]]:
+        count = 0
+        invalid_timestamps = 0
+        invalid_samples: list[Any] = []
+        for fill in self.portfolio.fills:
+            ts_raw = fill.get("timestamp")
+            ts = self._coerce_timestamp(ts_raw)
+            if ts is None:
+                invalid_timestamps += 1
+                if len(invalid_samples) < 3:
+                    invalid_samples.append(ts_raw)
+                continue
+            if start <= ts <= end:
+                count += 1
+        return count, invalid_timestamps, invalid_samples
 
     def _collect_fill_details(
         self,
@@ -2325,24 +2421,29 @@ class LLMStrategistBacktester:
                 self.last_judge_intervention_time is not None
                 and self.bars_since_last_trade >= self.zero_activity_threshold_bars
                 and self.active_judge_constraints is not None
-                and self.active_judge_constraints.disabled_trigger_ids
+                and (self.active_judge_constraints.disabled_trigger_ids or self.active_judge_constraints.disabled_categories)
             ):
                 logger.info(
-                    "Zero-activity re-enablement at %s: %d bars without trade, clearing disabled_trigger_ids",
+                    "Zero-activity re-enablement at %s: %d bars without trade, clearing disabled_trigger_ids=%s disabled_categories=%s",
                     ts.isoformat(), self.bars_since_last_trade,
+                    list(self.active_judge_constraints.disabled_trigger_ids),
+                    list(self.active_judge_constraints.disabled_categories),
                 )
                 self._add_event("zero_activity_reenable", {
                     "bars_since_last_trade": self.bars_since_last_trade,
                     "cleared_trigger_ids": list(self.active_judge_constraints.disabled_trigger_ids),
+                    "cleared_categories": list(self.active_judge_constraints.disabled_categories),
                 })
                 self.active_judge_constraints = self.active_judge_constraints.model_copy(
-                    update={"disabled_trigger_ids": []}
+                    update={"disabled_trigger_ids": [], "disabled_categories": []}
                 )
                 self.bars_since_last_trade = 0
                 self.last_judge_intervention_time = None
 
             # Check if adaptive judge evaluation should run
             judge_triggered_replan = False
+            judge_result: Dict[str, Any] | None = None
+            trigger_reason: str | None = None
             should_run, trigger_reason = self._judge_trigger_reason(ts)
             if current_plan and should_run:
                 judge_result = self._run_intraday_judge(
@@ -2380,22 +2481,24 @@ class LLMStrategistBacktester:
                 # In adaptive mode: only replan on day boundary or judge trigger
                 # Do NOT replan just because valid_until expired (that's the old slot-based model)
                 plan_expired = False
-                new_plan_needed = is_initial_plan or is_new_day or judge_triggered_replan
+                new_plan_needed = is_initial_plan or judge_triggered_replan or (is_new_day and self.replan_on_day_boundary)
             else:
                 # Legacy slot-based replanning
                 new_plan_needed = is_initial_plan or judge_triggered_replan or plan_expired
 
+            replan_reasons: str | None = None
             if new_plan_needed:
                 reason_parts = []
                 if is_initial_plan:
                     reason_parts.append("initial_plan")
-                if is_new_day:
+                if is_new_day and self.replan_on_day_boundary:
                     reason_parts.append("new_day")
                 if judge_triggered_replan:
                     reason_parts.append("judge_triggered")
                 if plan_expired:
                     reason_parts.append("plan_expired")
                 reasons = ",".join(reason_parts) if reason_parts else "unspecified"
+                replan_reasons = reasons
                 date_key = (run_id, day_key)
                 daily_counts = getattr(self.plan_provider, "daily_counts", None)
                 calls_used = daily_counts[date_key] if daily_counts is not None else None
@@ -2420,6 +2523,25 @@ class LLMStrategistBacktester:
                 active_assets = asset_states
                 self.latest_factor_exposures = self._factor_exposures(ts)
                 llm_input = self._llm_input(ts, asset_states, previous_plan=current_plan)
+                context_flags = {
+                    "has_judge_feedback": bool((llm_input.global_context or {}).get("judge_feedback")),
+                    "has_strategist_constraints": bool((llm_input.global_context or {}).get("strategist_constraints")),
+                    "has_strategy_memory": bool((llm_input.global_context or {}).get("strategy_memory")),
+                    "has_risk_adjustments": bool((llm_input.global_context or {}).get("risk_adjustments")),
+                }
+                run_snapshot = None
+                try:
+                    run_snapshot = self.run_registry.get_strategy_run(run_id)
+                except KeyError:
+                    run_snapshot = None
+                latest_judge_feedback = run_snapshot.latest_judge_feedback if run_snapshot else None
+                latest_judge_feedback_present = bool(latest_judge_feedback)
+                latest_judge_constraints_present = bool(
+                    latest_judge_feedback and latest_judge_feedback.constraints
+                )
+                latest_judge_strategist_constraints_present = bool(
+                    latest_judge_feedback and latest_judge_feedback.strategist_constraints
+                )
                 day_start = datetime(ts.year, ts.month, ts.day, tzinfo=ts.tzinfo)
                 day_end = day_start + timedelta(days=1)
                 previous_plan = current_plan
@@ -2446,6 +2568,8 @@ class LLMStrategistBacktester:
 
                 plan_rebuild = True
                 replan_suppressed = False
+                stripped_by_judge: list[dict] = []
+                wait_stance = False
                 if plan_budget_exhausted:
                     if current_plan is None:
                         raise RuntimeError(f"LLM call budget exhausted for {date_key[1]} with no existing plan")
@@ -2486,13 +2610,28 @@ class LLMStrategistBacktester:
                     )
                     current_plan = self._apply_plan_overrides(current_plan)
                     current_plan = self._apply_trigger_budget(current_plan)
+                    current_plan, stripped_by_judge = self._strip_judge_constrained_triggers(current_plan)
+                    # Directive 6: accept empty trigger plans as a "wait" stance
+                    wait_stance = False
+                    if stripped_by_judge and not current_plan.triggers:
+                        wait_stance = True
+                        logger.info(
+                            "Wait stance at %s: all %d triggers stripped by judge constraints",
+                            ts.isoformat(), len(stripped_by_judge),
+                        )
+                        self._add_event("wait_stance", {
+                            "timestamp": ts.isoformat(),
+                            "stripped_count": len(stripped_by_judge),
+                        })
                     trigger_diff = self._diff_plan_triggers(previous_plan, current_plan)
-                    if judge_triggered_replan and self._is_no_change_replan(previous_plan, current_plan, trigger_diff):
+                    is_replan = judge_triggered_replan or (is_new_day and not is_initial_plan)
+                    if is_replan and self._is_no_change_replan(previous_plan, current_plan, trigger_diff):
                         replan_suppressed = True
                         self.no_change_replan_suppressed_by_day[day_key] += 1
                         llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
                         self.llm_generation_by_day[day_key].append(llm_meta)
-                        logger.info("Suppressed judge-triggered replan at %s (no material change).", ts.isoformat())
+                        replan_source = "judge-triggered" if judge_triggered_replan else "day-boundary"
+                        logger.info("Suppressed %s replan at %s (no material change).", replan_source, ts.isoformat())
                         if previous_plan is not None:
                             run = self.run_registry.get_strategy_run(run_id)
                             run.current_plan_id = previous_plan.plan_id
@@ -2581,10 +2720,15 @@ class LLMStrategistBacktester:
                         debug_max_samples=self.debug_trigger_max_samples,
                         priority_skip_confidence_threshold=self.priority_skip_confidence_threshold,
                         judge_constraints=self.active_judge_constraints,
+                        exit_binding_mode=self.exit_binding_mode,
+                        conflicting_signal_policy=self.conflicting_signal_policy,
                     )
                 self.current_trigger_engine = trigger_engine
                 llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
                 self.llm_generation_by_day[day_key].append(llm_meta)
+                llm_meta_compact = {
+                    key: value for key, value in llm_meta.items() if key != "raw_output"
+                } if llm_meta else {}
                 trigger_summary = [
                     {
                         "id": trig.id,
@@ -2617,6 +2761,20 @@ class LLMStrategistBacktester:
                         "trigger_budgets": current_plan.trigger_budgets,
                         "allowed_symbols": current_plan.allowed_symbols,
                         "allowed_directions": current_plan.allowed_directions,
+                        "replan_reasons": replan_reasons,
+                        "replan_suppressed": replan_suppressed,
+                        "judge_triggered_replan": judge_triggered_replan,
+                        "judge_trigger_reason": trigger_reason,
+                        "judge_replan_reason": judge_result.get("replan_reason") if judge_result else None,
+                        "judge_score": judge_result.get("score") if judge_result else None,
+                        "judge_constraints_active": self._serialize_judge_constraints(self.active_judge_constraints),
+                        "context_flags": context_flags,
+                        "latest_judge_feedback_present": latest_judge_feedback_present,
+                        "latest_judge_constraints_present": latest_judge_constraints_present,
+                        "latest_judge_strategist_constraints_present": latest_judge_strategist_constraints_present,
+                        "llm_meta": llm_meta_compact,
+                        "stripped_by_judge": stripped_by_judge,
+                        "stance": "wait" if wait_stance else "active",
                     }
                 )
                 # Emit plan_generated event for UI timeline
@@ -2734,7 +2892,14 @@ class LLMStrategistBacktester:
                         portfolio_state.cash,
                     )
                     structure_snapshot = market_structure_briefs.get(pair)
-                    orders, blocked_entries = trigger_engine.on_bar(bar, indicator, portfolio_state, asset_state, market_structure=structure_snapshot)
+                    orders, blocked_entries = trigger_engine.on_bar(
+                        bar,
+                        indicator,
+                        portfolio_state,
+                        asset_state,
+                        market_structure=structure_snapshot,
+                        position_meta=self.portfolio.position_meta,
+                    )
                     current_load = len(orders) + (len(blocked_entries) if blocked_entries else 0)
                     fills_before = len(self.portfolio.fills)
                     executed_records = self._process_orders_with_limits(
@@ -2937,6 +3102,39 @@ class LLMStrategistBacktester:
         if trimmed > 0:
             logger.info("Trimmed %s triggers via budget controls: %s", trimmed, meaningful)
         return trimmed_plan
+
+    def _strip_judge_constrained_triggers(
+        self, plan: StrategyPlan,
+    ) -> tuple[StrategyPlan, list[dict]]:
+        """Remove triggers disabled by active judge constraints.
+
+        Returns the (possibly filtered) plan and a list of stripped-trigger
+        metadata dicts for shadow-plan logging.
+        """
+        if not self.active_judge_constraints:
+            return plan, []
+        constraints = self.active_judge_constraints
+        if not constraints.disabled_trigger_ids and not constraints.disabled_categories:
+            return plan, []
+
+        filtered = []
+        stripped: list[dict] = []
+        for t in plan.triggers:
+            if t.id in constraints.disabled_trigger_ids:
+                stripped.append({"id": t.id, "category": getattr(t, "category", None), "reason": "disabled_trigger_id"})
+                continue
+            cat = getattr(t, "category", None)
+            if cat and cat in constraints.disabled_categories:
+                stripped.append({"id": t.id, "category": cat, "reason": "disabled_category"})
+                continue
+            filtered.append(t)
+
+        if stripped:
+            logger.info(
+                "Stripped %d triggers by judge constraints (plan had %d, now %d)",
+                len(stripped), len(plan.triggers), len(filtered),
+            )
+        return plan.model_copy(update={"triggers": filtered}), stripped
 
     def _apply_plan_overrides(self, plan: StrategyPlan) -> StrategyPlan:
         updates: Dict[str, Any] = {}
@@ -3545,9 +3743,18 @@ class LLMStrategistBacktester:
                 "inputs": plan_limits.get("cap_inputs") or {},
             }
         if self.adaptive_replanning:
-            summary["judge_feedback"] = {}
+            if self.intraday_judge_history:
+                summary["judge_feedback"] = self.intraday_judge_history[-1].get("feedback", {})
+            else:
+                summary["judge_feedback"] = {}
             if self.use_judge_shim:
                 summary["judge_feedback"] = self._judge_feedback(summary)
+            # Directive 7: canonical judge snapshot for learning logs
+            if self.intraday_judge_history:
+                last_entry = self.intraday_judge_history[-1]
+                summary["canonical_judge_snapshot"] = last_entry.get("canonical_snapshot", {})
+            else:
+                summary["canonical_judge_snapshot"] = {}
             summary["risk_adjustments"] = []
         else:
             raw_feedback = self._judge_feedback(summary)
@@ -4333,6 +4540,91 @@ class LLMStrategistBacktester:
             },
         }
 
+    def _compact_judge_summary(self, summary: Dict[str, Any]) -> Dict[str, Any]:
+        compact: Dict[str, Any] = {
+            "return_pct": summary.get("return_pct"),
+            "trade_count": summary.get("trade_count"),
+            "equity": summary.get("equity"),
+            "anchor_equity": summary.get("anchor_equity"),
+            "winning_trades": summary.get("winning_trades"),
+            "losing_trades": summary.get("losing_trades"),
+            "positions_end": summary.get("positions_end"),
+            "fills_since_last_judge_count": len(summary.get("fills_since_last_judge") or []),
+        }
+        indicator_context = summary.get("indicator_context")
+        if indicator_context:
+            compact["indicator_context"] = indicator_context
+        market_structure = summary.get("market_structure")
+        if market_structure:
+            compact["market_structure"] = market_structure
+        factor_exposures = summary.get("factor_exposures")
+        if factor_exposures:
+            compact["factor_exposures"] = factor_exposures
+        risk_state = summary.get("risk_state")
+        if risk_state:
+            compact["risk_state"] = risk_state
+        active_triggers = summary.get("active_triggers") or []
+        if active_triggers:
+            compact["active_triggers"] = [
+                {
+                    "id": trigger.get("id"),
+                    "symbol": trigger.get("symbol"),
+                    "timeframe": trigger.get("timeframe"),
+                    "direction": trigger.get("direction"),
+                    "category": trigger.get("category"),
+                    "confidence": trigger.get("confidence"),
+                }
+                for trigger in active_triggers
+            ]
+        trigger_attempts = summary.get("trigger_attempts") or {}
+        if trigger_attempts:
+            total_attempted = 0
+            total_executed = 0
+            total_blocked = 0
+            blocked_reasons: Counter = Counter()
+            top_triggers = []
+            for trigger_id, stats in trigger_attempts.items():
+                attempted = stats.get("attempted", 0)
+                executed = stats.get("executed", 0)
+                blocked = stats.get("blocked", 0)
+                total_attempted += attempted
+                total_executed += executed
+                total_blocked += blocked
+                reason_counts = stats.get("blocked_by_reason") or {}
+                blocked_reasons.update(reason_counts)
+                top_triggers.append((trigger_id, attempted, executed, blocked))
+            top_triggers.sort(key=lambda item: item[1], reverse=True)
+            compact["trigger_attempts_summary"] = {
+                "total_attempted": total_attempted,
+                "total_executed": total_executed,
+                "total_blocked": total_blocked,
+                "top_blocked_reasons": blocked_reasons.most_common(5),
+                "top_triggers": [
+                    {
+                        "trigger_id": trigger_id,
+                        "attempted": attempted,
+                        "executed": executed,
+                        "blocked": blocked,
+                    }
+                    for trigger_id, attempted, executed, blocked in top_triggers[:5]
+                ],
+            }
+        return compact
+
+    @staticmethod
+    def _serialize_judge_constraints(constraints: JudgeConstraints | None) -> Dict[str, Any]:
+        if not constraints:
+            return {}
+        return {
+            "risk_mode": constraints.risk_mode,
+            "max_trades_per_day": constraints.max_trades_per_day,
+            "min_trades_per_day": constraints.min_trades_per_day,
+            "max_triggers_per_symbol_per_day": constraints.max_triggers_per_symbol_per_day,
+            "symbol_risk_multipliers": dict(constraints.symbol_risk_multipliers or {}),
+            "disabled_trigger_ids": list(constraints.disabled_trigger_ids or []),
+            "disabled_categories": list(constraints.disabled_categories or []),
+        }
+
     def _run_intraday_judge(
         self,
         ts: datetime,
@@ -4486,6 +4778,8 @@ class LLMStrategistBacktester:
                 "risk_budget_blocks_by_symbol": risk_budget.get("blocks_by_symbol", {}),
             }
 
+        compact_summary = self._compact_judge_summary(summary)
+
         # Run judge feedback with quality metrics
         feedback = self._judge_feedback(summary, trade_metrics=trade_metrics)
 
@@ -4510,11 +4804,29 @@ class LLMStrategistBacktester:
             replan_reason = f"Significant intraday drawdown: {snapshot['return_pct']:.2f}%"
 
         # Condition 3: No trades but should have (triggers exist but not firing)
-        if snapshot["trade_count"] == 0 and current_plan and len(current_plan.triggers) > 3:
-            hours_elapsed = (ts - current_plan.generated_at).total_seconds() / 3600
-            if hours_elapsed > 4:  # 4+ hours with triggers but no trades
-                should_replan = True
-                replan_reason = f"No trades in {hours_elapsed:.1f}h despite {len(current_plan.triggers)} triggers"
+        if current_plan and len(current_plan.triggers) > 3:
+            plan_start = self._coerce_timestamp(getattr(current_plan, "generated_at", None))
+            if plan_start:
+                trades_since_plan, invalid_count, invalid_samples = self._count_fills_between(plan_start, ts)
+                if invalid_count:
+                    logger.warning(
+                        "Found %d fills with invalid timestamps for judge window start=%s; samples=%s",
+                        invalid_count,
+                        plan_start.isoformat(),
+                        invalid_samples,
+                    )
+                hours_elapsed = (ts - plan_start).total_seconds() / 3600
+                if trades_since_plan == 0 and hours_elapsed > 4:
+                    should_replan = True
+                    replan_reason = (
+                        f"No trades in {hours_elapsed:.1f}h since plan generation despite "
+                        f"{len(current_plan.triggers)} triggers"
+                    )
+            elif snapshot["trade_count"] == 0 and getattr(current_plan, "generated_at", None):
+                hours_elapsed = (ts - current_plan.generated_at).total_seconds() / 3600
+                if hours_elapsed > 4:  # 4+ hours with triggers but no trades
+                    should_replan = True
+                    replan_reason = f"No trades in {hours_elapsed:.1f}h despite {len(current_plan.triggers)} triggers"
 
         shim_replan_suppressed = False
         if self.use_judge_shim and should_replan:
@@ -4535,6 +4847,13 @@ class LLMStrategistBacktester:
             # Good performance: can check less frequently
             self.next_judge_time = ts + timedelta(hours=min(8.0, self.judge_cadence_hours * 1.5))
 
+        canonical_snapshot = {
+            "summary_compact": compact_summary,
+            "trigger_attempts_summary": compact_summary.get("trigger_attempts_summary") if isinstance(compact_summary, dict) else None,
+            "score": score,
+            "timestamp": ts.isoformat(),
+        }
+
         result = {
             "timestamp": ts.isoformat(),
             "score": score,
@@ -4543,8 +4862,18 @@ class LLMStrategistBacktester:
             "trigger_reason": trigger_reason,
             "feedback": feedback,
             "snapshot": snapshot,
+            "summary_compact": compact_summary,
+            "canonical_snapshot": canonical_snapshot,
             "next_judge_time": self.next_judge_time.isoformat(),
         }
+
+        # Persist judge feedback to the StrategyRun so downstream consumers see it
+        try:
+            run = self.run_registry.get_strategy_run(run_id)
+            run.latest_judge_feedback = JudgeFeedback.model_validate(feedback)
+            self.run_registry.update_strategy_run(run)
+        except (KeyError, Exception) as exc:
+            logger.warning("Failed to persist judge feedback to run: %s", exc)
 
         # Log the evaluation
         self.intraday_judge_history.append(result)

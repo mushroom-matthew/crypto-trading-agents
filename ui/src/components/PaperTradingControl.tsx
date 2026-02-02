@@ -28,6 +28,7 @@ export function PaperTradingControl() {
     min_hold_hours: 2.0,
     min_flat_hours: 2.0,
     confidence_override_threshold: 'A',
+    conflicting_signal_policy: 'reverse',
     min_price_move_pct: 0.5,
     walk_away_enabled: false,
     walk_away_profit_target_pct: 25.0,
@@ -37,6 +38,7 @@ export function PaperTradingControl() {
     max_trades_per_day: 10,
     max_triggers_per_symbol_per_day: 5,
     judge_check_after_trades: 3,
+    replan_on_day_boundary: true,
     indicator_debug_mode: 'off',
   });
 
@@ -134,6 +136,7 @@ export function PaperTradingControl() {
         strategy_prompt: strategyPrompt,
         plan_interval_hours: planIntervalHours,
         enable_symbol_discovery: enableDiscovery,
+        exit_binding_mode: 'category',
         // Aggressive trading settings
         ...aggressiveSettings,
         ...planningSettings,
@@ -312,6 +315,7 @@ export function PaperTradingControl() {
               config={planningSettings}
               onChange={setPlanningSettings}
               disabled={isRunning}
+              showDayBoundaryReplan
             />
 
             {/* Action Buttons */}

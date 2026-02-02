@@ -398,3 +398,176 @@ class TestStaleJudgeEvalsMetric:
 
         assert counter.pop("2024-01-01", 0) == 3
         assert counter.pop("2024-01-02", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Feature 7: Zero-activity re-enablement clears disabled_categories (D1)
+# ---------------------------------------------------------------------------
+
+
+class TestZeroActivityReenablementCategories:
+    """After N bars without trades, disabled_categories must also clear."""
+
+    def test_zero_activity_clears_categories(self):
+        """When only disabled_categories is set (no trigger IDs), re-enablement fires."""
+        constraints = JudgeConstraints(
+            disabled_trigger_ids=[],
+            disabled_categories=["trend_continuation", "reversal"],
+        )
+        bars_since_last_trade = 48
+        threshold = 48
+        last_judge_intervention = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        should_reenable = (
+            last_judge_intervention is not None
+            and bars_since_last_trade >= threshold
+            and (constraints.disabled_trigger_ids or constraints.disabled_categories)
+        )
+        assert should_reenable
+
+        new_constraints = constraints.model_copy(
+            update={"disabled_trigger_ids": [], "disabled_categories": []}
+        )
+        assert new_constraints.disabled_trigger_ids == []
+        assert new_constraints.disabled_categories == []
+
+    def test_zero_activity_clears_both_ids_and_categories(self):
+        """When both disabled_trigger_ids and disabled_categories are set, both clear."""
+        constraints = JudgeConstraints(
+            disabled_trigger_ids=["t1"],
+            disabled_categories=["mean_reversion"],
+        )
+        new_constraints = constraints.model_copy(
+            update={"disabled_trigger_ids": [], "disabled_categories": []}
+        )
+        assert new_constraints.disabled_trigger_ids == []
+        assert new_constraints.disabled_categories == []
+
+    def test_no_reenable_when_neither_set(self):
+        """When both fields are empty, condition is False."""
+        constraints = JudgeConstraints(disabled_trigger_ids=[], disabled_categories=[])
+        should_reenable = (
+            constraints.disabled_trigger_ids or constraints.disabled_categories
+        )
+        assert not should_reenable
+
+
+# ---------------------------------------------------------------------------
+# Feature 8: Canonical judge snapshot (D7)
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalJudgeSnapshot:
+    """Intraday judge result must include canonical_snapshot key."""
+
+    def test_canonical_snapshot_structure(self):
+        """Verify canonical_snapshot has the expected keys."""
+        compact_summary = {
+            "trigger_attempts_summary": {"t1": {"fired": 1, "blocked": 0}},
+            "equity": 1050.0,
+        }
+        score = 65.0
+        ts = datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc)
+
+        canonical_snapshot = {
+            "summary_compact": compact_summary,
+            "trigger_attempts_summary": compact_summary.get("trigger_attempts_summary"),
+            "score": score,
+            "timestamp": ts.isoformat(),
+        }
+
+        assert "summary_compact" in canonical_snapshot
+        assert "trigger_attempts_summary" in canonical_snapshot
+        assert canonical_snapshot["score"] == 65.0
+        assert canonical_snapshot["timestamp"] == "2024-01-15T14:00:00+00:00"
+        assert canonical_snapshot["trigger_attempts_summary"] == {"t1": {"fired": 1, "blocked": 0}}
+
+    def test_canonical_snapshot_in_result_dict(self):
+        """Result dict from intraday judge includes canonical_snapshot."""
+        result = {
+            "timestamp": "2024-01-15T14:00:00+00:00",
+            "score": 55.0,
+            "canonical_snapshot": {
+                "summary_compact": {},
+                "trigger_attempts_summary": None,
+                "score": 55.0,
+                "timestamp": "2024-01-15T14:00:00+00:00",
+            },
+        }
+        assert "canonical_snapshot" in result
+        assert result["canonical_snapshot"]["score"] == 55.0
+
+
+# ---------------------------------------------------------------------------
+# Feature 9: Strip judge-constrained triggers (D5)
+# ---------------------------------------------------------------------------
+
+
+class TestStripJudgeConstrainedTriggers:
+    """Disabled categories/IDs should be stripped from generated plans."""
+
+    def test_strip_by_category(self):
+        """Triggers matching disabled_categories are removed."""
+        constraints = JudgeConstraints(disabled_categories=["trend_continuation"])
+        triggers = [
+            _make_trigger("t1", "trend_continuation"),
+            _make_trigger("t2", "reversal"),
+            _make_trigger("t3", "trend_continuation"),
+        ]
+
+        filtered = []
+        stripped = []
+        for t in triggers:
+            cat = getattr(t, "category", None)
+            if cat and cat in constraints.disabled_categories:
+                stripped.append({"id": t.id, "category": cat, "reason": "disabled_category"})
+                continue
+            filtered.append(t)
+
+        assert len(filtered) == 1
+        assert filtered[0].id == "t2"
+        assert len(stripped) == 2
+        assert all(s["reason"] == "disabled_category" for s in stripped)
+
+    def test_strip_by_trigger_id(self):
+        """Triggers matching disabled_trigger_ids are removed."""
+        constraints = JudgeConstraints(disabled_trigger_ids=["t1", "t3"])
+        triggers = [
+            _make_trigger("t1", "reversal"),
+            _make_trigger("t2", "reversal"),
+            _make_trigger("t3", "mean_reversion"),
+        ]
+
+        filtered = []
+        stripped = []
+        for t in triggers:
+            if t.id in constraints.disabled_trigger_ids:
+                stripped.append({"id": t.id, "category": getattr(t, "category", None), "reason": "disabled_trigger_id"})
+                continue
+            filtered.append(t)
+
+        assert len(filtered) == 1
+        assert filtered[0].id == "t2"
+        assert len(stripped) == 2
+
+    def test_no_strip_when_no_constraints(self):
+        """No stripping when constraints are empty."""
+        constraints = JudgeConstraints(disabled_trigger_ids=[], disabled_categories=[])
+        triggers = [_make_trigger("t1", "reversal")]
+
+        should_strip = bool(constraints.disabled_trigger_ids or constraints.disabled_categories)
+        assert not should_strip
+
+    def test_all_triggers_stripped_produces_empty_plan(self):
+        """When all triggers are stripped, result is empty (wait stance)."""
+        constraints = JudgeConstraints(disabled_categories=["reversal"])
+        triggers = [
+            _make_trigger("t1", "reversal"),
+            _make_trigger("t2", "reversal"),
+        ]
+
+        filtered = [
+            t for t in triggers
+            if getattr(t, "category", None) not in constraints.disabled_categories
+        ]
+        assert len(filtered) == 0  # wait stance

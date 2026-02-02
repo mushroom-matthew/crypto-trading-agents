@@ -36,7 +36,7 @@ async def load_ohlcv_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     Retry: 3 attempts with exponential backoff
     """
     from backtesting.dataset import load_ohlcv
-    from data_loader.utils import ensure_utc, timeframe_to_seconds
+    from data_loader.utils import ensure_utc
 
     symbols = config["symbols"]
     start = ensure_utc(datetime.fromisoformat(config["start_date"]))
@@ -235,34 +235,15 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     flatten_notional_threshold = config.get("flatten_notional_threshold", 0.0)
     strategy_prompt = config.get("strategy_prompt")
 
-    def _default_min_hold_hours(timeframes_input) -> float:
-        base_seconds = None
-        for tf in timeframes_input:
-            try:
-                seconds = timeframe_to_seconds(str(tf))
-            except ValueError:
-                continue
-            if base_seconds is None or seconds < base_seconds:
-                base_seconds = seconds
-        if not base_seconds:
-            return 2.0
-        if base_seconds <= 300:
-            bars = 1
-        elif base_seconds <= 900:
-            bars = 2
-        else:
-            return 2.0
-        return (bars * base_seconds) / 3600.0
-
     # Whipsaw / anti-flip-flop controls (new parameters)
     min_hold_hours = config.get("min_hold_hours")
-    if min_hold_hours is None:
-        min_hold_hours = _default_min_hold_hours(timeframes)
     min_flat_hours = config.get("min_flat_hours")
     if min_flat_hours is None:
         min_flat_hours = 2.0  # Default
     confidence_override_threshold = config.get("confidence_override_threshold", "A")
     priority_skip_confidence_threshold = config.get("priority_skip_confidence_threshold")
+    exit_binding_mode = config.get("exit_binding_mode", "category")
+    conflicting_signal_policy = config.get("conflicting_signal_policy", "reverse")
 
     # Walk-away threshold
     walk_away_enabled = config.get("walk_away_enabled", False)
@@ -285,6 +266,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     adaptive_replanning = config.get("adaptive_replanning", True)  # Default: enabled
     judge_replan_threshold = config.get("judge_replan_threshold", 40.0)
     judge_check_after_trades = config.get("judge_check_after_trades", 3)
+    replan_on_day_boundary = bool(config.get("replan_on_day_boundary", True))
 
     logger.info(
         "Running LLM strategist backtest",
@@ -341,10 +323,12 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         market_data=market_data,
         flatten_positions_daily=flatten_positions_daily,
         flatten_notional_threshold=flatten_notional_threshold,
-        min_hold_hours=float(min_hold_hours),
+        min_hold_hours=min_hold_hours,
         min_flat_hours=float(min_flat_hours),
         confidence_override_threshold=confidence_override_threshold,
         priority_skip_confidence_threshold=priority_skip_confidence_threshold,
+        exit_binding_mode=exit_binding_mode,
+        conflicting_signal_policy=conflicting_signal_policy,
         initial_allocations=initial_allocations,
         strategy_prompt=strategy_prompt,
         # Walk-away threshold (passed to backtester for tracking)
@@ -364,6 +348,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         judge_cadence_hours=judge_cadence_hours,
         judge_replan_threshold=judge_replan_threshold,
         judge_check_after_trades=judge_check_after_trades,
+        replan_on_day_boundary=replan_on_day_boundary,
         use_judge_shim=use_judge_shim,
     )
 

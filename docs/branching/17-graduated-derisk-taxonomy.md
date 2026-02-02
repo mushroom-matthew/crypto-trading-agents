@@ -284,7 +284,25 @@ This is **Phase A** — it must be complete before partial exits (Phase B) can s
 - Dynamic `exit_fraction` based on regime (future optimization after fixed fraction is validated).
 - "Core exposure" concept for risk_off (initially risk_off just flattens; selective retention is deferred).
 
+## Prerequisite Work (Completed)
+
+The following cross-backtest learning directives were implemented in a prior PR to establish the foundation this runbook builds on. These are **not part of this runbook's scope** but resolve issues that would otherwise interact poorly with graduated de-risk:
+
+| Directive | Summary | Why it matters for D4 |
+|---|---|---|
+| D1 | Zero-activity re-enablement now clears `disabled_categories` (not just trigger IDs) | Without this, category vetoes on `risk_reduce`/`risk_off` would cause permanent zero-trade locks |
+| D2 | Intraday judge feedback persisted to StrategyRun | Judge feedback drives constraint enforcement; must be visible to plan generation |
+| D3 | No-change suppression extended to day-boundary replans | Prevents wasted LLM calls that would multiply with new category triggers |
+| D5 | `_strip_judge_constrained_triggers()` post-generation filter + shadow plan logging | Judge constraints are now enforced deterministically, not relying on LLM compliance — critical before adding new trigger categories |
+| D6 | Empty trigger plans accepted as "wait" stance | When judge strips all triggers (including new `risk_reduce`/`risk_off`), system holds rather than reverting to stale plan |
+| D7 | Canonical judge snapshot format in intraday history | Standardizes the data contract for learning logs that will evaluate graduated de-risk effectiveness |
+
+**Key files changed:**
+- `backtesting/llm_strategist_runner.py` — D1, D2, D3, D5, D6, D7
+- `tests/test_judge_death_spiral.py` — 10 new tests covering D1, D5, D6, D7
+
 ## Change Log
 - 2026-01-30: Initial design runbook created.
 - 2026-01-30: Expanded with full precedence tiering, guardrail matrix, phased implementation, telemetry events, and explicit `exit_fraction` approach per design review.
 - 2026-01-30: Added TradeSet/TradeLeg data model, WAC accounting rule, position lifecycle grouping, fill_id requirement, and Phase A as hard prerequisite for partial exits. Deprecated many-to-many leg linking in favor of sequential lifecycle model.
+- 2026-02-02: Prerequisite directives D1-D3, D5-D7 implemented in separate PR. Zero-activity category clearing, judge feedback persistence, day-boundary suppression, post-generation constraint stripping, wait stance, and canonical snapshots all landed. Runbook 17 implementation can now proceed on clean foundation.

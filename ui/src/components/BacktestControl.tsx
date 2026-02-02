@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, Fragment } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info } from 'lucide-react';
+import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info, ChevronDown, ChevronRight } from 'lucide-react';
 import { backtestAPI, promptsAPI, regimesAPI, type BacktestConfig } from '../lib/api';
 import { cn, formatCurrency, formatPercent, formatDateTime, numberOrFallback, parseOptionalNumber } from '../lib/utils';
 import { BACKTEST_PRESETS } from '../lib/presets';
@@ -31,6 +31,7 @@ export function BacktestControl() {
     max_triggers_per_symbol_per_day: 10,
     judge_cadence_hours: 4,
     judge_check_after_trades: 3,
+    replan_on_day_boundary: true,
     // Risk settings defaults
     max_position_risk_pct: 3.0,
     max_symbol_exposure_pct: 40.0,
@@ -39,6 +40,8 @@ export function BacktestControl() {
     // Whipsaw defaults (relaxed for more trades)
     min_hold_hours: 0.5,
     min_flat_hours: 0.25,
+    conflicting_signal_policy: 'reverse',
+    exit_binding_mode: 'category',
     // Execution gating (low threshold to allow trades)
     min_price_move_pct: 0.15,
     // Debug sampling - enable by default to diagnose trigger issues
@@ -53,6 +56,7 @@ export function BacktestControl() {
   const [allocationError, setAllocationError] = useState<string | null>(null);
   const [selectedStrategyId, setSelectedStrategyId] = useState<string>('default');
   const [selectedSymbol, setSelectedSymbol] = useState<string>(defaultConfig.symbols[0] ?? '');
+  const [expandedRoundTrips, setExpandedRoundTrips] = useState<Set<number>>(new Set());
 
   const [selectedRun, setSelectedRun] = useState<string | null>(() => {
     // Restore from localStorage on mount
@@ -61,6 +65,17 @@ export function BacktestControl() {
   const clearSelectedRun = () => {
     setSelectedRun(null);
     localStorage.removeItem('selectedBacktestRunId');
+  };
+  const toggleRoundTrip = (index: number) => {
+    setExpandedRoundTrips((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
   };
 
   // Fetch available strategies
@@ -159,6 +174,9 @@ export function BacktestControl() {
     queryFn: () => backtestAPI.getPairedTrades(selectedRun!),
     enabled: backtest?.status === 'completed',
   });
+  useEffect(() => {
+    setExpandedRoundTrips(new Set());
+  }, [selectedRun]);
 
   const symbolsFromTrades = useMemo(() => {
     const unique = new Set(trades.map((trade) => trade.symbol).filter(Boolean));
@@ -568,6 +586,7 @@ export function BacktestControl() {
                 config={config}
                 onChange={setConfig}
                 disabled={isRunning}
+                showDayBoundaryReplan
               />
             )}
 
@@ -892,30 +911,55 @@ export function BacktestControl() {
                 <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
                   Round-trip trades pairing entry and exit fills. Hold = duration in hours, R = P&L / Actual Risk
                 </p>
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto max-h-96 overflow-y-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
-                        <th className="pb-3">Symbol</th>
-                        <th className="pb-3">Side</th>
-                        <th className="pb-3">Entry Trigger</th>
-                        <th className="pb-3">Exit Trigger</th>
-                        <th className="pb-3">Entry Time</th>
-                        <th className="pb-3">Exit Time</th>
-                        <th className="pb-3 text-right">Entry Price</th>
-                        <th className="pb-3 text-right">Exit Price</th>
-                        <th className="pb-3 text-right">Qty</th>
-                        <th className="pb-3 text-right">Fees</th>
-                        <th className="pb-3 text-right">P&L</th>
-                        <th className="pb-3 text-right" title="Hold duration in hours">Hold (h)</th>
-                        <th className="pb-3 text-right" title="Actual risk at stop (qty x stop distance)">Risk</th>
-                        <th className="pb-3 text-right" title="R-multiple: P&L / Actual Risk">R</th>
+                        <th className="pb-3 w-8 sticky top-0 bg-white dark:bg-gray-800 z-10" />
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Symbol</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Side</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Entry Trigger</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Exit Trigger</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Entry Time</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Exit Time</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Entry Price</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Exit Price</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Qty</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Fees</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">P&L</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10" title="Hold duration in hours">Hold (h)</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10" title="Actual risk at stop (qty x stop distance)">Risk</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10" title="R-multiple: P&L / Actual Risk">R</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                      {pairedTrades.slice(0, 20).map((pt, idx) => (
-                        <tr key={idx}>
-                          <td className="py-2 font-mono">{pt.symbol}</td>
+                      {pairedTrades.map((pt, idx) => {
+                        const isExpanded = expandedRoundTrips.has(idx);
+                        return (
+                          <Fragment key={idx}>
+                            <tr
+                              className="hover:bg-gray-50 dark:hover:bg-gray-700/40 cursor-pointer"
+                              onClick={() => toggleRoundTrip(idx)}
+                            >
+                              <td className="py-2">
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    toggleRoundTrip(idx);
+                                  }}
+                                  aria-expanded={isExpanded}
+                                  className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+                                  title={isExpanded ? 'Hide details' : 'Show details'}
+                                >
+                                  {isExpanded ? (
+                                    <ChevronDown className="w-4 h-4 text-gray-500" />
+                                  ) : (
+                                    <ChevronRight className="w-4 h-4 text-gray-500" />
+                                  )}
+                                </button>
+                              </td>
+                              <td className="py-2 font-mono">{pt.symbol}</td>
                           <td className="py-2">
                             <span className={cn(
                               'px-2 py-0.5 rounded text-xs font-semibold',
@@ -956,8 +1000,34 @@ export function BacktestControl() {
                           )}>
                             {pt.r_multiple != null ? pt.r_multiple.toFixed(2) : '-'}
                           </td>
-                        </tr>
-                      ))}
+                            </tr>
+                            {isExpanded && (
+                              <tr className="bg-gray-50 dark:bg-gray-900/30">
+                                <td className="py-3 px-2" colSpan={15}>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-gray-700 dark:text-gray-300">
+                                    <div>
+                                      <p className="font-semibold text-gray-500 dark:text-gray-400">Entry Trigger (full)</p>
+                                      <p className="mt-1 whitespace-pre-wrap break-words text-gray-900 dark:text-gray-100">
+                                        {pt.entry_trigger || '-'}
+                                      </p>
+                                    </div>
+                                    <div>
+                                      <p className="font-semibold text-gray-500 dark:text-gray-400">Exit Trigger (full)</p>
+                                      <p className="mt-1 whitespace-pre-wrap break-words text-gray-900 dark:text-gray-100">
+                                        {pt.exit_trigger || '-'}
+                                      </p>
+                                    </div>
+                                    <div>
+                                      <p className="font-semibold text-gray-500 dark:text-gray-400">Entry Timeframe</p>
+                                      <p className="mt-1 text-gray-900 dark:text-gray-100">{pt.entry_timeframe || '-'}</p>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
