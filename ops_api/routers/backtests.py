@@ -1261,6 +1261,7 @@ async def get_trade_sets(run_id: str):
                 category=fill.get("trigger_category"),
                 reason=fill.get("reason"),
                 timeframe=fill.get("timeframe"),
+                exit_fraction=fill.get("exit_fraction"),
                 learning_book=bool(fill.get("learning_book")),
                 experiment_id=fill.get("experiment_id"),
             )

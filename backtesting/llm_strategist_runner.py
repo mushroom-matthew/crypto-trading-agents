@@ -388,6 +388,7 @@ class PortfolioTracker:
                 "learning_book": order.learning_book,
                 "experiment_id": order.experiment_id,
                 "experiment_variant": order.experiment_variant,
+                "exit_fraction": order.exit_fraction,
             }
         )
 
