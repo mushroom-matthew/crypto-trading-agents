@@ -41,7 +41,7 @@ Multi-layer synthesis requirements:
    - volatility_breakout
    - mean_reversion
    - emergency_exit (can flatten either asset when conditions deteriorate)
-   Additional triggers are optional; if added, set category to "other".
+   Additional triggers are optional; if added, set category to "other", "risk_reduce", or "risk_off".
 5. BTC/ETH asymmetry: each asset must use unique indicator combinations, timeframes, or volatility gates. No mirrored logic; tie triggers to asset-specific behavior (BTC momentum leadership vs ETH lagging structure).
 6. Composite logic: each trigger must combine at least two indicators into a conceptual condition (example: pullback inside uptrend while MACD histogram stays positive and ATR contracts).
 7. Confidence grading: set confidence_grade per trigger to A, B, or C to drive sizing tiers (A = max allowable risk, B = half of A, C = minimal probe). Never leave confidence_grade null; if uncertain use B. Reflect the grade in your entry/exit rationale.
@@ -58,6 +58,20 @@ Multi-layer synthesis requirements:
    - The trade thesis remains valid despite short-term noise
    Do NOT use hold_rule for emergency_exit triggers - they must always be able to fire.
    Emergency exits must define a non-empty exit_rule; entry_rule should be empty or always false.
+11. Graduated de-risk categories (optional, use when appropriate):
+   - risk_reduce: Partial exit to trim exposure when conditions are weakening but not critical.
+     Use for: trend losing momentum, approaching resistance, unfavorable volume profile, correlation breakdown starting.
+     Set exit_fraction (0 < f < 1.0) to specify how much of the position to close (e.g., 0.5 = close 50%).
+     Example: {"category": "risk_reduce", "exit_fraction": 0.5, "exit_rule": "not is_flat and rsi_14 > 70 and macd_hist < 0"}
+   - risk_off: Full exit to defensive posture when regime shift is detected.
+     Use for: sustained adverse moves, correlation breakdown, regime shift signal, defensive stance warranted.
+     Does NOT bypass risk checks or hold rules - it's a negotiable strategic exit, not an emergency.
+     Example: {"category": "risk_off", "exit_rule": "not is_flat and vol_state == 'extreme' and close < sma_medium"}
+   - emergency_exit: HARD safety interrupt - exposure MUST go to zero immediately.
+     Use ONLY for: flash crash, liquidity gap, exchange anomaly, circuit breaker conditions, something is BROKEN.
+     Bypasses hold rules and risk caps that would prevent exiting. Unconditional. Non-negotiable.
+   IMPORTANT: Do not overload emergency_exit. If you want less-conservative exit behavior, use risk_reduce or risk_off instead.
+   Precedence: emergency_exit > risk_off > risk_reduce > normal exits.
 10. Regime discipline and trigger budgets:
    - State a dominant regime per symbol inside global_view (trend, mean-reversion, volatility-breakout, or defensive) so downstream components can align.
    - Regime-adapt the trigger emphasis: range -> mean_reversion highest confidence, trend/volatility triggers tightened; bull -> trend_continuation highest confidence, reversals guarded; bear -> defensive/exit bias and higher confirmation for longs; high_vol -> volatility_breakout only with strict volatility gates; mixed -> balanced but avoid mirrored logic.
@@ -157,6 +171,17 @@ Trimmed output example:
       "entry_rule": "is_flat and timeframe=='1h' and trend_state=='uptrend' and close > sma_medium and tf_4h_close > tf_4h_sma_medium and tf_1h_rsi_14 between 48 and 62 and atr_14 < tf_4h_atr_14 and macd_hist > 0",
       "exit_rule": "not is_flat and (close < sma_medium or tf_4h_rsi_14 < 50 or realized_vol_short > tf_4h_realized_vol_medium)",
       "hold_rule": "tf_4h_close > tf_4h_sma_medium and rsi_14 > 40 and vol_state != 'extreme'"
+    },
+    {
+      "id": "btc_risk_reduce_overbought",
+      "symbol": "BTC-USD",
+      "category": "risk_reduce",
+      "confidence_grade": "B",
+      "direction": "exit",
+      "timeframe": "1h",
+      "entry_rule": "false",
+      "exit_rule": "not is_flat and timeframe=='1h' and rsi_14 > 75 and close > bollinger_upper and macd_hist < 0",
+      "exit_fraction": 0.5
     },
     {
       "id": "eth_emergency_exit",

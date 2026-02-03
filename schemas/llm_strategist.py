@@ -104,7 +104,9 @@ TriggerCategory = Literal[
     "reversal",
     "volatility_breakout",
     "mean_reversion",
-    "emergency_exit",
+    "risk_reduce",      # Partial exit to trim exposure (0 < exit_fraction < 1.0)
+    "risk_off",         # Full exit to defensive posture (regime-dependent)
+    "emergency_exit",   # Hard safety interrupt - unconditional flatten
     "other",
 ]
 
@@ -122,6 +124,7 @@ class TriggerSummary(SerializableModel):
     exit_rule: str
     hold_rule: str | None = Field(default=None)
     stop_loss_pct: float | None = Field(default=None, ge=0.0)
+    exit_fraction: float | None = Field(default=None, description="Partial exit fraction for risk_reduce")
 
 
 class LLMInput(SerializableModel):
@@ -152,13 +155,28 @@ class TriggerCondition(SerializableModel):
         "Use to prevent premature exits from minor fluctuations. Emergency exits still fire."
     )
     stop_loss_pct: float | None = Field(default=None, ge=0.0)
+    exit_fraction: float | None = Field(
+        default=None,
+        description="Fraction of position to close (0 < f <= 1.0). "
+        "Used with risk_reduce for partial exits. None = full exit (backward compatible)."
+    )
     learning_book: bool = Field(default=False, description="True if this trigger belongs to the learning book.")
     experiment_id: str | None = Field(default=None, description="Experiment that spawned this trigger, if any.")
 
     @model_validator(mode="after")
-    def _require_emergency_exit_rule(self) -> "TriggerCondition":
+    def _validate_trigger(self) -> "TriggerCondition":
+        # emergency_exit requires exit_rule
         if self.category == "emergency_exit" and not (self.exit_rule or "").strip():
             raise ValueError("emergency_exit triggers must define a non-empty exit_rule")
+
+        # exit_fraction must be 0 < f <= 1.0 when set
+        if self.exit_fraction is not None:
+            if self.exit_fraction <= 0.0 or self.exit_fraction > 1.0:
+                raise ValueError("exit_fraction must be in range (0, 1.0]")
+
+        # risk_reduce should have exit_fraction (warn but don't require for now)
+        # This allows gradual adoption without breaking existing code
+
         return self
 
 
