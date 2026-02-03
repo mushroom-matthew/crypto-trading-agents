@@ -66,6 +66,7 @@ class Order:
     learning_book: bool = False
     experiment_id: str | None = None
     experiment_variant: str | None = None
+    exit_fraction: float | None = None  # Partial exit fraction (0 < f <= 1.0) for risk_reduce
 
 
 class TriggerEngine:
@@ -264,10 +265,31 @@ class TriggerEngine:
         reason: str,
         block_entries: List[dict] | None = None,
         intent: Literal["exit", "flat", "conflict_exit"] | None = None,
+        fraction: float = 1.0,
     ) -> Order | None:
+        """Create an exit order for a position.
+
+        Args:
+            trigger: The trigger condition that fired
+            bar: Current price bar
+            portfolio: Current portfolio state
+            reason: Reason string for the order
+            block_entries: Optional list to record blocked entries
+            intent: Order intent (exit, flat, conflict_exit)
+            fraction: Fraction of position to exit (0 < f <= 1.0). Default 1.0 = full exit.
+
+        Returns:
+            Order if position exists, None otherwise.
+        """
         qty = portfolio.positions.get(trigger.symbol, 0.0)
         if abs(qty) <= 1e-9:
             return None
+
+        # Calculate exit quantity based on fraction
+        exit_qty = abs(qty) * fraction
+        if exit_qty <= 1e-9:
+            return None
+
         decision = self.trade_risk.evaluate(trigger, "flatten", bar.close, portfolio, None)
         if not decision.allowed and block_entries is not None and decision.reason:
             self._record_block(block_entries, trigger, decision.reason, "Flatten blocked unexpectedly", bar)
@@ -275,10 +297,14 @@ class TriggerEngine:
         side: Literal["buy", "sell"] = "sell" if qty > 0 else "buy"
         emergency = trigger.category == "emergency_exit"
         cooldown_bars = self._emergency_cooldown_bars() if emergency else None
+
+        # Determine exit_fraction to pass to order (None for full exits)
+        order_exit_fraction = fraction if fraction < 1.0 else None
+
         return Order(
             symbol=trigger.symbol,
             side=side,
-            quantity=abs(qty),
+            quantity=exit_qty,
             price=bar.close,
             timeframe=bar.timeframe,
             reason=reason,
@@ -289,6 +315,7 @@ class TriggerEngine:
             intent=intent or ("exit" if reason.endswith("_exit") else "flat"),
             learning_book=trigger.learning_book,
             experiment_id=trigger.experiment_id,
+            exit_fraction=order_exit_fraction,
         )
 
     def _record_block(
@@ -330,7 +357,12 @@ class TriggerEngine:
         if desired in {"flat", "exit", "flat_exit"}:
             if current == "flat":
                 return None
-            return self._flatten_order(trigger, bar, portfolio, f"{trigger.id}_flat", block_entries)
+            # Use exit_fraction for partial exits
+            exit_fraction = trigger.exit_fraction if trigger.exit_fraction is not None else 1.0
+            return self._flatten_order(
+                trigger, bar, portfolio, f"{trigger.id}_flat", block_entries,
+                fraction=exit_fraction,
+            )
         if desired == current:
             return None
         stop_distance = None
@@ -516,7 +548,12 @@ class TriggerEngine:
                         },
                     )
                     continue
-                exit_order = self._flatten_order(trigger, bar, portfolio_for_eval, f"{trigger.id}_exit", block_entries)
+                # Use exit_fraction for partial exits (risk_reduce category)
+                exit_fraction = trigger.exit_fraction if trigger.exit_fraction is not None else 1.0
+                exit_order = self._flatten_order(
+                    trigger, bar, portfolio_for_eval, f"{trigger.id}_exit", block_entries,
+                    fraction=exit_fraction,
+                )
                 if exit_order:
                     orders.append(exit_order)
                     orders = self._deduplicate_orders(orders, bar.symbol, block_entries)

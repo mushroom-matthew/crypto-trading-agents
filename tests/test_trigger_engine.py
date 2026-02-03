@@ -749,3 +749,240 @@ def test_conflicting_signal_policy_reverse_flips():
     assert orders[0].side == "sell"
     assert blocks
     assert blocks[0]["reason"] == "conflicting_signal_detected"
+
+
+# =============================================================================
+# Partial Exit Tests (Phase 2: Graduated De-risk)
+# =============================================================================
+
+
+def test_partial_exit_produces_correct_quantity():
+    """Exit trigger with exit_fraction=0.5 should close half the position."""
+    trigger = TriggerCondition(
+        id="btc_risk_reduce",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="B",
+        exit_fraction=0.5,
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    # Start with 1.0 BTC long position
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders
+    assert orders[0].intent == "exit"
+    assert orders[0].side == "sell"
+    # Position is 1.0, exit_fraction=0.5 means exit 0.5
+    assert abs(orders[0].quantity - 0.5) < 1e-9
+    assert orders[0].exit_fraction == 0.5
+
+
+def test_partial_exit_small_fraction():
+    """Exit trigger with exit_fraction=0.25 should close quarter of position."""
+    trigger = TriggerCondition(
+        id="btc_trim",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="C",
+        exit_fraction=0.25,
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders
+    assert abs(orders[0].quantity - 0.25) < 1e-9
+    assert orders[0].exit_fraction == 0.25
+
+
+def test_full_exit_has_no_exit_fraction():
+    """Exit trigger without exit_fraction should close full position with None."""
+    trigger = TriggerCondition(
+        id="btc_full_exit",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_off",
+        confidence_grade="A",
+        # No exit_fraction - should be full exit
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders
+    # Full exit - quantity should be full position (1.0)
+    assert abs(orders[0].quantity - 1.0) < 1e-9
+    # exit_fraction should be None for full exits
+    assert orders[0].exit_fraction is None
+
+
+def test_partial_exit_with_flat_direction():
+    """Flat direction trigger with exit_fraction should close partial position.
+
+    Note: When exit_rule fires, the intent is "exit" (not "flat"), since flat
+    direction only affects order creation via entry_rule path.
+    """
+    trigger = TriggerCondition(
+        id="btc_defensive",
+        symbol="BTC-USD",
+        direction="flat",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="B",
+        exit_fraction=0.5,
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders
+    # When exit_rule fires, intent is "exit" (flat direction affects entry_rule path)
+    assert orders[0].intent == "exit"
+    assert orders[0].side == "sell"
+    assert abs(orders[0].quantity - 0.5) < 1e-9
+    assert orders[0].exit_fraction == 0.5
+
+
+def test_partial_exit_short_position():
+    """Partial exit on short position should buy back partial quantity."""
+    trigger = TriggerCondition(
+        id="btc_cover_partial",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="B",
+        exit_fraction=0.5,
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    # Short position: -1.0 BTC
+    portfolio = PortfolioState(
+        timestamp=bar.timestamp,
+        equity=100000.0,
+        cash=150000.0,
+        positions={"BTC-USD": -1.0},
+        realized_pnl_7d=0.0,
+        realized_pnl_30d=0.0,
+        sharpe_30d=0.0,
+        max_drawdown_90d=0.0,
+        win_rate_30d=0.0,
+        profit_factor_30d=0.0,
+    )
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert orders
+    assert orders[0].intent == "exit"
+    # Covering a short means buying
+    assert orders[0].side == "buy"
+    # Cover half of short position
+    assert abs(orders[0].quantity - 0.5) < 1e-9
+    assert orders[0].exit_fraction == 0.5
+
+
+def test_risk_reduce_category_valid_in_trigger():
+    """risk_reduce category can be used in triggers."""
+    trigger = TriggerCondition(
+        id="btc_trim",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="rsi_14 > 70",
+        category="risk_reduce",
+        confidence_grade="B",
+        exit_fraction=0.5,
+    )
+    assert trigger.category == "risk_reduce"
+    assert trigger.exit_fraction == 0.5
+
+
+def test_risk_off_category_valid_in_trigger():
+    """risk_off category can be used in triggers."""
+    trigger = TriggerCondition(
+        id="btc_defensive",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="vol_state == 'extreme'",
+        category="risk_off",
+        confidence_grade="A",
+    )
+    assert trigger.category == "risk_off"
+    assert trigger.exit_fraction is None  # Full exit by default
