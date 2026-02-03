@@ -22,17 +22,17 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - ~~06-emergency-exit-runbook-edge-cases.md~~: Emergency-exit edge cases. → Completed, see [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md).
 - [07-aws-deploy.md](07-aws-deploy.md): AWS infrastructure, secrets, and CI/CD wiring.
 - [08-multi-wallet.md](08-multi-wallet.md): Multi-wallet architecture (Phantom/Solana/Ethereum read-only), reconciliation, UI.
-- [09-runbook-architecture-wiring.md](09-runbook-architecture-wiring.md): Learning-risk wiring and integration points.
-- [10-runbook-learning-book.md](10-runbook-learning-book.md): Learning Book config, tagging, accounting, acceptance criteria.
-- [11-runbook-experiment-specs.md](11-runbook-experiment-specs.md): ExperimentSpec schemas, exposure taxonomy, metric definitions.
-- [12-runbook-no-learn-zones-and-killswitches.md](12-runbook-no-learn-zones-and-killswitches.md): Enforceable no-learn policies and kill switches.
+- ~~09-runbook-architecture-wiring.md~~: Learning-risk wiring and integration points. → Completed, see [X-09-runbook-architecture-wiring.md](X-09-runbook-architecture-wiring.md).
+- ~~10-runbook-learning-book.md~~: Learning Book config, tagging, accounting, acceptance criteria. → Completed, see [X-10-runbook-learning-book.md](X-10-runbook-learning-book.md).
+- ~~11-runbook-experiment-specs.md~~: ExperimentSpec schemas, exposure taxonomy, metric definitions. → Completed, see [X-11-runbook-experiment-specs.md](X-11-runbook-experiment-specs.md).
+- ~~12-runbook-no-learn-zones-and-killswitches.md~~: Enforceable no-learn policies and kill switches. → Completed, see [X-12-runbook-no-learn-zones-and-killswitches.md](X-12-runbook-no-learn-zones-and-killswitches.md).
 - ~~13-judge-death-spiral-floor.md~~: Minimum trigger floor to prevent judge death spirals (zero-activity re-enablement). → Completed, see [X-judge-death-spiral-floor.md](X-judge-death-spiral-floor.md).
-- [14-risk-used-default-to-actual.md](14-risk-used-default-to-actual.md): Default risk_used_abs to actual_risk_at_stop when budgets are off.
-- [15-min-hold-exit-timing-validation.md](15-min-hold-exit-timing-validation.md): Validate min_hold vs exit timeframe; track min_hold_binding_pct.
+- ~~14-risk-used-default-to-actual.md~~: Default risk_used_abs to actual_risk_at_stop when budgets are off. → Completed, see [X-14-risk-used-default-to-actual.md](X-14-risk-used-default-to-actual.md).
+- ~~15-min-hold-exit-timing-validation.md~~: Validate min_hold vs exit timeframe; track min_hold_binding_pct. → Completed, see [X-15-min-hold-exit-timing-validation.md](X-15-min-hold-exit-timing-validation.md).
 - ~~16-judge-stale-snapshot-skip.md~~: Skip or adapt judge evals when snapshot is unchanged since last eval. → Completed, see [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md).
 - [17-graduated-derisk-taxonomy.md](17-graduated-derisk-taxonomy.md): Exit taxonomy & partial exit ladder. Adds `risk_reduce` (partial trim) and `risk_off` (defensive flatten) categories with strict precedence tiering, `exit_fraction` field, and full guardrails. Five phases: schema → partial exit execution → risk_reduce → risk_off → strategist integration + backtest.
 
-Learning-risk runbooks (09-12) should be worked in order: wiring → learning book → experiment specs → no-learn zones.
+Learning-risk runbooks (09-12) are all complete — implemented together on branch `main`. Tag propagation, learning book settings, experiment specs, and no-learn zones/kill switches are all landed.
 
 Judge robustness runbooks (13, 16) are both complete — implemented together on branch `judge-death-spiral-floor`. Runbook 13 prevents death spirals (trigger floor, zero-activity re-enablement). Runbook 16 adds stale snapshot skip, forced re-enablement after consecutive stale evals, and `stale_judge_evals` daily metric.
 
@@ -45,15 +45,15 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 2. **13**: Judge death spiral floor (prevents irreversible trading halt)
 3. **16**: Judge stale snapshot skip (prevents redundant evaluations reinforcing broken state)
 
-### Phase 0B — Risk correctness
-4. **14**: Risk used default to actual (fills show meaningful risk, not $0.00)
-5. **15**: Min-hold exit timing validation (detect when min_hold is the binding constraint)
+### Phase 0B — Risk correctness ✅ COMPLETE
+4. ~~**14**~~: Risk used default to actual (fills show meaningful risk, not $0.00) — Complete.
+5. ~~**15**~~: Min-hold exit timing validation (detect when min_hold is the binding constraint) — Complete.
 
 ### Phase 0C — Anti-churn control plane (prereq for policy pivot)
 6. ~~**policy-pivot-phase0**~~: No-change replan guard + telemetry. → Completed, see [X-policy-pivot-phase0.md](X-policy-pivot-phase0.md).
 
-### Phase 1 — Learning-risk wiring (exploration isolation)
-7. **09-12**: Learning-risk series in order (wiring → learning book → experiment specs → no-learn zones)
+### Phase 1 — Learning-risk wiring (exploration isolation) ✅ COMPLETE
+7. ~~**09-12**~~: Learning-risk series (wiring → learning book → experiment specs → no-learn zones) — All complete.
 
 ### Phase 1B — Graduated de-risk (after safety case, before strategist rework)
 - **17**: Exit taxonomy & partial exit ladder — six internal phases:
@@ -102,6 +102,12 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 - [X-judge-death-spiral-floor.md](X-judge-death-spiral-floor.md): Minimum trigger floor, zero-activity re-enablement, stale snapshot detection.
 - [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md): Stale snapshot skip, forced re-enablement after consecutive stale evals, daily metric.
 - [X-policy-pivot-phase0.md](X-policy-pivot-phase0.md): No-change replan guard, suppression metrics, decision record metadata.
+- [X-09-runbook-architecture-wiring.md](X-09-runbook-architecture-wiring.md): Learning-risk wiring — tag propagation from triggers to orders.
+- [X-10-runbook-learning-book.md](X-10-runbook-learning-book.md): Learning Book settings, risk budgets, isolated accounting.
+- [X-11-runbook-experiment-specs.md](X-11-runbook-experiment-specs.md): ExperimentSpec schema, lifecycle validation, exposure filtering.
+- [X-12-runbook-no-learn-zones-and-killswitches.md](X-12-runbook-no-learn-zones-and-killswitches.md): Learning gate evaluator, kill switches, no-learn zones.
+- [X-14-risk-used-default-to-actual.md](X-14-risk-used-default-to-actual.md): Risk used default to actual risk at stop when budgets off.
+- [X-15-min-hold-exit-timing-validation.md](X-15-min-hold-exit-timing-validation.md): Min-hold vs exit timeframe validation, min_hold_binding_pct metric.
 
 ## Notes
 - If tests cannot be run locally, obtain user-run output and paste it into the Test Evidence section before committing.
