@@ -172,6 +172,30 @@ class PaperTradingSessionConfig(BaseModel):
         description="Close all positions at end of each trading day"
     )
 
+    # ============================================================================
+    # Learning Book
+    # ============================================================================
+    learning_book_enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable the learning book for exploratory/experimental trades"
+    )
+    learning_daily_risk_budget_pct: Optional[float] = Field(
+        default=None, ge=0.0, le=100.0,
+        description="Max cumulative risk the learning book can allocate per day as % of equity"
+    )
+    learning_max_trades_per_day: Optional[int] = Field(
+        default=None, ge=0, le=100,
+        description="Maximum number of learning trades per day"
+    )
+    experiment_id: Optional[str] = Field(
+        default=None,
+        description="Experiment ID to associate with this run"
+    )
+    experiment_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Experiment specification (see ExperimentSpec schema)"
+    )
+
 
 class SessionStartResponse(BaseModel):
     """Response when starting a paper trading session."""
@@ -321,6 +345,12 @@ async def start_session(config: PaperTradingSessionConfig):
             "walk_away_profit_target_pct": config.walk_away_profit_target_pct,
             # Flattening
             "flatten_positions_daily": config.flatten_positions_daily,
+            # Learning book
+            "learning_book_enabled": config.learning_book_enabled,
+            "learning_daily_risk_budget_pct": config.learning_daily_risk_budget_pct,
+            "learning_max_trades_per_day": config.learning_max_trades_per_day,
+            "experiment_id": config.experiment_id,
+            "experiment_spec": config.experiment_spec,
         }
 
         # Start workflow

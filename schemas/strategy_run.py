@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import Field
 
 from .judge_feedback import JudgeFeedback
+from .learning_gate import LearningGateThresholds, LearningKillSwitchConfig
 from .llm_strategist import RiskConstraint, SerializableModel
 
 
@@ -61,6 +62,54 @@ class RiskLimitSettings(SerializableModel):
         )
 
 
+class LearningBookSettings(SerializableModel):
+    """Settings governing the learning book: a sandboxed sub-portfolio used for
+    exploratory / experimental trades that are tracked separately from the
+    profit book."""
+
+    enabled: bool = Field(default=False, description="Whether the learning book is active.")
+    daily_risk_budget_pct: float = Field(
+        default=1.0, ge=0.0, le=100.0,
+        description="Max cumulative risk the learning book can allocate per day, as % of equity.",
+    )
+    max_position_risk_pct: float = Field(
+        default=0.5, ge=0.0, le=100.0,
+        description="Max risk per individual learning trade as % of equity.",
+    )
+    max_portfolio_exposure_pct: float = Field(
+        default=5.0, ge=0.0, le=100.0,
+        description="Max total notional exposure from learning positions as % of equity.",
+    )
+    max_trades_per_day: int = Field(
+        default=3, ge=0, le=100,
+        description="Maximum number of learning trades per day.",
+    )
+    sizing_mode: str = Field(
+        default="notional",
+        description="Position sizing mode for learning trades (notional, fixed_fraction, vol_target).",
+    )
+    notional_usd: float = Field(
+        default=100.0, ge=0.0,
+        description="Fixed notional in USD per learning trade when sizing_mode='notional'.",
+    )
+    max_hold_minutes: int = Field(
+        default=60, ge=1,
+        description="Maximum minutes a learning position may be held before forced exit.",
+    )
+    allow_short: bool = Field(
+        default=False,
+        description="Whether learning-book trades may go short.",
+    )
+    gate_thresholds: LearningGateThresholds = Field(
+        default_factory=LearningGateThresholds,
+        description="Market-condition thresholds that close the learning gate.",
+    )
+    kill_switches: LearningKillSwitchConfig = Field(
+        default_factory=LearningKillSwitchConfig,
+        description="Kill-switch configuration for the learning book.",
+    )
+
+
 class StrategyRunConfig(SerializableModel):
     """Static configuration for a strategy run."""
 
@@ -88,6 +137,11 @@ class StrategyRunConfig(SerializableModel):
     indicator_debug_keys: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     risk_limits: RiskLimitSettings = Field(default_factory=RiskLimitSettings)
+    learning_book: LearningBookSettings = Field(default_factory=LearningBookSettings)
+    experiment_spec: Dict[str, Any] | None = Field(
+        default=None,
+        description="Serialized ExperimentSpec for this strategy run.",
+    )
 
 
 class RiskAdjustmentState(SerializableModel):

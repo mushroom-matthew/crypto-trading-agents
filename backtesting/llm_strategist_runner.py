@@ -160,6 +160,9 @@ class PortfolioTracker:
         exit_trigger_id: str | None = None,
         exit_category: str | None = None,
         close_reason: str | None = None,
+        learning_book: bool = False,
+        experiment_id: str | None = None,
+        experiment_variant: str | None = None,
     ) -> None:
         self.trade_log.append(
             {
@@ -179,6 +182,9 @@ class PortfolioTracker:
                 "exit_trigger_id": exit_trigger_id,
                 "exit_category": exit_category,
                 "close_reason": close_reason,
+                "learning_book": learning_book,
+                "experiment_id": experiment_id,
+                "experiment_variant": experiment_variant,
             }
         )
 
@@ -224,6 +230,9 @@ class PortfolioTracker:
         market_structure_entry: Dict[str, Any] | None = None,
         trigger_category: str | None = None,
         intent: str | None = None,
+        learning_book: bool = False,
+        experiment_id: str | None = None,
+        experiment_variant: str | None = None,
     ) -> None:
         position = self.positions.get(symbol, 0.0)
         avg_price = self.avg_entry_price.get(symbol, price)
@@ -247,6 +256,9 @@ class PortfolioTracker:
                     "entry_price": price,
                     "entry_side": "long" if new_position > 0 else "short",
                     "market_structure_entry": market_structure_entry or meta.get("market_structure_entry"),
+                    "learning_book": learning_book,
+                    "experiment_id": experiment_id,
+                    "experiment_variant": experiment_variant,
                 }
             return
         closing_qty = min(abs(position), abs(delta_qty))
@@ -287,6 +299,9 @@ class PortfolioTracker:
                 exit_trigger_id=exit_trigger_id,
                 exit_category=exit_category,
                 close_reason=close_reason,
+                learning_book=meta.get("learning_book", False),
+                experiment_id=meta.get("experiment_id"),
+                experiment_variant=meta.get("experiment_variant"),
             )
         remaining = position + delta_qty
         if abs(remaining) <= 1e-9:
@@ -305,6 +320,9 @@ class PortfolioTracker:
                 "opened_at": timestamp,
                 "entry_price": price,
                 "entry_side": "long" if remaining > 0 else "short",
+                "learning_book": learning_book,
+                "experiment_id": experiment_id,
+                "experiment_variant": experiment_variant,
             }
 
     def execute(self, order: Order, market_structure_entry: Dict[str, Any] | None = None) -> None:
@@ -347,6 +365,9 @@ class PortfolioTracker:
             market_structure_entry=market_structure_entry,
             trigger_category=order.trigger_category,
             intent=order.intent,
+            learning_book=order.learning_book,
+            experiment_id=order.experiment_id,
+            experiment_variant=order.experiment_variant,
         )
 
         self.fills.append(
@@ -364,6 +385,9 @@ class PortfolioTracker:
                 "market_structure_entry": market_structure_entry,
                 "trigger_category": order.trigger_category,
                 "intent": order.intent,
+                "learning_book": order.learning_book,
+                "experiment_id": order.experiment_id,
+                "experiment_variant": order.experiment_variant,
             }
         )
 

@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 from schemas.llm_strategist import AssetState, IndicatorSnapshot, PortfolioState, StrategyPlan, TriggerCondition
 from schemas.judge_feedback import JudgeConstraints
+from schemas.learning_gate import LearningGateStatus
 from trading_core.execution_engine import BlockReason
 
 from .risk_engine import RiskEngine
@@ -62,6 +63,9 @@ class Order:
     cooldown_recommendation_bars: int | None = None
     trigger_category: str | None = None
     intent: Literal["entry", "exit", "flat", "conflict_exit", "conflict_reverse"] | None = None
+    learning_book: bool = False
+    experiment_id: str | None = None
+    experiment_variant: str | None = None
 
 
 class TriggerEngine:
@@ -283,6 +287,8 @@ class TriggerEngine:
             cooldown_recommendation_bars=cooldown_bars,
             trigger_category=trigger.category,
             intent=intent or ("exit" if reason.endswith("_exit") else "flat"),
+            learning_book=trigger.learning_book,
+            experiment_id=trigger.experiment_id,
         )
 
     def _record_block(
@@ -348,6 +354,8 @@ class TriggerEngine:
             stop_distance=stop_distance,
             trigger_category=trigger.category,
             intent=intent or "entry",
+            learning_book=trigger.learning_book,
+            experiment_id=trigger.experiment_id,
         )
 
     def on_bar(
@@ -358,6 +366,7 @@ class TriggerEngine:
         asset_state: AssetState | None = None,
         market_structure: dict[str, float | str | None] | None = None,
         position_meta: Mapping[str, dict[str, Any]] | None = None,
+        learning_gate_status: LearningGateStatus | None = None,
     ) -> tuple[List[Order], List[dict]]:
         orders: List[Order] = []
         block_entries: List[dict] = []
@@ -403,6 +412,13 @@ class TriggerEngine:
                     )
                     self._record_block(block_entries, trigger, BlockReason.CATEGORY.value, detail, bar)
                     continue
+
+            # Block learning triggers when the learning gate is closed
+            if trigger.learning_book and learning_gate_status is not None and not learning_gate_status.open:
+                gate_reasons = ", ".join(learning_gate_status.reasons) if learning_gate_status.reasons else "gate_closed"
+                detail = f"Learning gate closed: {gate_reasons}"
+                self._record_block(block_entries, trigger, "learning_gate_closed", detail, bar)
+                continue
 
             # Early exit if we've hit the max triggers for this symbol
             if self.prioritize_by_confidence and triggers_fired_for_symbol >= self.max_triggers_per_symbol_per_bar:

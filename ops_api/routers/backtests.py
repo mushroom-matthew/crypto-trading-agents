@@ -359,6 +359,30 @@ class BacktestConfig(BaseModel):
         description="Use vector store to retrieve relevant trigger examples for the LLM strategist"
     )
 
+    # ============================================================================
+    # Learning Book
+    # ============================================================================
+    learning_book_enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable the learning book for exploratory/experimental trades"
+    )
+    learning_daily_risk_budget_pct: Optional[float] = Field(
+        default=None, ge=0.0, le=100.0,
+        description="Max cumulative risk the learning book can allocate per day as % of equity"
+    )
+    learning_max_trades_per_day: Optional[int] = Field(
+        default=None, ge=0, le=100,
+        description="Maximum number of learning trades per day"
+    )
+    experiment_id: Optional[str] = Field(
+        default=None,
+        description="Experiment ID to associate with this run"
+    )
+    experiment_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Experiment specification (see ExperimentSpec schema)"
+    )
+
 
 class BacktestCreateResponse(BaseModel):
     """Response when starting a backtest."""
@@ -678,6 +702,12 @@ async def start_backtest(config: BacktestConfig):
                 # LLM shim flags
                 "use_llm_shim": bool(config.use_llm_shim),
                 "use_judge_shim": bool(config.use_judge_shim),
+                # Learning book
+                "learning_book_enabled": config.learning_book_enabled,
+                "learning_daily_risk_budget_pct": config.learning_daily_risk_budget_pct,
+                "learning_max_trades_per_day": config.learning_max_trades_per_day,
+                "experiment_id": config.experiment_id,
+                "experiment_spec": config.experiment_spec,
             }],
             id=run_id,
             task_queue=BACKTEST_TASK_QUEUE,

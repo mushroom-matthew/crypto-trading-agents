@@ -152,6 +152,8 @@ class TriggerCondition(SerializableModel):
         "Use to prevent premature exits from minor fluctuations. Emergency exits still fire."
     )
     stop_loss_pct: float | None = Field(default=None, ge=0.0)
+    learning_book: bool = Field(default=False, description="True if this trigger belongs to the learning book.")
+    experiment_id: str | None = Field(default=None, description="Experiment that spawned this trigger, if any.")
 
     @model_validator(mode="after")
     def _require_emergency_exit_rule(self) -> "TriggerCondition":

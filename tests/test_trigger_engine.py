@@ -5,9 +5,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from agents.strategies.risk_engine import RiskEngine
+from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, TriggerEngine
 from schemas.judge_feedback import JudgeConstraints
 from schemas.llm_strategist import IndicatorSnapshot, PortfolioState, RiskConstraint, StrategyPlan, TriggerCondition
+from schemas.strategy_run import LearningBookSettings
 
 
 def _portfolio() -> PortfolioState:
@@ -637,6 +639,75 @@ def test_conflicting_signal_policy_exit_flattens():
     assert orders[0].side == "sell"
     assert blocks
     assert blocks[0]["reason"] == "conflicting_signal_detected"
+
+
+def test_learning_tags_propagate_to_order():
+    """Learning tags on TriggerCondition propagate to generated Order objects."""
+    trigger = TriggerCondition(
+        id="btc_learning",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="",
+        category="trend_continuation",
+        confidence_grade="A",
+        learning_book=True,
+        experiment_id="exp-001",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    learning_settings = LearningBookSettings(enabled=True, notional_usd=500.0)
+    trade_risk = TradeRiskEvaluator(risk_engine, learning_settings=learning_settings)
+    engine = TriggerEngine(plan, risk_engine, trade_risk=trade_risk, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+
+    orders, _ = engine.on_bar(bar, _indicator(), _portfolio())
+    assert orders
+    assert orders[0].learning_book is True
+    assert orders[0].experiment_id == "exp-001"
+
+
+def test_default_order_has_no_learning_tags():
+    """Orders from triggers without learning tags have default False/None values."""
+    trigger = TriggerCondition(
+        id="btc_normal",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="",
+        category="trend_continuation",
+        confidence_grade="A",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+
+    orders, _ = engine.on_bar(bar, _indicator(), _portfolio())
+    assert orders
+    assert orders[0].learning_book is False
+    assert orders[0].experiment_id is None
+    assert orders[0].experiment_variant is None
 
 
 def test_conflicting_signal_policy_reverse_flips():
