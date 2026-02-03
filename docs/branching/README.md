@@ -30,7 +30,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - ~~14-risk-used-default-to-actual.md~~: Default risk_used_abs to actual_risk_at_stop when budgets are off. → Completed, see [X-14-risk-used-default-to-actual.md](X-14-risk-used-default-to-actual.md).
 - ~~15-min-hold-exit-timing-validation.md~~: Validate min_hold vs exit timeframe; track min_hold_binding_pct. → Completed, see [X-15-min-hold-exit-timing-validation.md](X-15-min-hold-exit-timing-validation.md).
 - ~~16-judge-stale-snapshot-skip.md~~: Skip or adapt judge evals when snapshot is unchanged since last eval. → Completed, see [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md).
-- [17-graduated-derisk-taxonomy.md](17-graduated-derisk-taxonomy.md): Exit taxonomy & partial exit ladder. Adds `risk_reduce` (partial trim) and `risk_off` (defensive flatten) categories with strict precedence tiering, `exit_fraction` field, and full guardrails. Five phases: schema → partial exit execution → risk_reduce → risk_off → strategist integration + backtest.
+- ~~17-graduated-derisk-taxonomy.md~~: Exit taxonomy & partial exit ladder. → Completed, see [X-17-graduated-derisk-taxonomy.md](X-17-graduated-derisk-taxonomy.md).
 
 Learning-risk runbooks (09-12) are all complete — implemented together on branch `main`. Tag propagation, learning book settings, experiment specs, and no-learn zones/kill switches are all landed.
 
@@ -55,12 +55,8 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 ### Phase 1 — Learning-risk wiring (exploration isolation) ✅ COMPLETE
 7. ~~**09-12**~~: Learning-risk series (wiring → learning book → experiment specs → no-learn zones) — All complete.
 
-### Phase 1B — Graduated de-risk (after safety case, before strategist rework)
-- **17**: Exit taxonomy & partial exit ladder — six internal phases:
-  - **Phase A** (TradeSet groundwork): position lifecycle accounting, TradeLeg/TradeSet types, WAC, fill IDs. **Hard prerequisite** for partial exits.
-  - Phases 1-3 (schema + partial exit + risk_reduce): Phase 1 can start alongside Phase A; Phase 2 requires Phase A complete.
-  - Phase 4 (risk_off with latch) runs independently after Phase 3.
-  - Phase 5 (strategist integration) should be coordinated with runbook 01 below.
+### Phase 1B — Graduated de-risk (after safety case, before strategist rework) ✅ COMPLETE
+- ~~**17**~~: Exit taxonomy & partial exit ladder — All 5 phases complete (schema, partial exit execution, risk_reduce guardrails, risk_off latch, strategist integration). Ready for backtest validation.
 
 ### Phase 2 — Strategy architecture
 8. **01**: Strategist simplification (LLM becomes slower controller; supports "wait" stance, regime alerts, RAG)
@@ -108,6 +104,7 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 - [X-12-runbook-no-learn-zones-and-killswitches.md](X-12-runbook-no-learn-zones-and-killswitches.md): Learning gate evaluator, kill switches, no-learn zones.
 - [X-14-risk-used-default-to-actual.md](X-14-risk-used-default-to-actual.md): Risk used default to actual risk at stop when budgets off.
 - [X-15-min-hold-exit-timing-validation.md](X-15-min-hold-exit-timing-validation.md): Min-hold vs exit timeframe validation, min_hold_binding_pct metric.
+- [X-17-graduated-derisk-taxonomy.md](X-17-graduated-derisk-taxonomy.md): Graduated de-risk taxonomy — risk_reduce (partial trim), risk_off (defensive flatten), exit_fraction field, precedence tiering.
 
 ## Notes
 - If tests cannot be run locally, obtain user-run output and paste it into the Test Evidence section before committing.

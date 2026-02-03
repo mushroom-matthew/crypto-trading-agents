@@ -301,8 +301,89 @@ The following cross-backtest learning directives were implemented in a prior PR 
 - `backtesting/llm_strategist_runner.py` — D1, D2, D3, D5, D6, D7
 - `tests/test_judge_death_spiral.py` — 10 new tests covering D1, D5, D6, D7
 
+## Test Evidence
+
+### Phase 1 (Schema + taxonomy)
+```
+tests/test_trigger_engine.py::test_risk_reduce_category_valid_in_trigger PASSED
+tests/test_trigger_engine.py::test_risk_off_category_valid_in_trigger PASSED
+```
+
+### Phase 2 (Partial exit execution)
+```
+tests/test_trigger_engine.py::test_partial_exit_produces_correct_quantity PASSED
+tests/test_trigger_engine.py::test_partial_exit_small_fraction PASSED
+tests/test_trigger_engine.py::test_full_exit_has_no_exit_fraction PASSED
+tests/test_trigger_engine.py::test_partial_exit_with_flat_direction PASSED
+tests/test_trigger_engine.py::test_partial_exit_short_position PASSED
+```
+
+### Phase 3 (risk_reduce guardrails)
+```
+tests/test_trigger_engine.py::test_risk_reduce_respects_hold_rule PASSED
+tests/test_trigger_engine.py::test_risk_reduce_respects_min_hold PASSED
+tests/test_trigger_engine.py::test_emergency_exit_beats_risk_reduce_in_dedup PASSED
+tests/test_trigger_engine.py::test_risk_reduce_goes_through_normal_exit_path PASSED
+```
+
+### Phase 4 (risk_off latch and Tier 1 dedup)
+```
+tests/test_trigger_engine.py::test_risk_off_latch_can_be_set PASSED
+tests/test_trigger_engine.py::test_emergency_exit_beats_risk_off_in_dedup PASSED
+tests/test_trigger_engine.py::test_risk_off_beats_risk_reduce_in_dedup PASSED
+tests/test_trigger_engine.py::test_risk_off_respects_hold_rule PASSED
+tests/test_trigger_engine.py::test_risk_off_goes_through_normal_exit_path PASSED
+```
+
+### Phase 5 (Strategist integration)
+All 7 strategy templates updated with graduated de-risk guidance:
+- `prompts/strategies/momentum_trend_following.txt`
+- `prompts/strategies/mean_reversion.txt`
+- `prompts/strategies/conservative_defensive.txt`
+- `prompts/strategies/aggressive_active.txt`
+- `prompts/strategies/balanced_hybrid.txt`
+- `prompts/strategies/scalper_fast.txt`
+- `prompts/strategies/volatility_breakout.txt`
+
+### Full test suite (36/37 passing)
+```
+tests/test_trigger_engine.py::test_trigger_engine_records_block_when_risk_denies_entry PASSED
+tests/test_trigger_engine.py::test_emergency_exit_trigger_bypasses_risk_checks PASSED
+tests/test_trigger_engine.py::test_emergency_exit_vetoes_same_bar_entry PASSED
+... (34 more tests passing)
+tests/test_trigger_engine.py::test_conflicting_signal_policy_reverse_flips FAILED (pre-existing, unrelated)
+```
+
+One pre-existing test failure (`test_conflicting_signal_policy_reverse_flips`) is unrelated to graduated de-risk — the "reverse" conflicting signal policy has a short entry without `stop_loss_pct` which gets blocked by risk engine. This test was failing before runbook 17 changes.
+
+## Backtest Procedure (Phase 5 Validation)
+
+To validate graduated de-risk reduces whipsaw vs full-flatten-only baseline:
+
+1. **Baseline run** (emergency_exit only):
+   ```bash
+   # Use momentum strategy with only emergency_exit triggers
+   uv run python -m backtesting.cli --strategy momentum_trend_following --start 2026-01-01 --end 2026-01-15
+   ```
+   Record: trade count, whipsaw events (flatten + re-entry within 4 bars), total fees, Sharpe
+
+2. **Test run** (with risk_reduce and risk_off):
+   ```bash
+   # Same period, strategy should now produce risk_reduce/risk_off triggers
+   uv run python -m backtesting.cli --strategy momentum_trend_following --start 2026-01-01 --end 2026-01-15
+   ```
+   Record: trade count, partial exit count, whipsaw events, total fees, Sharpe
+
+3. **Comparison metrics**:
+   - Whipsaw reduction: expect 20-40% fewer flatten+re-entry sequences
+   - Fee savings: expect 15-25% reduction from partial exits vs full flattens
+   - Sharpe: expect neutral to improved (partial exits preserve edge)
+
+4. **Visual check**: Review trade log for appropriate `risk_reduce` usage (trending weakening but not failing) and `risk_off` usage (regime shift signals).
+
 ## Change Log
 - 2026-01-30: Initial design runbook created.
 - 2026-01-30: Expanded with full precedence tiering, guardrail matrix, phased implementation, telemetry events, and explicit `exit_fraction` approach per design review.
 - 2026-01-30: Added TradeSet/TradeLeg data model, WAC accounting rule, position lifecycle grouping, fill_id requirement, and Phase A as hard prerequisite for partial exits. Deprecated many-to-many leg linking in favor of sequential lifecycle model.
 - 2026-02-02: Prerequisite directives D1-D3, D5-D7 implemented in separate PR. Zero-activity category clearing, judge feedback persistence, day-boundary suppression, post-generation constraint stripping, wait stance, and canonical snapshots all landed. Runbook 17 implementation can now proceed on clean foundation.
+- 2026-02-03: Phase 1-5 implemented. Schema + taxonomy, partial exit execution, risk_reduce guardrails, risk_off latch, strategist integration all complete. 36 tests passing. Ready for backtest validation.
