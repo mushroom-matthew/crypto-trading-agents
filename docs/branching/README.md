@@ -50,7 +50,7 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 5. **15**: Min-hold exit timing validation (detect when min_hold is the binding constraint)
 
 ### Phase 0C — Anti-churn control plane (prereq for policy pivot)
-6. **[later/_policy-pivot-phase0.md](later/_policy-pivot-phase0.md)**: No-change replan guard + telemetry — **promote from backlog before starting Phase 1 work**
+6. ~~**policy-pivot-phase0**~~: No-change replan guard + telemetry. → Completed, see [X-policy-pivot-phase0.md](X-policy-pivot-phase0.md).
 
 ### Phase 1 — Learning-risk wiring (exploration isolation)
 7. **09-12**: Learning-risk series in order (wiring → learning book → experiment specs → no-learn zones)
@@ -79,7 +79,7 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 - [_emergency-exit-runbook-judge-loop-design.md](_emergency-exit-runbook-judge-loop-design.md): Judge/strategist loop design gaps (non-test items).
 - [_synthetic-data-testing.md](_synthetic-data-testing.md): Synthetic data generation for deterministic trigger testing.
 - [later/_comp-audit-risk-followups.md](later/_comp-audit-risk-followups.md): Follow-ups from comp-audit-risk-core.
-- [later/_policy-pivot-phase0.md](later/_policy-pivot-phase0.md): No-change replan guard and telemetry (prereq for policy pivot). **Should be promoted to numbered before Phase 1 work begins.**
+- ~~later/_policy-pivot-phase0.md~~: No-change replan guard and telemetry. → Completed, see [X-policy-pivot-phase0.md](X-policy-pivot-phase0.md).
 - [later/_judge-unification.md](later/_judge-unification.md): Unified judge service with heuristics context.
 - [later/_strategist-tool-loop.md](later/_strategist-tool-loop.md): Read-only tool-call loop for strategist.
 - [later/_scalper-mode.md](later/_scalper-mode.md): Full scalper mode feature set and comparison tooling.
@@ -101,6 +101,7 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 - [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md): Emergency exit edge cases (missing exit_rule handling).
 - [X-judge-death-spiral-floor.md](X-judge-death-spiral-floor.md): Minimum trigger floor, zero-activity re-enablement, stale snapshot detection.
 - [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md): Stale snapshot skip, forced re-enablement after consecutive stale evals, daily metric.
+- [X-policy-pivot-phase0.md](X-policy-pivot-phase0.md): No-change replan guard, suppression metrics, decision record metadata.
 
 ## Notes
 - If tests cannot be run locally, obtain user-run output and paste it into the Test Evidence section before committing.
