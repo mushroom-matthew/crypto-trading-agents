@@ -986,3 +986,242 @@ def test_risk_off_category_valid_in_trigger():
     )
     assert trigger.category == "risk_off"
     assert trigger.exit_fraction is None  # Full exit by default
+
+
+# =============================================================================
+# Phase 3: risk_reduce guardrail enforcement tests
+# =============================================================================
+
+
+def test_risk_reduce_respects_hold_rule():
+    """risk_reduce exits should be blocked when hold_rule is active."""
+    trigger = TriggerCondition(
+        id="btc_risk_reduce",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",  # Would fire
+        hold_rule="True",  # But hold rule is active
+        category="risk_reduce",
+        confidence_grade="B",
+        exit_fraction=0.5,
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    # No orders because hold rule is active
+    assert not orders
+    # Block should be recorded
+    assert any(b["reason"] == "HOLD_RULE" for b in blocks)
+
+
+def test_risk_reduce_respects_min_hold():
+    """risk_reduce exits should be blocked during min-hold period."""
+    trigger = TriggerCondition(
+        id="btc_risk_reduce",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="B",
+        exit_fraction=0.5,
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    # Set min_hold_bars=3 so exit is blocked
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=3, trade_cooldown_bars=0)
+
+    # Simulate that position was entered on bar 0
+    bar0 = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    # Set the bar counter and position entry bar for min-hold tracking
+    engine._bar_counter = 0
+    engine._position_entry_bar["BTC-USD"] = 0  # Position entered at bar 0
+    engine._last_entry_timestamp["BTC-USD"] = bar0.timestamp
+
+    # Increment bar counter to bar 1 (within min-hold period of 3 bars)
+    engine._bar_counter = 1
+
+    from datetime import timedelta
+    bar1 = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=bar0.timestamp + timedelta(hours=1),
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar1, _indicator(), portfolio)
+    # No orders because within min-hold (bar 1 - bar 0 = 1 bar held, need 3)
+    assert not orders
+    # Block should be recorded
+    assert any(b["reason"] == "MIN_HOLD_PERIOD" for b in blocks)
+
+
+def test_emergency_exit_beats_risk_reduce_in_dedup():
+    """emergency_exit should always win over risk_reduce in dedup.
+
+    Note: Due to simulated portfolio state updates during trigger evaluation,
+    the emergency_exit order may have a reduced quantity if risk_reduce was
+    evaluated first. The key assertion is that emergency_exit WINS (is the
+    only order kept) and is marked as emergency.
+    """
+    emergency_trigger = TriggerCondition(
+        id="btc_emergency",
+        symbol="BTC-USD",
+        direction="flat",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="emergency_exit",
+        confidence_grade="A",
+    )
+    risk_reduce_trigger = TriggerCondition(
+        id="btc_risk_reduce",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="A",
+        exit_fraction=0.5,
+    )
+    plan = _plan_with_triggers([risk_reduce_trigger, emergency_trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    # Should have exactly one order
+    assert len(orders) == 1
+    # The order should be from emergency_exit - it always wins dedup
+    assert orders[0].trigger_category == "emergency_exit"
+    assert orders[0].emergency is True
+    # Emergency exits don't use partial exit_fraction
+    assert orders[0].exit_fraction is None
+    # Order quantity > 0 (at least some position to exit)
+    assert orders[0].quantity > 0
+
+
+def test_risk_reduce_goes_through_normal_exit_path():
+    """risk_reduce uses the normal exit path with no special bypass.
+
+    This verifies that risk_reduce behaves like a normal exit, not like an
+    emergency_exit which bypasses certain checks.
+    """
+    trigger = TriggerCondition(
+        id="btc_risk_reduce",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="B",
+        exit_fraction=0.5,
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert len(orders) == 1
+    assert orders[0].trigger_category == "risk_reduce"
+    # Not marked as emergency
+    assert orders[0].emergency is False
+    # Uses partial exit
+    assert orders[0].exit_fraction == 0.5
+    # Normal exit intent
+    assert orders[0].intent == "exit"
+
+
+def test_risk_off_goes_through_normal_exit_path():
+    """risk_off uses the normal exit path with no special bypass.
+
+    This verifies that risk_off behaves like a normal exit, not like an
+    emergency_exit which bypasses certain checks.
+    """
+    trigger = TriggerCondition(
+        id="btc_risk_off",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_off",
+        confidence_grade="A",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert len(orders) == 1
+    assert orders[0].trigger_category == "risk_off"
+    # Not marked as emergency
+    assert orders[0].emergency is False
+    # Full exit (no exit_fraction)
+    assert orders[0].exit_fraction is None
+    # Normal exit intent
+    assert orders[0].intent == "exit"

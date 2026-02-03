@@ -453,8 +453,9 @@ class TriggerEngine:
                 continue
 
             # Early exit if we've hit the max triggers for this symbol
+            # EXCEPTION: emergency_exit triggers are NEVER skipped - they are safety interrupts
             if self.prioritize_by_confidence and triggers_fired_for_symbol >= self.max_triggers_per_symbol_per_bar:
-                if not self._priority_skip_bypass(trigger.confidence_grade):
+                if trigger.category != "emergency_exit" and not self._priority_skip_bypass(trigger.confidence_grade):
                     # Log that we're skipping lower-confidence triggers
                     detail = f"Max triggers ({self.max_triggers_per_symbol_per_bar}) already fired for {bar.symbol}"
                     self._record_block(block_entries, trigger, "priority_skip", detail, bar)
