@@ -181,6 +181,52 @@ export interface PairedTrade {
   r_multiple?: number;
 }
 
+export interface TradeLeg {
+  leg_id: string;
+  side: string;
+  qty: number;
+  price: number;
+  fees: number;
+  timestamp: string;
+  trigger_id?: string;
+  category?: string;
+  reason?: string;
+  is_entry: boolean;
+  exit_fraction?: number;
+  wac_at_fill?: number;
+  realized_pnl?: number;
+  position_after?: number;
+  learning_book: boolean;
+  experiment_id?: string;
+}
+
+export interface TradeSet {
+  set_id: string;
+  symbol: string;
+  timeframe?: string;
+  opened_at: string;
+  closed_at?: string;
+  legs: TradeLeg[];
+  pnl_realized_total: number;
+  fees_total: number;
+  entry_side: string;
+  // Computed fields
+  num_legs: number;
+  num_entries: number;
+  num_exits: number;
+  is_closed: boolean;
+  hold_duration_hours?: number;
+  avg_entry_price?: number;
+  avg_exit_price?: number;
+  total_entry_qty: number;
+  total_exit_qty: number;
+  max_exposure: number;
+  entry_trigger?: string;
+  exit_trigger?: string;
+  learning_book: boolean;
+  experiment_id?: string;
+}
+
 export interface MarketTick {
   symbol: string;
   price: number;
@@ -296,9 +342,15 @@ export const backtestAPI = {
     return response.data;
   },
 
-  // Get paired (round-trip) trades
+  // Get paired (round-trip) trades (legacy 1:1 format)
   getPairedTrades: async (runId: string): Promise<PairedTrade[]> => {
     const response = await api.get(`/backtests/${runId}/paired_trades`);
+    return response.data;
+  },
+
+  // Get trade sets (position lifecycle format with multiple legs)
+  getTradeSets: async (runId: string): Promise<TradeSet[]> => {
+    const response = await api.get(`/backtests/${runId}/trade_sets`);
     return response.data;
   },
 

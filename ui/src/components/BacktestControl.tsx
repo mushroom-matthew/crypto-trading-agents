@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, Fragment } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info, ChevronDown, ChevronRight } from 'lucide-react';
-import { backtestAPI, promptsAPI, regimesAPI, type BacktestConfig } from '../lib/api';
+import { backtestAPI, promptsAPI, regimesAPI, type BacktestConfig, type TradeSet, type TradeLeg } from '../lib/api';
 import { cn, formatCurrency, formatPercent, formatDateTime, numberOrFallback, parseOptionalNumber } from '../lib/utils';
 import { BACKTEST_PRESETS } from '../lib/presets';
 import { MarketTicker } from './MarketTicker';
@@ -169,9 +169,9 @@ export function BacktestControl() {
     enabled: backtest?.status === 'completed',
   });
 
-  const { data: pairedTrades = [] } = useQuery({
-    queryKey: ['pairedTrades', selectedRun],
-    queryFn: () => backtestAPI.getPairedTrades(selectedRun!),
+  const { data: tradeSets = [] } = useQuery({
+    queryKey: ['tradeSets', selectedRun],
+    queryFn: () => backtestAPI.getTradeSets(selectedRun!),
     enabled: backtest?.status === 'completed',
   });
   useEffect(() => {
@@ -899,17 +899,17 @@ export function BacktestControl() {
         </div>
       )}
 
-        {/* Recent Trades — Round-trips when available, fills as fallback */}
-        {isComplete && (pairedTrades.length > 0 || (trades && trades.length > 0)) && (
+        {/* Recent Trades — Trade sets when available, fills as fallback */}
+        {isComplete && (tradeSets.length > 0 || (trades && trades.length > 0)) && (
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
             <h2 className="text-xl font-semibold mb-4">
-              {pairedTrades.length > 0 ? 'Round-Trip Trades' : 'Recent Trades'}
+              {tradeSets.length > 0 ? 'Trade Sets' : 'Recent Trades'}
             </h2>
 
-            {pairedTrades.length > 0 ? (
+            {tradeSets.length > 0 ? (
               <>
                 <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                  Round-trip trades pairing entry and exit fills. Hold = duration in hours, R = P&L / Actual Risk
+                  Position lifecycles with entry/exit legs. Legs = number of fills, Hold = duration in hours.
                 </p>
                 <div className="overflow-x-auto max-h-96 overflow-y-auto">
                   <table className="w-full text-sm">
@@ -918,25 +918,25 @@ export function BacktestControl() {
                         <th className="pb-3 w-8 sticky top-0 bg-white dark:bg-gray-800 z-10" />
                         <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Symbol</th>
                         <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Side</th>
-                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Entry Trigger</th>
-                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Exit Trigger</th>
-                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Entry Time</th>
-                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Exit Time</th>
-                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Entry Price</th>
-                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Exit Price</th>
-                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Qty</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Entry</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Exit</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Open Time</th>
+                        <th className="pb-3 sticky top-0 bg-white dark:bg-gray-800 z-10">Close Time</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Avg Entry</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Avg Exit</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Max Qty</th>
                         <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">Fees</th>
                         <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10">P&L</th>
                         <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10" title="Hold duration in hours">Hold (h)</th>
-                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10" title="Actual risk at stop (qty x stop distance)">Risk</th>
-                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10" title="R-multiple: P&L / Actual Risk">R</th>
+                        <th className="pb-3 text-right sticky top-0 bg-white dark:bg-gray-800 z-10" title="Number of legs (entries + exits)">Legs</th>
+                        <th className="pb-3 text-center sticky top-0 bg-white dark:bg-gray-800 z-10">Status</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                      {pairedTrades.map((pt, idx) => {
+                      {tradeSets.map((ts, idx) => {
                         const isExpanded = expandedRoundTrips.has(idx);
                         return (
-                          <Fragment key={idx}>
+                          <Fragment key={ts.set_id || idx}>
                             <tr
                               className="hover:bg-gray-50 dark:hover:bg-gray-700/40 cursor-pointer"
                               onClick={() => toggleRoundTrip(idx)}
@@ -950,7 +950,7 @@ export function BacktestControl() {
                                   }}
                                   aria-expanded={isExpanded}
                                   className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-                                  title={isExpanded ? 'Hide details' : 'Show details'}
+                                  title={isExpanded ? 'Hide legs' : 'Show legs'}
                                 >
                                   {isExpanded ? (
                                     <ChevronDown className="w-4 h-4 text-gray-500" />
@@ -959,68 +959,121 @@ export function BacktestControl() {
                                   )}
                                 </button>
                               </td>
-                              <td className="py-2 font-mono">{pt.symbol}</td>
+                              <td className="py-2 font-mono">{ts.symbol}</td>
                           <td className="py-2">
                             <span className={cn(
                               'px-2 py-0.5 rounded text-xs font-semibold',
-                              pt.side?.toLowerCase() === 'buy' || pt.side?.toLowerCase() === 'long' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                              ts.entry_side === 'long' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
                             )}>
-                              {pt.side?.toUpperCase()}
+                              {ts.entry_side?.toUpperCase()}
                             </span>
                           </td>
-                          <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-28 truncate" title={pt.entry_trigger}>
-                            {pt.entry_trigger || '-'}
+                          <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-28 truncate" title={ts.entry_trigger || undefined}>
+                            {ts.entry_trigger || '-'}
                           </td>
-                          <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-28 truncate" title={pt.exit_trigger}>
-                            {pt.exit_trigger || '-'}
+                          <td className="py-2 text-xs font-mono text-gray-600 dark:text-gray-400 max-w-28 truncate" title={ts.exit_trigger || undefined}>
+                            {ts.exit_trigger || '-'}
                           </td>
-                          <td className="py-2 text-gray-500 text-xs">{formatDateTime(pt.entry_timestamp)}</td>
-                          <td className="py-2 text-gray-500 text-xs">{formatDateTime(pt.exit_timestamp)}</td>
-                          <td className="py-2 text-right">{pt.entry_price != null ? formatCurrency(pt.entry_price) : '-'}</td>
-                          <td className="py-2 text-right">{pt.exit_price != null ? formatCurrency(pt.exit_price) : '-'}</td>
-                          <td className="py-2 text-right">{pt.qty != null ? pt.qty.toFixed(6) : '-'}</td>
+                          <td className="py-2 text-gray-500 text-xs">{formatDateTime(ts.opened_at)}</td>
+                          <td className="py-2 text-gray-500 text-xs">{ts.closed_at ? formatDateTime(ts.closed_at) : '-'}</td>
+                          <td className="py-2 text-right">{ts.avg_entry_price != null ? formatCurrency(ts.avg_entry_price) : '-'}</td>
+                          <td className="py-2 text-right">{ts.avg_exit_price != null ? formatCurrency(ts.avg_exit_price) : '-'}</td>
+                          <td className="py-2 text-right">{ts.max_exposure != null ? ts.max_exposure.toFixed(6) : '-'}</td>
                           <td className="py-2 text-right text-gray-500">
-                            {pt.fees != null ? formatCurrency(pt.fees) : '-'}
+                            {ts.fees_total != null ? formatCurrency(ts.fees_total) : '-'}
                           </td>
                           <td className={cn(
                             'py-2 text-right font-semibold',
-                            pt.pnl && pt.pnl > 0 ? 'text-green-500' : pt.pnl && pt.pnl < 0 ? 'text-red-500' : 'text-gray-500'
+                            ts.pnl_realized_total > 0 ? 'text-green-500' : ts.pnl_realized_total < 0 ? 'text-red-500' : 'text-gray-500'
                           )}>
-                            {pt.pnl != null ? formatCurrency(pt.pnl) : '-'}
+                            {formatCurrency(ts.pnl_realized_total)}
                           </td>
                           <td className="py-2 text-right text-gray-600 dark:text-gray-400">
-                            {pt.hold_duration_hours != null ? pt.hold_duration_hours.toFixed(1) : '-'}
+                            {ts.hold_duration_hours != null ? ts.hold_duration_hours.toFixed(1) : '-'}
                           </td>
                           <td className="py-2 text-right text-gray-600 dark:text-gray-400">
-                            {pt.actual_risk_at_stop != null ? formatCurrency(pt.actual_risk_at_stop) : '-'}
+                            {ts.num_legs}
+                            <span className="text-xs text-gray-400 ml-1">({ts.num_entries}E/{ts.num_exits}X)</span>
                           </td>
-                          <td className={cn(
-                            'py-2 text-right font-semibold',
-                            pt.r_multiple && pt.r_multiple > 0 ? 'text-green-500' : pt.r_multiple && pt.r_multiple < 0 ? 'text-red-500' : 'text-gray-500'
-                          )}>
-                            {pt.r_multiple != null ? pt.r_multiple.toFixed(2) : '-'}
+                          <td className="py-2 text-center">
+                            <span className={cn(
+                              'px-2 py-0.5 rounded text-xs',
+                              ts.is_closed ? 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300' : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                            )}>
+                              {ts.is_closed ? 'Closed' : 'Open'}
+                            </span>
                           </td>
                             </tr>
                             {isExpanded && (
                               <tr className="bg-gray-50 dark:bg-gray-900/30">
                                 <td className="py-3 px-2" colSpan={15}>
-                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-gray-700 dark:text-gray-300">
-                                    <div>
-                                      <p className="font-semibold text-gray-500 dark:text-gray-400">Entry Trigger (full)</p>
-                                      <p className="mt-1 whitespace-pre-wrap break-words text-gray-900 dark:text-gray-100">
-                                        {pt.entry_trigger || '-'}
+                                  <div className="text-xs">
+                                    <p className="font-semibold text-gray-500 dark:text-gray-400 mb-2">Individual Legs</p>
+                                    <table className="w-full">
+                                      <thead>
+                                        <tr className="text-left text-gray-500 border-b border-gray-300 dark:border-gray-600">
+                                          <th className="pb-2 pr-2">Time</th>
+                                          <th className="pb-2 pr-2">Side</th>
+                                          <th className="pb-2 pr-2">Type</th>
+                                          <th className="pb-2 pr-2">Category</th>
+                                          <th className="pb-2 pr-2">Trigger</th>
+                                          <th className="pb-2 pr-2 text-right">Qty</th>
+                                          <th className="pb-2 pr-2 text-right">Price</th>
+                                          <th className="pb-2 pr-2 text-right">Fees</th>
+                                          <th className="pb-2 pr-2 text-right">P&L</th>
+                                          <th className="pb-2 pr-2 text-right">Pos After</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                                        {ts.legs.map((leg) => (
+                                          <tr key={leg.leg_id}>
+                                            <td className="py-1 pr-2 text-gray-500">{formatDateTime(leg.timestamp)}</td>
+                                            <td className="py-1 pr-2">
+                                              <span className={cn(
+                                                'px-1.5 py-0.5 rounded text-xs',
+                                                leg.side === 'buy' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                                              )}>
+                                                {leg.side.toUpperCase()}
+                                              </span>
+                                            </td>
+                                            <td className="py-1 pr-2">
+                                              <span className={cn(
+                                                'px-1.5 py-0.5 rounded text-xs',
+                                                leg.is_entry ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' : 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+                                              )}>
+                                                {leg.is_entry ? 'Entry' : (leg.exit_fraction ? `Exit ${(leg.exit_fraction * 100).toFixed(0)}%` : 'Exit')}
+                                              </span>
+                                            </td>
+                                            <td className="py-1 pr-2 text-gray-600 dark:text-gray-400">{leg.category || '-'}</td>
+                                            <td className="py-1 pr-2 font-mono text-gray-600 dark:text-gray-400 max-w-24 truncate" title={leg.trigger_id || undefined}>
+                                              {leg.trigger_id || '-'}
+                                            </td>
+                                            <td className="py-1 pr-2 text-right">{leg.qty.toFixed(6)}</td>
+                                            <td className="py-1 pr-2 text-right">{formatCurrency(leg.price)}</td>
+                                            <td className="py-1 pr-2 text-right text-gray-500">{formatCurrency(leg.fees)}</td>
+                                            <td className={cn(
+                                              'py-1 pr-2 text-right',
+                                              leg.realized_pnl && leg.realized_pnl > 0 ? 'text-green-500' : leg.realized_pnl && leg.realized_pnl < 0 ? 'text-red-500' : 'text-gray-500'
+                                            )}>
+                                              {leg.realized_pnl != null ? formatCurrency(leg.realized_pnl) : '-'}
+                                            </td>
+                                            <td className="py-1 pr-2 text-right text-gray-600 dark:text-gray-400">
+                                              {leg.position_after != null ? leg.position_after.toFixed(6) : '-'}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                    {ts.timeframe && (
+                                      <p className="mt-2 text-gray-500 dark:text-gray-400">
+                                        <span className="font-semibold">Timeframe:</span> {ts.timeframe}
                                       </p>
-                                    </div>
-                                    <div>
-                                      <p className="font-semibold text-gray-500 dark:text-gray-400">Exit Trigger (full)</p>
-                                      <p className="mt-1 whitespace-pre-wrap break-words text-gray-900 dark:text-gray-100">
-                                        {pt.exit_trigger || '-'}
+                                    )}
+                                    {ts.learning_book && (
+                                      <p className="mt-1 text-yellow-600 dark:text-yellow-400">
+                                        Learning Book Trade {ts.experiment_id && `(${ts.experiment_id})`}
                                       </p>
-                                    </div>
-                                    <div>
-                                      <p className="font-semibold text-gray-500 dark:text-gray-400">Entry Timeframe</p>
-                                      <p className="mt-1 text-gray-900 dark:text-gray-100">{pt.entry_timeframe || '-'}</p>
-                                    </div>
+                                    )}
                                   </div>
                                 </td>
                               </tr>

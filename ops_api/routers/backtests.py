@@ -30,6 +30,8 @@ from app.db.repo import Database
 from app.db.models import BacktestRun, BacktestStatus
 from sqlalchemy import select, desc
 
+from schemas.trade_set import TradeSetBuilder
+
 logger = logging.getLogger(__name__)
 
 _db = Database()
@@ -496,6 +498,56 @@ class PairedTrade(BaseModel):
     risk_used_abs: Optional[float] = None
     actual_risk_at_stop: Optional[float] = None
     r_multiple: Optional[float] = None
+
+
+class TradeLegResponse(BaseModel):
+    """Individual fill within a position lifecycle (API response)."""
+
+    leg_id: str = Field(description="Unique identifier for this leg")
+    side: str = Field(description="Trade direction (buy/sell)")
+    qty: float = Field(description="Executed quantity")
+    price: float = Field(description="Execution price")
+    fees: float = Field(default=0.0, description="Transaction fees")
+    timestamp: str = Field(description="Execution timestamp (ISO 8601)")
+    trigger_id: Optional[str] = Field(default=None, description="Trigger ID")
+    category: Optional[str] = Field(default=None, description="Trigger category")
+    reason: Optional[str] = Field(default=None, description="Trade reason")
+    is_entry: bool = Field(description="True if entry leg")
+    exit_fraction: Optional[float] = Field(default=None, description="Partial exit fraction")
+    wac_at_fill: Optional[float] = Field(default=None, description="WAC at fill time")
+    realized_pnl: Optional[float] = Field(default=None, description="Realized P&L (exit legs)")
+    position_after: Optional[float] = Field(default=None, description="Position after fill")
+    learning_book: bool = Field(default=False, description="Learning book trade")
+    experiment_id: Optional[str] = Field(default=None, description="Experiment ID")
+
+
+class TradeSetResponse(BaseModel):
+    """Complete position lifecycle from flat to flat (API response)."""
+
+    set_id: str = Field(description="Unique identifier for this trade set")
+    symbol: str = Field(description="Trading symbol")
+    timeframe: Optional[str] = Field(default=None, description="Primary timeframe")
+    opened_at: str = Field(description="Position open timestamp (ISO 8601)")
+    closed_at: Optional[str] = Field(default=None, description="Position close timestamp")
+    legs: List[TradeLegResponse] = Field(default_factory=list, description="All legs")
+    pnl_realized_total: float = Field(default=0.0, description="Total realized P&L")
+    fees_total: float = Field(default=0.0, description="Total fees")
+    entry_side: str = Field(default="long", description="Direction (long/short)")
+    # Computed fields
+    num_legs: int = Field(description="Number of legs")
+    num_entries: int = Field(description="Number of entry legs")
+    num_exits: int = Field(description="Number of exit legs")
+    is_closed: bool = Field(description="True if position closed")
+    hold_duration_hours: Optional[float] = Field(default=None, description="Hold duration")
+    avg_entry_price: Optional[float] = Field(default=None, description="Avg entry price")
+    avg_exit_price: Optional[float] = Field(default=None, description="Avg exit price")
+    total_entry_qty: float = Field(description="Total qty entered")
+    total_exit_qty: float = Field(description="Total qty exited")
+    max_exposure: float = Field(description="Peak position size")
+    entry_trigger: Optional[str] = Field(default=None, description="First entry trigger")
+    exit_trigger: Optional[str] = Field(default=None, description="Final exit trigger")
+    learning_book: bool = Field(default=False, description="Learning book trade set")
+    experiment_id: Optional[str] = Field(default=None, description="Experiment ID")
 
 
 # Playback schemas for time-series navigation
@@ -1142,6 +1194,201 @@ async def get_paired_trades(run_id: str):
     except Exception as e:
         logger.error("Failed to get paired trades: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/trade_sets", response_model=List[TradeSetResponse])
+async def get_trade_sets(run_id: str):
+    """
+    Get position lifecycle trade sets from backtest.
+
+    Returns TradeSet data representing complete position lifecycles (flat -> non-flat -> flat).
+    Each TradeSet contains multiple TradeLeg records for entries, partial exits, scale-ins, etc.
+
+    This replaces the 1:1 PairedTrade model to support:
+    - Partial exits (risk_reduce)
+    - Scale-ins during position
+    - Multiple legs per position lifecycle
+    - WAC-based P&L accounting
+
+    For backward compatibility, use /paired_trades for legacy 1-entry/1-exit format.
+    """
+    try:
+        cached = await get_backtest_cached_async(run_id)
+        if not cached:
+            raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
+
+        # Check for native trade_sets first (new format)
+        trade_sets_raw = cached.get("trade_sets")
+        if trade_sets_raw:
+            # New format: already have TradeSet data
+            return _convert_trade_sets_to_response(trade_sets_raw)
+
+        # Fall back to reconstructing from fills
+        fills = cached.get("trades", [])
+        if not fills:
+            return []
+
+        # Use TradeSetBuilder to reconstruct TradeSets from fills
+        builder = TradeSetBuilder()
+        for fill in fills:
+            ts = fill.get("timestamp") or fill.get("time")
+            if ts is None:
+                continue
+            if isinstance(ts, str):
+                from dateutil.parser import isoparse
+                ts = isoparse(ts)
+            elif hasattr(ts, "to_pydatetime"):
+                ts = ts.to_pydatetime()
+
+            # Ensure timezone
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            symbol = fill.get("symbol", "UNKNOWN")
+            side = fill.get("side", "buy").lower()
+            qty = float(fill.get("qty", 0))
+            price = float(fill.get("price", 0))
+            fees = float(fill.get("fee", 0)) if fill.get("fee") is not None else 0.0
+
+            builder.process_fill(
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                price=price,
+                timestamp=ts,
+                fees=fees,
+                trigger_id=fill.get("trigger_id") or fill.get("reason"),
+                category=fill.get("trigger_category"),
+                reason=fill.get("reason"),
+                timeframe=fill.get("timeframe"),
+                learning_book=bool(fill.get("learning_book")),
+                experiment_id=fill.get("experiment_id"),
+            )
+
+        # Convert to response format
+        return _trade_set_builder_to_response(builder)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get trade sets: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _convert_trade_sets_to_response(trade_sets_raw: List[Dict[str, Any]]) -> List[TradeSetResponse]:
+    """Convert raw trade_sets dict to TradeSetResponse list."""
+    result = []
+    for ts_data in trade_sets_raw:
+        legs = []
+        for leg_data in ts_data.get("legs", []):
+            ts_str = leg_data.get("timestamp")
+            if hasattr(ts_str, "isoformat"):
+                ts_str = ts_str.isoformat()
+            legs.append(TradeLegResponse(
+                leg_id=leg_data.get("leg_id", ""),
+                side=leg_data.get("side", "buy"),
+                qty=float(leg_data.get("qty", 0)),
+                price=float(leg_data.get("price", 0)),
+                fees=float(leg_data.get("fees", 0)),
+                timestamp=str(ts_str),
+                trigger_id=leg_data.get("trigger_id"),
+                category=leg_data.get("category"),
+                reason=leg_data.get("reason"),
+                is_entry=bool(leg_data.get("is_entry")),
+                exit_fraction=leg_data.get("exit_fraction"),
+                wac_at_fill=leg_data.get("wac_at_fill"),
+                realized_pnl=leg_data.get("realized_pnl"),
+                position_after=leg_data.get("position_after"),
+                learning_book=bool(leg_data.get("learning_book")),
+                experiment_id=leg_data.get("experiment_id"),
+            ))
+
+        opened_at = ts_data.get("opened_at")
+        if hasattr(opened_at, "isoformat"):
+            opened_at = opened_at.isoformat()
+        closed_at = ts_data.get("closed_at")
+        if closed_at and hasattr(closed_at, "isoformat"):
+            closed_at = closed_at.isoformat()
+
+        result.append(TradeSetResponse(
+            set_id=ts_data.get("set_id", ""),
+            symbol=ts_data.get("symbol", "UNKNOWN"),
+            timeframe=ts_data.get("timeframe"),
+            opened_at=str(opened_at),
+            closed_at=str(closed_at) if closed_at else None,
+            legs=legs,
+            pnl_realized_total=float(ts_data.get("pnl_realized_total", 0)),
+            fees_total=float(ts_data.get("fees_total", 0)),
+            entry_side=ts_data.get("entry_side", "long"),
+            num_legs=len(legs),
+            num_entries=sum(1 for leg in legs if leg.is_entry),
+            num_exits=sum(1 for leg in legs if not leg.is_entry),
+            is_closed=ts_data.get("closed_at") is not None,
+            hold_duration_hours=ts_data.get("hold_duration_hours"),
+            avg_entry_price=ts_data.get("avg_entry_price"),
+            avg_exit_price=ts_data.get("avg_exit_price"),
+            total_entry_qty=float(ts_data.get("total_entry_qty", 0)),
+            total_exit_qty=float(ts_data.get("total_exit_qty", 0)),
+            max_exposure=float(ts_data.get("max_exposure", 0)),
+            entry_trigger=ts_data.get("entry_trigger"),
+            exit_trigger=ts_data.get("exit_trigger"),
+            learning_book=bool(ts_data.get("learning_book")),
+            experiment_id=ts_data.get("experiment_id"),
+        ))
+    return result
+
+
+def _trade_set_builder_to_response(builder: TradeSetBuilder) -> List[TradeSetResponse]:
+    """Convert TradeSetBuilder results to TradeSetResponse list."""
+    result = []
+    for trade_set in builder.all_sets():
+        legs = []
+        for leg in trade_set.legs:
+            legs.append(TradeLegResponse(
+                leg_id=leg.leg_id,
+                side=leg.side,
+                qty=leg.qty,
+                price=leg.price,
+                fees=leg.fees,
+                timestamp=leg.timestamp.isoformat(),
+                trigger_id=leg.trigger_id,
+                category=leg.category,
+                reason=leg.reason,
+                is_entry=leg.is_entry,
+                exit_fraction=leg.exit_fraction,
+                wac_at_fill=leg.wac_at_fill,
+                realized_pnl=leg.realized_pnl,
+                position_after=leg.position_after,
+                learning_book=leg.learning_book,
+                experiment_id=leg.experiment_id,
+            ))
+
+        result.append(TradeSetResponse(
+            set_id=trade_set.set_id,
+            symbol=trade_set.symbol,
+            timeframe=trade_set.timeframe,
+            opened_at=trade_set.opened_at.isoformat(),
+            closed_at=trade_set.closed_at.isoformat() if trade_set.closed_at else None,
+            legs=legs,
+            pnl_realized_total=trade_set.pnl_realized_total,
+            fees_total=trade_set.fees_total,
+            entry_side=trade_set.entry_side,
+            num_legs=trade_set.num_legs,
+            num_entries=trade_set.num_entries,
+            num_exits=trade_set.num_exits,
+            is_closed=trade_set.is_closed,
+            hold_duration_hours=trade_set.hold_duration_hours,
+            avg_entry_price=trade_set.avg_entry_price,
+            avg_exit_price=trade_set.avg_exit_price,
+            total_entry_qty=trade_set.total_entry_qty,
+            total_exit_qty=trade_set.total_exit_qty,
+            max_exposure=trade_set.max_exposure,
+            entry_trigger=trade_set.entry_trigger,
+            exit_trigger=trade_set.exit_trigger,
+            learning_book=trade_set.learning_book,
+            experiment_id=trade_set.experiment_id,
+        ))
+    return result
 
 
 # Playback endpoints for interactive time-series navigation

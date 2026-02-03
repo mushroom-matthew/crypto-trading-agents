@@ -15,6 +15,7 @@ from .llm_strategist import (
 from .judge_feedback import DisplayConstraints, JudgeConstraints, JudgeFeedback
 from .strategy_run import RiskAdjustmentState, RiskLimitSettings, StrategyRun, StrategyRunConfig
 from .compiled_plan import CompiledPlan, CompiledTrigger, CompiledExpression
+from .trade_set import TradeLeg, TradeSet, TradeSetBuilder
 
 __all__ = [
     "AssetState",
@@ -37,4 +38,7 @@ __all__ = [
     "CompiledPlan",
     "CompiledTrigger",
     "CompiledExpression",
+    "TradeLeg",
+    "TradeSet",
+    "TradeSetBuilder",
 ]
