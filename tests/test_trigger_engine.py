@@ -1225,3 +1225,176 @@ def test_risk_off_goes_through_normal_exit_path():
     assert orders[0].exit_fraction is None
     # Normal exit intent
     assert orders[0].intent == "exit"
+
+
+# =============================================================================
+# Phase 4: risk_off latch and Tier 1 priority tests
+# =============================================================================
+
+
+def test_risk_off_latch_can_be_set():
+    """risk_off_latch parameter can be set and toggled."""
+    trigger = TriggerCondition(
+        id="btc_risk_off",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_off",
+        confidence_grade="A",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+
+    # Default is False
+    engine = TriggerEngine(plan, risk_engine)
+    assert engine.risk_off_latch is False
+    assert engine._risk_off_has_priority() is False
+
+    # Can be set via constructor
+    engine_latched = TriggerEngine(plan, risk_engine, risk_off_latch=True)
+    assert engine_latched.risk_off_latch is True
+    assert engine_latched._risk_off_has_priority() is True
+
+    # Can be toggled dynamically
+    engine.set_risk_off_latch(True)
+    assert engine.risk_off_latch is True
+    assert engine._risk_off_has_priority() is True
+
+    engine.set_risk_off_latch(False)
+    assert engine.risk_off_latch is False
+    assert engine._risk_off_has_priority() is False
+
+
+def test_emergency_exit_beats_risk_off_in_dedup():
+    """emergency_exit should always win over risk_off in dedup, even when latched.
+
+    Note: Both triggers must produce orders to compete in dedup. We put emergency
+    first so it produces an order for the full position, then risk_off fires with
+    the simulated remaining position. Dedup then picks emergency_exit.
+    """
+    emergency_trigger = TriggerCondition(
+        id="btc_emergency",
+        symbol="BTC-USD",
+        direction="flat",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="emergency_exit",
+        confidence_grade="A",
+    )
+    risk_off_trigger = TriggerCondition(
+        id="btc_risk_off",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_off",
+        confidence_grade="A",
+    )
+    # Put emergency first so it produces an order for full position
+    # risk_off with latch bypasses priority_skip but finds no remaining position
+    plan = _plan_with_triggers([emergency_trigger, risk_off_trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    # Even with risk_off latch active, emergency_exit should win
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0, risk_off_latch=True)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert len(orders) == 1
+    # emergency_exit always wins (Tier 0)
+    assert orders[0].trigger_category == "emergency_exit"
+    assert orders[0].emergency is True
+
+
+def test_risk_off_beats_risk_reduce_in_dedup():
+    """risk_off should beat risk_reduce in dedup (higher tier when competing as exits)."""
+    risk_off_trigger = TriggerCondition(
+        id="btc_risk_off",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_off",
+        confidence_grade="B",
+    )
+    risk_reduce_trigger = TriggerCondition(
+        id="btc_risk_reduce",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        category="risk_reduce",
+        confidence_grade="A",  # Higher confidence, but risk_off still wins
+        exit_fraction=0.5,
+    )
+    # Put risk_reduce first so it fires first
+    plan = _plan_with_triggers([risk_reduce_trigger, risk_off_trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    # Allow 2 triggers per bar so both can fire and compete in dedup
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0, max_triggers_per_symbol_per_bar=2)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+    assert len(orders) == 1
+    # risk_off beats risk_reduce when both are exits
+    assert orders[0].trigger_category == "risk_off"
+
+
+def test_risk_off_respects_hold_rule():
+    """risk_off exits should be blocked when hold_rule is active."""
+    trigger = TriggerCondition(
+        id="btc_risk_off",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",  # Would fire
+        hold_rule="True",  # But hold rule is active
+        category="risk_off",
+        confidence_grade="A",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+    # No orders because hold rule is active
+    assert not orders
+    # Block should be recorded
+    assert any(b["reason"] == "HOLD_RULE" for b in blocks)

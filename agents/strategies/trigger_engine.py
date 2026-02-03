@@ -92,6 +92,7 @@ class TriggerEngine:
         judge_constraints: JudgeConstraints | None = None,
         exit_binding_mode: ExitBindingMode = "none",
         conflicting_signal_policy: ConflictResolution = "reverse",
+        risk_off_latch: bool = False,
     ) -> None:
         """Initialize the trigger engine.
 
@@ -122,6 +123,8 @@ class TriggerEngine:
                 disabled_categories to block specific triggers from firing.
             exit_binding_mode: Exit binding policy ("none" or "category").
             conflicting_signal_policy: Resolver policy when opposing entries fire ("ignore", "exit", "reverse", "defer").
+            risk_off_latch: When True, risk_off exits get Tier 1 priority (preempt entries).
+                When False, risk_off competes like normal exits unless plan regime is "risk_off".
         """
         self.plan = plan
         self.risk_engine = risk_engine
@@ -136,6 +139,7 @@ class TriggerEngine:
         self.priority_skip_confidence_threshold = priority_skip_confidence_threshold
         self.exit_binding_mode = exit_binding_mode
         self.conflicting_signal_policy = conflicting_signal_policy
+        self.risk_off_latch = risk_off_latch
         # Store trigger confidence for deduplication
         self._trigger_confidence: dict[str, Literal["A", "B", "C"] | None] = {
             t.id: t.confidence_grade for t in plan.triggers
@@ -162,6 +166,29 @@ class TriggerEngine:
             key=lambda t: self.CONFIDENCE_PRIORITY.get(t.confidence_grade, 0),
             reverse=True,  # Highest priority first
         )
+
+    def set_risk_off_latch(self, active: bool) -> None:
+        """Set the risk_off latch state.
+
+        When active, risk_off exits get Tier 1 priority (preempt entries).
+        """
+        self.risk_off_latch = active
+
+    def _risk_off_has_priority(self) -> bool:
+        """Check if risk_off exits should have Tier 1 priority.
+
+        Returns True if:
+        - risk_off_latch is active, OR
+        - plan regime is "risk_off" (a regime we don't currently use, but future-proofed)
+
+        When True, risk_off exits preempt entries in dedup.
+        When False, risk_off competes like normal exits via confidence-based override.
+        """
+        if self.risk_off_latch:
+            return True
+        # Future: could also check if plan.regime == "risk_off" but that regime
+        # doesn't exist in the current schema (bull, bear, range, high_vol, mixed)
+        return False
 
     def _context(
         self,
@@ -453,9 +480,13 @@ class TriggerEngine:
                 continue
 
             # Early exit if we've hit the max triggers for this symbol
-            # EXCEPTION: emergency_exit triggers are NEVER skipped - they are safety interrupts
+            # EXCEPTIONS that bypass priority_skip:
+            # - emergency_exit: safety interrupts are NEVER skipped
+            # - risk_off (when latched): Tier 1 priority needs to participate in dedup
             if self.prioritize_by_confidence and triggers_fired_for_symbol >= self.max_triggers_per_symbol_per_bar:
-                if trigger.category != "emergency_exit" and not self._priority_skip_bypass(trigger.confidence_grade):
+                is_emergency = trigger.category == "emergency_exit"
+                is_risk_off_with_priority = trigger.category == "risk_off" and self._risk_off_has_priority()
+                if not is_emergency and not is_risk_off_with_priority and not self._priority_skip_bypass(trigger.confidence_grade):
                     # Log that we're skipping lower-confidence triggers
                     detail = f"Max triggers ({self.max_triggers_per_symbol_per_bar}) already fired for {bar.symbol}"
                     self._record_block(block_entries, trigger, "priority_skip", detail, bar)
@@ -785,13 +816,19 @@ class TriggerEngine:
         bar_symbol: str,
         block_entries: List[dict] | None = None,
     ) -> List[Order]:
-        """Deduplicate orders per symbol using confidence-aware exit priority.
+        """Deduplicate orders per symbol using tiered exit priority.
+
+        Precedence Tiers (strict order, no exceptions):
+        - Tier 0: emergency_exit — always wins, preempts all entries and exits
+        - Tier 1: risk_off (when latched) — preempts entries, beats normal exits
+        - Tier 2: risk_reduce — competes via confidence-based override
+        - Tier 3: normal exits — standard strategy exits
 
         Rules:
         1. Emergency exits are safety interrupts — they always win dedup,
            regardless of regime or competing entry confidence.
-        2. Default: Exit orders (reason ending in _exit or _flat) take priority.
-        3. Exception: High-confidence entries can override non-emergency exits if confidence >= threshold.
+        2. risk_off exits with priority (latch active) preempt entries and beat normal exits.
+        3. risk_reduce and normal exits compete; high-confidence entries can override them.
         4. Only one order per symbol per bar is allowed.
         5. If multiple competing orders exist, use highest confidence then first-in-list.
 
@@ -819,7 +856,9 @@ class TriggerEngine:
             exits = [o for o in symbol_orders if o.reason.endswith("_exit") or o.reason.endswith("_flat")]
             entries = [o for o in symbol_orders if o not in exits]
             emergency_exits = [o for o in exits if o.emergency]
+            risk_off_exits = [o for o in exits if o.trigger_category == "risk_off" and not o.emergency]
 
+            # Tier 0: Emergency exits always win
             if emergency_exits:
                 result.append(emergency_exits[0])
                 # Record preemption of competing entries for auditability
@@ -838,6 +877,28 @@ class TriggerEngine:
                             ),
                             "price": entry_order.price,
                             "preempted_by": emergency_exits[0].reason,
+                        })
+                continue
+
+            # Tier 1: risk_off with priority (latch active) preempts entries
+            if risk_off_exits and self._risk_off_has_priority():
+                result.append(risk_off_exits[0])
+                # Record preemption of entries for auditability
+                if entries and block_entries is not None:
+                    for entry_order in entries:
+                        conf = self._trigger_confidence.get(entry_order.reason)
+                        block_entries.append({
+                            "trigger_id": entry_order.reason,
+                            "symbol": entry_order.symbol,
+                            "timeframe": entry_order.timeframe,
+                            "timestamp": entry_order.timestamp.isoformat(),
+                            "reason": "risk_off_preempts_entry",
+                            "detail": (
+                                f"risk_off exit preempted entry (latch active) "
+                                f"(trigger={entry_order.reason}, confidence={conf})"
+                            ),
+                            "price": entry_order.price,
+                            "preempted_by": risk_off_exits[0].reason,
                         })
                 continue
 
@@ -868,14 +929,41 @@ class TriggerEngine:
                 if meets_threshold(get_confidence(o))
             ]
 
+            # Tier 2/3: Confidence-based competition
+            # risk_off (non-latched) and risk_reduce compete like normal exits
             if high_conf_entries:
                 # Sort by confidence priority (descending), take highest
                 high_conf_entries.sort(key=lambda x: x[1], reverse=True)
                 best_entry = high_conf_entries[0][0]
-                # High-confidence entry overrides exits
+                # High-confidence entry overrides exits (risk_reduce, risk_off non-latched, normal)
                 result.append(best_entry)
+                # Record override for auditability
+                if exits and block_entries is not None:
+                    for exit_order in exits:
+                        exit_category = exit_order.trigger_category or "normal"
+                        block_entries.append({
+                            "trigger_id": exit_order.reason,
+                            "symbol": exit_order.symbol,
+                            "timeframe": exit_order.timeframe,
+                            "timestamp": exit_order.timestamp.isoformat(),
+                            "reason": f"entry_overrides_{exit_category}",
+                            "detail": (
+                                f"High-confidence entry overrode {exit_category} exit "
+                                f"(entry={best_entry.reason}, confidence={get_confidence(best_entry)})"
+                            ),
+                            "price": exit_order.price,
+                            "overridden_by": best_entry.reason,
+                        })
             elif exits:
-                # Default: exit priority
+                # Default: exit priority (risk_off beats risk_reduce beats normal)
+                # Sort exits by category priority: risk_off > risk_reduce > normal
+                def exit_priority(o: Order) -> int:
+                    if o.trigger_category == "risk_off":
+                        return 2
+                    if o.trigger_category == "risk_reduce":
+                        return 1
+                    return 0
+                exits.sort(key=exit_priority, reverse=True)
                 result.append(exits[0])
             elif entries:
                 # No exits, no high-conf entries: use first entry
