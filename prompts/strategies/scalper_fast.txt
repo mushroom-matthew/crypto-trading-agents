@@ -39,6 +39,18 @@ Trigger Composition Requirements:
    - Quick profit target: exit at VWAP or opposite band
    - Time-based: consider exit if no follow-through within 2-3 bars
    - Emergency: fast EMA cross against position
+7. **Graduated De-Risk (use decisively - scalpers don't hold losers)**:
+   - risk_reduce (partial exit): Use at first sign of stall
+     * Position near VWAP target but momentum fading
+     * Volume burst exhausted, no follow-through
+     * Trim 50-75% quickly - don't wait for full reversal
+     * Example: trim 50% when vwap_distance_pct > 0 and ema_fast declining
+   - risk_off (full defensive exit): Use immediately when setup fails
+     * Fast EMA cross against position direction
+     * VWAP distance expanding against position
+     * ewma_vol spiking (whipsaw risk increasing)
+     * Scalpers must exit quickly - there's always another setup
+   - emergency_exit: Reserve for broken conditions (flash crash, exchange halt)
 
 VALID entry_rule EXPRESSION EXAMPLES:
 NOTE: Use fast indicators (ema_fast, ema_very_fast, ewma_vol, vwap, vol_burst) instead of standard slow indicators.

@@ -35,6 +35,18 @@ Trigger Composition Requirements:
    - Core positions: Trail with 4h SMA, allow retracement
    - Tactical positions: Fixed 1:1.5 risk-reward targets
    - Probe positions: Quick 1:1 or time-based exit
+6. **Graduated De-Risk (adapt to position type)**:
+   - risk_reduce (partial exit): Adapt to position role
+     * Core positions: trim 25-30% when 4h RSI divergence forms
+     * Tactical positions: trim 50% at 1:1 risk-reward, trail remainder
+     * Probe positions: trim 50% at first sign of stall
+     * Example: trim 30% when approaching key resistance with declining volume
+   - risk_off (full defensive exit): Use when regime is shifting
+     * 4h trend_state changes against position direction
+     * Multiple assets breaking key moving averages
+     * ATR expanding significantly from compressed levels (regime change)
+     * Protect core positions aggressively - they represent largest risk
+   - emergency_exit: Reserve for broken conditions only (flash crash, liquidity gap)
 
 VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
 NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].

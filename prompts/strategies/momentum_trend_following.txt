@@ -34,6 +34,17 @@ Trigger Composition Requirements:
    - Use trailing logic: exit when price breaks below rising SMA
    - Allow retracement of 30-40% of gains before trailing kicks in
    - Emergency exit only on structural trend break (lower lows/highs)
+6. **Graduated De-Risk (use appropriately)**:
+   - risk_reduce (partial exit): Use when trend is losing momentum but structure intact
+     * RSI divergence forming while still in uptrend
+     * Approaching major resistance with decreasing volume
+     * Higher timeframe showing exhaustion signs
+     * Example: trim 30-50% when RSI > 70 and MACD histogram declining
+   - risk_off (full defensive exit): Use when regime shift is likely
+     * Price breaks below key moving average on higher timeframe
+     * Sustained lower highs forming
+     * Correlation breakdown with market leaders
+   - emergency_exit: Reserve for broken conditions only (flash crash, liquidity gap)
 
 Entry Rule Patterns (use these templates):
 - Long trend continuation: "trend_state=='uptrend' and close > sma_medium and tf_4h_close > tf_4h_sma_medium and rsi_14 between 40 and 65 and macd > macd_signal"

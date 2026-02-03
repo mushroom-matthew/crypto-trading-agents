@@ -36,6 +36,18 @@ Trigger Composition Requirements:
    - Quick profit-taking: exit at 1:1 risk-reward
    - Trailing stops at 1x ATR (tight)
    - Exit on any sign of trend weakness
+6. **Graduated De-Risk (use liberally for capital preservation)**:
+   - risk_reduce (partial exit): Use early at first sign of weakness
+     * Any momentum divergence or volume decline
+     * Approaching any resistance level, even minor
+     * Higher timeframe showing uncertainty
+     * Example: trim 50-75% at first RSI divergence or volume drop
+   - risk_off (full defensive exit): Use quickly when conditions change
+     * Any increase in volatility beyond normal range
+     * Price breaking below any short-term moving average
+     * Multiple assets showing weakness simultaneously
+     * When in doubt, exit completely - capital preservation is priority
+   - emergency_exit: Reserve for broken conditions (flash crash, liquidity gap)
 
 Entry Rule Patterns (use these templates):
 - Safe trend entry: "trend_state=='uptrend' and tf_4h_trend_state=='uptrend' and rsi_14 between 45 and 55 and atr_14 < tf_4h_atr_14 and close > sma_medium and tf_4h_close > tf_4h_sma_medium"

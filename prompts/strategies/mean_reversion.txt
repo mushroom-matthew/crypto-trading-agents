@@ -35,6 +35,17 @@ Trigger Composition Requirements:
    - Target the mean: exit at sma_medium or Bollinger middle band
    - Take partial profits at 50% reversion, full at mean
    - Tight stops: 1-1.5x ATR (mean reversion fails fast or works quickly)
+6. **Graduated De-Risk (use appropriately)**:
+   - risk_reduce (partial exit): Use when reversion is working but losing momentum
+     * Price reached 50% of the way to mean - lock in partial gains
+     * Volume declining as price approaches target
+     * Higher timeframe starting to trend against position
+     * Example: trim 50% when price > bollinger_middle * 0.98 and volume declining
+   - risk_off (full defensive exit): Use when range is breaking
+     * ATR expanding significantly (regime shift to trending)
+     * Price breaking Bollinger bands in wrong direction
+     * Mean reversion thesis invalidated by structural change
+   - emergency_exit: Reserve for broken conditions only (flash crash, liquidity gap)
 
 VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
 NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].

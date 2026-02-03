@@ -36,6 +36,18 @@ Trigger Composition Requirements:
    - Momentum fades: exit when ATR starts declining from peak
    - Failed breakout: quick stop if price reverses back into range
    - Trail winners: use ATR-based trailing stop (2x ATR from high)
+6. **Graduated De-Risk (use decisively on failed breakouts)**:
+   - risk_reduce (partial exit): Use when breakout momentum fading
+     * ATR declining from peak expansion level
+     * Volume burst exhausted, price stalling at new level
+     * Lock in 50% on confirmed breakout, trail remainder
+     * Example: trim 50% when atr_14 < peak_atr * 0.8 and price consolidating
+   - risk_off (full defensive exit): Use immediately on failed breakout
+     * Price reverses back inside prior range
+     * Donchian channel breakout fails (close below donchian_upper)
+     * Volume expansion occurs against breakout direction
+     * Failed breakouts often reverse hard - exit fully and fast
+   - emergency_exit: Reserve for broken conditions only (flash crash, liquidity gap)
 
 VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
 NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].

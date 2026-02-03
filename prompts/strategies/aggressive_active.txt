@@ -36,6 +36,18 @@ Trigger Composition Requirements:
    - Quick scalp exits: 0.5-1% profit targets
    - Momentum exits: trail with tight 0.5x ATR stop
    - Time-based: exit if no movement within 4-8 bars
+6. **Graduated De-Risk (use selectively - maintain exposure)**:
+   - risk_reduce (partial exit): Use to lock in gains while maintaining upside
+     * Position up 1%+ but momentum indicators weakening
+     * Approaching resistance with 50%+ of position in profit
+     * Scale out 25-50% to reduce risk while keeping exposure
+     * Example: trim 30% when RSI > 65 and MACD histogram declining
+   - risk_off (full defensive exit): Use when regime shifts clearly
+     * Multiple timeframes aligning against position
+     * Correlation breakdown across portfolio
+     * Sharp volume spike against position direction
+     * Don't use for minor pullbacks - allow normal volatility
+   - emergency_exit: Reserve for broken conditions only (flash crash, exchange halt)
 
 VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
 NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].
