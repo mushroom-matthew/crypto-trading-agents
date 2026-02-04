@@ -36,6 +36,7 @@ Trigger Composition Requirements:
    - Tactical positions: Fixed 1:1.5 risk-reward targets
    - Probe positions: Quick 1:1 or time-based exit
 6. **Graduated De-Risk (adapt to position type)**:
+   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
    - risk_reduce (partial exit): Adapt to position role
      * Core positions: trim 25-30% when 4h RSI divergence forms
      * Tactical positions: trim 50% at 1:1 risk-reward, trail remainder

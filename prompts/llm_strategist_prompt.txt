@@ -35,13 +35,15 @@ Multi-layer synthesis requirements:
    NOTE: If only a single timeframe is available, skip cross-timeframe requirements and build triggers using only that timeframe's indicators.
 2. Mandatory volatility gating: include at least one ATR, realized volatility, Donchian channel width, or Bollinger bandwidth comparison in every trigger. Match the gate to the trigger category (low-vol for ranges, high-vol for breakouts, etc.).
 3. Mean-reversion volume confirmation: every mean_reversion entry_rule must include a volume check when volume_multiple is available (e.g., volume_multiple >= 1.1). If volume_multiple is null, substitute a structural confirmation (e.g., cycle_position near extremes or nearest_support reclaim).
-4. Trigger diversity: emit at least five triggers that cover these categories exactly once per asset set:
+4. Trigger diversity: emit at least seven triggers that cover these categories exactly once per asset set:
    - trend_continuation
    - reversal
    - volatility_breakout
    - mean_reversion
+   - risk_reduce (partial de-risk when conditions weaken)
+   - risk_off (full exit to defensive posture on regime shift)
    - emergency_exit (can flatten either asset when conditions deteriorate)
-   Additional triggers are optional; if added, set category to "other", "risk_reduce", or "risk_off".
+   Additional triggers are optional; if added, set category to "other".
 5. BTC/ETH asymmetry: each asset must use unique indicator combinations, timeframes, or volatility gates. No mirrored logic; tie triggers to asset-specific behavior (BTC momentum leadership vs ETH lagging structure).
 6. Composite logic: each trigger must combine at least two indicators into a conceptual condition (example: pullback inside uptrend while MACD histogram stays positive and ATR contracts).
 7. Confidence grading: set confidence_grade per trigger to A, B, or C to drive sizing tiers (A = max allowable risk, B = half of A, C = minimal probe). Never leave confidence_grade null; if uncertain use B. Reflect the grade in your entry/exit rationale.
@@ -58,7 +60,7 @@ Multi-layer synthesis requirements:
    - The trade thesis remains valid despite short-term noise
    Do NOT use hold_rule for emergency_exit triggers - they must always be able to fire.
    Emergency exits must define a non-empty exit_rule; entry_rule should be empty or always false.
-11. Graduated de-risk categories (optional, use when appropriate):
+11. Graduated de-risk categories (REQUIRED — every plan must include at least one risk_reduce and one risk_off trigger):
    - risk_reduce: Partial exit to trim exposure when conditions are weakening but not critical.
      Use for: trend losing momentum, approaching resistance, unfavorable volume profile, correlation breakdown starting.
      Set exit_fraction (0 < f < 1.0) to specify how much of the position to close (e.g., 0.5 = close 50%).
@@ -182,6 +184,16 @@ Trimmed output example:
       "entry_rule": "false",
       "exit_rule": "not is_flat and timeframe=='1h' and rsi_14 > 75 and close > bollinger_upper and macd_hist < 0",
       "exit_fraction": 0.5
+    },
+    {
+      "id": "eth_risk_off_regime_shift",
+      "symbol": "ETH-USD",
+      "category": "risk_off",
+      "confidence_grade": "A",
+      "direction": "flat",
+      "timeframe": "1h",
+      "entry_rule": "false",
+      "exit_rule": "not is_flat and timeframe=='1h' and vol_state == 'extreme' and close < sma_medium and tf_4h_close < tf_4h_sma_medium"
     },
     {
       "id": "eth_emergency_exit",

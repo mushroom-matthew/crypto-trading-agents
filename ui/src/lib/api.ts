@@ -82,6 +82,11 @@ export interface BacktestConfig {
   debug_trigger_max_samples?: number;
   indicator_debug_mode?: string;
   indicator_debug_keys?: string[];
+
+  // Learning Book
+  learning_book_enabled?: boolean;
+  learning_daily_risk_budget_pct?: number;
+  learning_max_trades_per_day?: number;
 }
 
 export interface BacktestCreateResponse {

@@ -31,6 +31,9 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - ~~15-min-hold-exit-timing-validation.md~~: Validate min_hold vs exit timeframe; track min_hold_binding_pct. → Completed, see [X-15-min-hold-exit-timing-validation.md](X-15-min-hold-exit-timing-validation.md).
 - ~~16-judge-stale-snapshot-skip.md~~: Skip or adapt judge evals when snapshot is unchanged since last eval. → Completed, see [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md).
 - ~~17-graduated-derisk-taxonomy.md~~: Exit taxonomy & partial exit ladder. → Completed, see [X-17-graduated-derisk-taxonomy.md](X-17-graduated-derisk-taxonomy.md).
+- [18-phase1-deterministic-policy-integration.md](18-phase1-deterministic-policy-integration.md): Phase 1 policy pivot contract — deterministic, trigger-gated target-weight policy (mandatory).
+- [19-phase2-model-phat-integration.md](19-phase2-model-phat-integration.md): Phase 2 contract — `p_hat` as signal source only (optional/reversible).
+- [20-judge-attribution-rubric.md](20-judge-attribution-rubric.md): Judge attribution contract — single-bucket blame model and replan/policy-adjust action gating.
 
 Learning-risk runbooks (09-12) are all complete — implemented together on branch `main`. Tag propagation, learning book settings, experiment specs, and no-learn zones/kill switches are all landed.
 
@@ -61,28 +64,31 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 ### Phase 2 — Strategy architecture
 8. **01**: Strategist simplification (LLM becomes slower controller; supports "wait" stance, regime alerts, RAG)
 
-### Phase 3 — Infrastructure expansion
-9. **07**: AWS deploy / CI/CD
-10. **08**: Multi-wallet (Phantom/Solana/EVM read-only + reconciliation)
+### Phase 3 — Policy pivot contracts (trigger-gated)
+9. **18**: Deterministic policy integration (mandatory). Triggers remain permission/direction authority; policy owns magnitude/risk expression.
+10. **19**: Model `p_hat` integration as signal source only (optional/reversible). Bound at plan creation/replan only.
 
-### Deferred — Policy pivot (after trust stack is green)
-- Policy integration (deterministic target-weight engine) — see `docs/analysis/CONTINUOUS_POLICY_PIVOT_PLAN.md` Phase 1
-- Model integration (directional probability source) — see `docs/analysis/CONTINUOUS_POLICY_PIVOT_PLAN.md` Phase 2
+### Phase 3B — Judge attribution governance
+11. **20**: Judge attribution rubric and action gating. Enforces single primary attribution with evidence and prevents cross-layer blame smearing.
 
-> **Why this order differs from filenames:** The true blocker for the policy pivot is "anti-churn + continuity + clean replans," not just risk math. Learning Book isolation is trust infrastructure, not a feature — without it, experiments muddy PnL and interpretability is lost. Strategist simplification (01) is major but moves later because emergency exits and judge robustness are hard safety invariants that must be machine-enforced first.
+### Phase 4 — Infrastructure expansion
+12. **07**: AWS deploy / CI/CD
+13. **08**: Multi-wallet (Phantom/Solana/EVM read-only + reconciliation)
+
+> **Why this order differs from filenames:** The true blocker for the policy pivot is "anti-churn + continuity + clean replans," not just risk math. Learning Book isolation is trust infrastructure, not a feature — without it, experiments muddy PnL and interpretability is lost. Strategist simplification (01) is major but moves later because emergency exits and judge robustness are hard safety invariants that must be machine-enforced first. After those are green, Phase 1 policy integration (18) is mandatory; Phase 2 model integration (19) is optional and reversible.
 
 ## Backlog Runbooks (_)
 - [_emergency-exit-runbook-judge-loop-design.md](_emergency-exit-runbook-judge-loop-design.md): Judge/strategist loop design gaps (non-test items).
 - [_synthetic-data-testing.md](_synthetic-data-testing.md): Synthetic data generation for deterministic trigger testing.
 - [later/_comp-audit-risk-followups.md](later/_comp-audit-risk-followups.md): Follow-ups from comp-audit-risk-core.
 - ~~later/_policy-pivot-phase0.md~~: No-change replan guard and telemetry. → Completed, see [X-policy-pivot-phase0.md](X-policy-pivot-phase0.md).
-- [later/_judge-unification.md](later/_judge-unification.md): Unified judge service with heuristics context.
+- [later/_judge-unification.md](later/_judge-unification.md): Legacy implementation sketch for unified judge service. Attribution contract now defined in [20-judge-attribution-rubric.md](20-judge-attribution-rubric.md).
 - [later/_strategist-tool-loop.md](later/_strategist-tool-loop.md): Read-only tool-call loop for strategist.
 - [later/_scalper-mode.md](later/_scalper-mode.md): Full scalper mode feature set and comparison tooling.
 - [later/_ui-unification.md](later/_ui-unification.md): Optional UI unification enhancements.
 - [later/_ui-config-cleanup.md](later/_ui-config-cleanup.md): UI config cleanup after comp-audit prompt changes.
-- [later/_policy-integration.md](later/_policy-integration.md): Deterministic target-weight engine (Phase 1 policy pivot). **Deferred until trust stack is green.**
-- [later/_model-integration.md](later/_model-integration.md): Directional probability source / ML p_hat (Phase 2 policy pivot). **Deferred until policy engine is stable.**
+- ~~[later/_policy-integration.md](later/_policy-integration.md)~~: Superseded by [18-phase1-deterministic-policy-integration.md](18-phase1-deterministic-policy-integration.md).
+- ~~[later/_model-integration.md](later/_model-integration.md)~~: Superseded by [19-phase2-model-phat-integration.md](19-phase2-model-phat-integration.md).
 
 ## Completed Runbooks (X)
 - [X-emergency-exit-runbook-same-bar-dedup.md](X-emergency-exit-runbook-same-bar-dedup.md): Same-bar competition and deduplication priority.

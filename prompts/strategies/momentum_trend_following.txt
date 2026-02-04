@@ -35,6 +35,7 @@ Trigger Composition Requirements:
    - Allow retracement of 30-40% of gains before trailing kicks in
    - Emergency exit only on structural trend break (lower lows/highs)
 6. **Graduated De-Risk (use appropriately)**:
+   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
    - risk_reduce (partial exit): Use when trend is losing momentum but structure intact
      * RSI divergence forming while still in uptrend
      * Approaching major resistance with decreasing volume

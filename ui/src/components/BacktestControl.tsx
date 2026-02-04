@@ -15,6 +15,7 @@ import { BacktestHistoryPanel } from './BacktestHistoryPanel';
 import { PromptEditor } from './PromptEditor';
 import { AggressiveSettingsPanel } from './AggressiveSettingsPanel';
 import { PlanningSettingsPanel } from './PlanningSettingsPanel';
+import { LearningBookPanel } from './LearningBookPanel';
 
 export function BacktestControl() {
   const defaultConfig: BacktestConfig = {
@@ -587,6 +588,14 @@ export function BacktestControl() {
                 onChange={setConfig}
                 disabled={isRunning}
                 showDayBoundaryReplan
+              />
+            )}
+
+            {config.strategy === 'llm_strategist' && (
+              <LearningBookPanel
+                config={config}
+                onChange={setConfig}
+                disabled={isRunning}
               />
             )}
 

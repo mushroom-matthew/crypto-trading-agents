@@ -569,6 +569,7 @@ async def persist_results_activity(
                 "candles_processed",
                 "config",
                 "strategy",
+                "summary",
             ):
                 if results.get(key) is not None:
                     results_payload[key] = results[key]

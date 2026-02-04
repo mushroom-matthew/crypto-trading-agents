@@ -62,6 +62,20 @@ def _build_results_payload(results: Dict[str, Any]) -> Dict[str, Any]:
             "avg_loss": payload.get("avg_loss"),
             "profit_factor": payload.get("profit_factor"),
         }
+    # Fallback: if still all-null, try the "summary" sub-dict
+    summary_sub = payload.get("summary") or {}
+    if summary_sub and not any(v is not None for v in results_summary.values()):
+        results_summary = {
+            "final_equity": summary_sub.get("final_equity"),
+            "equity_return_pct": summary_sub.get("equity_return_pct"),
+            "sharpe_ratio": summary_sub.get("sharpe_ratio"),
+            "max_drawdown_pct": summary_sub.get("max_drawdown_pct"),
+            "win_rate": summary_sub.get("win_rate"),
+            "total_trades": summary_sub.get("total_trades"),
+            "avg_win": summary_sub.get("avg_win"),
+            "avg_loss": summary_sub.get("avg_loss"),
+            "profit_factor": summary_sub.get("profit_factor"),
+        }
     payload["results_summary"] = results_summary
     payload.setdefault("summary", results_summary)
     if "plan_log" not in payload:

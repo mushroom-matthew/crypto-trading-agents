@@ -37,6 +37,7 @@ Trigger Composition Requirements:
    - Momentum exits: trail with tight 0.5x ATR stop
    - Time-based: exit if no movement within 4-8 bars
 6. **Graduated De-Risk (use selectively - maintain exposure)**:
+   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
    - risk_reduce (partial exit): Use to lock in gains while maintaining upside
      * Position up 1%+ but momentum indicators weakening
      * Approaching resistance with 50%+ of position in profit

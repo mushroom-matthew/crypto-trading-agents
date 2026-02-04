@@ -36,6 +36,7 @@ Trigger Composition Requirements:
    - Take partial profits at 50% reversion, full at mean
    - Tight stops: 1-1.5x ATR (mean reversion fails fast or works quickly)
 6. **Graduated De-Risk (use appropriately)**:
+   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
    - risk_reduce (partial exit): Use when reversion is working but losing momentum
      * Price reached 50% of the way to mean - lock in partial gains
      * Volume declining as price approaches target

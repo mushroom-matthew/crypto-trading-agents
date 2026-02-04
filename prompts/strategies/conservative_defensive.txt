@@ -37,6 +37,7 @@ Trigger Composition Requirements:
    - Trailing stops at 1x ATR (tight)
    - Exit on any sign of trend weakness
 6. **Graduated De-Risk (use liberally for capital preservation)**:
+   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
    - risk_reduce (partial exit): Use early at first sign of weakness
      * Any momentum divergence or volume decline
      * Approaching any resistance level, even minor

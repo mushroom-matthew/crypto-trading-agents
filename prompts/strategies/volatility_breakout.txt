@@ -37,6 +37,7 @@ Trigger Composition Requirements:
    - Failed breakout: quick stop if price reverses back into range
    - Trail winners: use ATR-based trailing stop (2x ATR from high)
 6. **Graduated De-Risk (use decisively on failed breakouts)**:
+   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
    - risk_reduce (partial exit): Use when breakout momentum fading
      * ATR declining from peak expansion level
      * Volume burst exhausted, price stalling at new level

@@ -40,6 +40,7 @@ Trigger Composition Requirements:
    - Time-based: consider exit if no follow-through within 2-3 bars
    - Emergency: fast EMA cross against position
 7. **Graduated De-Risk (use decisively - scalpers don't hold losers)**:
+   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
    - risk_reduce (partial exit): Use at first sign of stall
      * Position near VWAP target but momentum fading
      * Volume burst exhausted, no follow-through
