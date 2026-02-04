@@ -169,7 +169,7 @@ export function BacktestControl() {
     enabled: backtest?.status === 'completed',
   });
 
-  const { data: tradeSets = [] } = useQuery({
+  const { data: tradeSets = [] } = useQuery<TradeSet[]>({
     queryKey: ['tradeSets', selectedRun],
     queryFn: () => backtestAPI.getTradeSets(selectedRun!),
     enabled: backtest?.status === 'completed',
@@ -1025,7 +1025,7 @@ export function BacktestControl() {
                                         </tr>
                                       </thead>
                                       <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                                        {ts.legs.map((leg) => (
+                                        {ts.legs.map((leg: TradeLeg) => (
                                           <tr key={leg.leg_id}>
                                             <td className="py-1 pr-2 text-gray-500">{formatDateTime(leg.timestamp)}</td>
                                             <td className="py-1 pr-2">
