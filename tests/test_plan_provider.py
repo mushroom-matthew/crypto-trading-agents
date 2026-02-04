@@ -22,7 +22,7 @@ class DummyLLMClient:
     def __init__(self, plan: StrategyPlan) -> None:
         self.plan = plan
 
-    def generate_plan(self, llm_input, prompt_template=None):
+    def generate_plan(self, llm_input, prompt_template=None, **kwargs):
         return self.plan.model_copy(deep=True)
 
 

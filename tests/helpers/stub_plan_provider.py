@@ -40,6 +40,7 @@ class AlwaysLongPlanProvider:
         plan_date: datetime,
         llm_input: Any,
         prompt_template: Optional[str] = None,
+        use_vector_store: bool = False,
         event_ts: Optional[datetime] = None,
         emit_events: bool = True,
     ) -> StrategyPlan:

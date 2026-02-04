@@ -374,6 +374,13 @@ JSON:
             buy_count=buy_count,
             sell_count=sell_count,
             symbols=', '.join(symbols),
+            fill_details=strategy_context.get("fill_details", "No fill details available."),
+            trigger_attempts=strategy_context.get("trigger_attempts", "No trigger attempt data."),
+            active_triggers=strategy_context.get("active_triggers", "No active trigger data."),
+            position_quality=strategy_context.get("position_quality", "No position quality data."),
+            market_structure=strategy_context.get("market_structure", "No market structure data."),
+            factor_exposures=strategy_context.get("factor_exposures", "No factor exposure data."),
+            risk_state=strategy_context.get("risk_state", "No risk state data."),
         )
         
         try:

@@ -12,7 +12,7 @@ def test_signal_roundtrip(monkeypatch, tmp_path):
     mcp_app.configure_event_store(store)
     event_emitter.set_event_store(store)
 
-    client = TestClient(mcp_app.app)
+    client = TestClient(mcp_app.app.sse_app())
 
     ts = int(datetime.now(timezone.utc).timestamp())
     payload = {"symbol": "BTC/USD", "price": 12345.0, "ts": ts}

@@ -720,6 +720,7 @@ def test_conflicting_signal_policy_reverse_flips():
         exit_rule="",
         category="trend_continuation",
         confidence_grade="A",
+        stop_loss_pct=5.0,
     )
     plan = _plan_with_triggers([trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})

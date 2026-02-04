@@ -15,29 +15,31 @@ logger = logging.getLogger(__name__)
 class ContextManager:
     """Manages conversation context with token-based sliding windows and summarization."""
     
+    _UNSET = object()
+
     def __init__(
         self,
         model: str = "gpt-4o",
         max_tokens: int = 8000,
         summary_threshold: int = 6000,
         min_recent_messages: int = 5,
-        openai_client: openai.OpenAI | None = None
+        openai_client: openai.OpenAI | None = _UNSET
     ):
         """Initialize context manager.
-        
+
         Args:
             model: Model name for token counting and summarization
             max_tokens: Maximum tokens to maintain in conversation
             summary_threshold: Token count that triggers summarization
             min_recent_messages: Minimum recent messages to always keep
-            openai_client: OpenAI client for summarization
+            openai_client: OpenAI client for summarization (pass None to disable)
         """
         self.model = model
         self.max_tokens = max_tokens
         self.summary_threshold = summary_threshold
         self.min_recent_messages = min_recent_messages
         init_langfuse()
-        self.openai_client = openai_client or get_llm_client()
+        self.openai_client = get_llm_client() if openai_client is self._UNSET else openai_client
         
         # Initialize tokenizer
         try:

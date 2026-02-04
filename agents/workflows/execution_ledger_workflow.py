@@ -279,7 +279,6 @@ class ExecutionLedgerWorkflow:
         # Emit position update event for ops telemetry
         try:
             from agents.event_emitter import emit_event  # type: ignore
-            from agents.wallet_provider import get_wallet_provider, PaperWalletProvider  # type: ignore
 
             unrealized_pnl = float(self.get_unrealized_pnl_decimal())
             payload = {

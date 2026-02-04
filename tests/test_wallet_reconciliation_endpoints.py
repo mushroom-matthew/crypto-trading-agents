@@ -1,5 +1,6 @@
 """Tests for wallet reconciliation API endpoints."""
 
+import contextlib
 import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock, patch
@@ -42,18 +43,17 @@ def mock_balance():
 
 def test_list_wallets_empty(client):
     """Test listing wallets when none exist."""
-    with patch("ops_api.routers.wallets._db.session") as mock_session_ctx:
-        # Mock empty wallet query
-        mock_session = AsyncMock()
-        mock_scalars = Mock()
-        mock_scalars.all.return_value = []
+    mock_session = AsyncMock()
+    mock_result = Mock()
+    mock_result.scalars.return_value.all.return_value = []
 
-        mock_result = AsyncMock()
-        mock_result.scalars.return_value = mock_scalars
+    mock_session.execute = AsyncMock(return_value=mock_result)
 
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session_ctx.return_value.__aenter__.return_value = mock_session
+    @contextlib.asynccontextmanager
+    async def _fake_session():
+        yield mock_session
 
+    with patch("ops_api.routers.wallets._db.session", _fake_session):
         response = client.get("/wallets")
 
         assert response.status_code == 200
@@ -62,31 +62,34 @@ def test_list_wallets_empty(client):
 
 def test_list_wallets_with_data(client, mock_wallet, mock_balance):
     """Test listing wallets with balance data."""
-    with patch("ops_api.routers.wallets._db.session") as mock_session_ctx:
-        mock_session = AsyncMock()
+    mock_session = AsyncMock()
 
-        # First query returns wallet
-        wallet_scalars = Mock()
-        wallet_scalars.all.return_value = [mock_wallet]
-        wallet_result = AsyncMock()
-        wallet_result.scalars.return_value = wallet_scalars
+    # First query returns wallet
+    wallet_result = Mock()
+    wallet_result.scalars.return_value.all.return_value = [mock_wallet]
 
-        # Second query returns balance
-        balance_scalars = Mock()
-        balance_scalars.all.return_value = [mock_balance]
-        balance_result = AsyncMock()
-        balance_result.scalars.return_value = balance_scalars
+    # Second query returns balance
+    balance_result = Mock()
+    balance_result.scalars.return_value.all.return_value = [mock_balance]
 
-        # Mock execute to return different results
-        async def mock_execute(query):
-            # Simple heuristic: balance queries have .where()
-            if hasattr(query, "whereclause"):
-                return balance_result
+    # Mock execute to return different results
+    call_count = 0
+
+    async def mock_execute(query):
+        nonlocal call_count
+        call_count += 1
+        # First call is the wallet query, second is the balance query
+        if call_count == 1:
             return wallet_result
+        return balance_result
 
-        mock_session.execute = AsyncMock(side_effect=mock_execute)
-        mock_session_ctx.return_value.__aenter__.return_value = mock_session
+    mock_session.execute = mock_execute
 
+    @contextlib.asynccontextmanager
+    async def _fake_session():
+        yield mock_session
+
+    with patch("ops_api.routers.wallets._db.session", _fake_session):
         response = client.get("/wallets")
 
         assert response.status_code == 200

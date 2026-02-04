@@ -89,7 +89,7 @@ class StubPlanProvider:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_plan(self, run_id, plan_date, llm_input, prompt_template=None, event_ts=None, emit_events=True):
+    def get_plan(self, run_id, plan_date, llm_input, prompt_template=None, use_vector_store=False, event_ts=None, emit_events=True):
         return _base_plan(run_id)
 
     def _cache_path(self, run_id, plan_date, llm_input):
