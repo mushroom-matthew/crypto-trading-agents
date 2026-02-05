@@ -31,7 +31,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - ~~15-min-hold-exit-timing-validation.md~~: Validate min_hold vs exit timeframe; track min_hold_binding_pct. → Completed, see [X-15-min-hold-exit-timing-validation.md](X-15-min-hold-exit-timing-validation.md).
 - ~~16-judge-stale-snapshot-skip.md~~: Skip or adapt judge evals when snapshot is unchanged since last eval. → Completed, see [X-judge-stale-snapshot-skip.md](X-judge-stale-snapshot-skip.md).
 - ~~17-graduated-derisk-taxonomy.md~~: Exit taxonomy & partial exit ladder. → Completed, see [X-17-graduated-derisk-taxonomy.md](X-17-graduated-derisk-taxonomy.md).
-- [18-phase1-deterministic-policy-integration.md](18-phase1-deterministic-policy-integration.md): Phase 1 policy pivot contract — deterministic, trigger-gated target-weight policy (mandatory). **Core policy engine COMPLETE** (schemas, policy_engine.py, integration layer, 52 tests). Backtest runner integration deferred.
+- [18-phase1-deterministic-policy-integration.md](18-phase1-deterministic-policy-integration.md): Phase 1 policy pivot contract — deterministic, trigger-gated target-weight policy (mandatory). **COMPLETE** (schemas, policy_engine.py, integration layer, backtest runner wiring, 52 tests).
 - [19-phase2-model-phat-integration.md](19-phase2-model-phat-integration.md): Phase 2 contract — `p_hat` as signal source only (optional/reversible).
 - [20-judge-attribution-rubric.md](20-judge-attribution-rubric.md): Judge attribution contract — single-bucket blame model and replan/policy-adjust action gating.
 

@@ -242,7 +242,10 @@ git commit -m "Policy pivot phase1: deterministic trigger-gated policy contract"
   - Created `agents/strategies/policy_trigger_integration.py` as opt-in integration layer
   - Added `policy_config` dict field to StrategyPlan schema (backward compatible)
   - Created 4 test files with 52 tests covering all acceptance criteria
-  - DEFERRED: Full backtest runner integration (use PolicyTriggerIntegration wrapper for now)
+- 2026-02-05: Backtest runner integration complete.
+  - Modified `backtesting/llm_strategist_runner.py` to create PolicyTriggerIntegration when plan has policy_config
+  - Policy decision records collected during simulation and included in summary output
+  - Policy telemetry available in backtest results: policy_decision_records, policy_summary, policy_enabled
 
 ## Test Evidence (append results before commit)
 

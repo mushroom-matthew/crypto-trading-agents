@@ -34,6 +34,8 @@ from agents.strategies.risk_engine import RiskEngine, RiskProfile
 from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, ConflictResolution, ExitBindingMode, Order, TriggerEngine
+from agents.strategies.policy_trigger_integration import PolicyTriggerIntegration
+from schemas.policy import PolicyConfig, PolicyDecisionRecord, get_policy_config_from_plan
 from backtesting.dataset import load_ohlcv
 from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_transport
 from services.judge_feedback_service import JudgeFeedbackService
@@ -666,6 +668,11 @@ class LLMStrategistBacktester:
         self._all_trigger_evaluation_samples: List[Dict[str, Any]] = []
         # Vector store for trigger examples
         self.use_trigger_vector_store = use_trigger_vector_store
+
+        # Policy engine integration (Phase 1 deterministic policy)
+        self.policy_integration: PolicyTriggerIntegration | None = None
+        self._policy_decision_records: List[Dict[str, Any]] = []
+        self._policy_summary_by_day: Dict[str, Dict[str, Any]] = {}
 
         # Progress tracking callback for real-time updates
         self.progress_callback = progress_callback
@@ -2767,6 +2774,23 @@ class LLMStrategistBacktester:
                         conflicting_signal_policy=self.conflicting_signal_policy,
                     )
                 self.current_trigger_engine = trigger_engine
+
+                # Create policy integration if plan has policy_config
+                policy_config = get_policy_config_from_plan(current_plan)
+                if policy_config is not None:
+                    self.policy_integration = PolicyTriggerIntegration(
+                        plan=current_plan,
+                        risk_engine=risk_engine,
+                        trigger_engine=trigger_engine,
+                        policy_config=policy_config,
+                    )
+                    logger.info(
+                        "Policy integration enabled for plan %s (tau=%.2f, w_max=%.2f)",
+                        current_plan.plan_id, policy_config.tau, policy_config.w_max
+                    )
+                else:
+                    self.policy_integration = None
+
                 llm_meta = getattr(current_plan, "_llm_meta", {}) or {}
                 self.llm_generation_by_day[day_key].append(llm_meta)
                 llm_meta_compact = {
@@ -2935,14 +2959,34 @@ class LLMStrategistBacktester:
                         portfolio_state.cash,
                     )
                     structure_snapshot = market_structure_briefs.get(pair)
-                    orders, blocked_entries = trigger_engine.on_bar(
-                        bar,
-                        indicator,
-                        portfolio_state,
-                        asset_state,
-                        market_structure=structure_snapshot,
-                        position_meta=self.portfolio.position_meta,
-                    )
+
+                    # Use policy integration if available, otherwise direct trigger engine
+                    if self.policy_integration is not None:
+                        policy_result = self.policy_integration.on_bar(
+                            bar=bar,
+                            indicator=indicator,
+                            portfolio=portfolio_state,
+                            asset_state=asset_state,
+                            market_structure=structure_snapshot,
+                            position_meta=self.portfolio.position_meta,
+                            trade_set_id=run_id,
+                        )
+                        orders = policy_result.orders
+                        blocked_entries = policy_result.blocks
+                        # Collect policy decision record
+                        self._policy_decision_records.append(
+                            policy_result.decision_record.to_telemetry_dict()
+                        )
+                    else:
+                        orders, blocked_entries = trigger_engine.on_bar(
+                            bar,
+                            indicator,
+                            portfolio_state,
+                            asset_state,
+                            market_structure=structure_snapshot,
+                            position_meta=self.portfolio.position_meta,
+                        )
+
                     current_load = len(orders) + (len(blocked_entries) if blocked_entries else 0)
                     fills_before = len(self.portfolio.fills)
                     executed_records = self._process_orders_with_limits(
@@ -3085,6 +3129,11 @@ class LLMStrategistBacktester:
             # Debug trigger evaluation samples (if enabled)
             "trigger_evaluation_samples": self._all_trigger_evaluation_samples if self.debug_trigger_sample_rate > 0 else None,
             "trigger_evaluation_sample_count": len(self._all_trigger_evaluation_samples) if self.debug_trigger_sample_rate > 0 else 0,
+            # Policy engine telemetry (Phase 1 deterministic policy)
+            "policy_enabled": self.policy_integration is not None,
+            "policy_decision_records": self._policy_decision_records if self._policy_decision_records else None,
+            "policy_decision_count": len(self._policy_decision_records),
+            "policy_summary": self.policy_integration.get_decision_summary() if self.policy_integration else None,
         }
         # Serialize trade_log with datetime→isoformat conversion, excluding market_structure_entry to avoid bloat
         serialized_trade_log = []
