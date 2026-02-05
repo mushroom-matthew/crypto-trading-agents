@@ -81,6 +81,7 @@ class AssetState(SerializableModel):
     indicators: List[IndicatorSnapshot]
     trend_state: Literal["uptrend", "downtrend", "sideways"]
     vol_state: Literal["low", "normal", "high", "extreme"]
+    regime_assessment: "RegimeAssessment | None" = None
 
 
 class PortfolioState(SerializableModel):
@@ -200,6 +201,34 @@ class PositionSizingRule(SerializableModel):
     notional: float | None = Field(default=None, ge=0.0)
 
 
+class RegimeAlert(SerializableModel):
+    """Condition that would trigger strategy re-assessment."""
+
+    indicator: str
+    threshold: float
+    direction: Literal["above", "below", "crosses"]
+    symbol: str
+    interpretation: str
+    priority: Literal["high", "medium", "low"] = "medium"
+
+
+class RegimeAssessment(SerializableModel):
+    """Pre-computed regime classification from deterministic classifier."""
+
+    regime: Literal["bull", "bear", "range", "volatile", "uncertain"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    primary_signals: List[str] = Field(default_factory=list)
+    conflicting_signals: List[str] = Field(default_factory=list)
+
+
+class SizingHint(SerializableModel):
+    """Advisory sizing suggestion from LLM (not enforced)."""
+
+    symbol: str
+    suggested_risk_pct: float = Field(ge=0.0)
+    rationale: str
+
+
 class StrategyPlan(SerializableModel):
     """Complete plan payload returned by the LLM."""
 
@@ -209,9 +238,14 @@ class StrategyPlan(SerializableModel):
     valid_until: datetime
     global_view: Optional[str] = None
     regime: Literal["bull", "bear", "range", "high_vol", "mixed"]
-    triggers: List[TriggerCondition]
-    risk_constraints: RiskConstraint
+    stance: Literal["active", "defensive", "wait"] = "active"
+    triggers: List[TriggerCondition] = Field(default_factory=list)
+    risk_constraints: RiskConstraint | None = None
     sizing_rules: List[PositionSizingRule] = Field(default_factory=list)
+    regime_assessment: RegimeAssessment | None = None
+    regime_alerts: List[RegimeAlert] = Field(default_factory=list)
+    sizing_hints: List[SizingHint] = Field(default_factory=list)
+    rationale: str | None = None
     max_trades_per_day: int | None = Field(default=None, ge=0)
     min_trades_per_day: int | None = Field(default=None, ge=0)
     max_triggers_per_symbol_per_day: int | None = Field(default=None, ge=0)
@@ -219,3 +253,7 @@ class StrategyPlan(SerializableModel):
     allowed_symbols: List[str] = Field(default_factory=list)
     allowed_directions: List[TriggerDirection] = Field(default_factory=list)
     allowed_trigger_categories: List[TriggerCategory] = Field(default_factory=list)
+
+
+# Rebuild model for forward references
+AssetState.model_rebuild()

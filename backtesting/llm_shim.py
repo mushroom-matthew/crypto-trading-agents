@@ -119,16 +119,35 @@ def build_strategist_shim_plan(llm_input_json: str) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     regime = _normalize_regime(llm_payload)
 
+    # Build regime assessment from asset states if available
+    regime_assessment = _extract_regime_assessment(llm_payload)
+
     plan = {
         "generated_at": _isoformat(now),
         "valid_until": _isoformat(now + timedelta(hours=24)),
         "regime": regime,
+        "stance": "active",  # Shim always returns active stance
         "global_view": "LLM shim response for pipeline validation.",
         "risk_constraints": risk_constraints,
         "sizing_rules": _build_sizing_rules(symbols, risk_constraints),
         "triggers": _build_triggers(symbols),
     }
+
+    # Include regime assessment if available
+    if regime_assessment:
+        plan["regime_assessment"] = regime_assessment
+
     return plan
+
+
+def _extract_regime_assessment(llm_payload: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Extract regime assessment from asset states if available."""
+    assets = llm_payload.get("assets") or []
+    for asset in assets:
+        regime_assessment = asset.get("regime_assessment")
+        if regime_assessment:
+            return regime_assessment
+    return None
 
 
 def build_judge_shim_feedback(summary: Dict[str, Any], trade_metrics: Any | None = None) -> Dict[str, Any]:

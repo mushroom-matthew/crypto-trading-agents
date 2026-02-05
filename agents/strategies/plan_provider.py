@@ -247,21 +247,14 @@ class StrategyPlanProvider:
         derived_cap = None
         derived_trigger_cap = None
         cap_inputs: dict[str, float] | None = None
-        if plan.risk_constraints.max_daily_risk_budget_pct is not None:
+        if plan.risk_constraints is not None and plan.risk_constraints.max_daily_risk_budget_pct is not None:
             budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
-            # Allow higher per-trade risk up to twice the configured cap, bounded by the daily budget.
-            if plan.risk_constraints.max_position_risk_pct < budget_pct:
-                boosted = min(budget_pct, plan.risk_constraints.max_position_risk_pct * 6)
-                plan.risk_constraints.max_position_risk_pct = boosted
-            # Ensure sizing rules reflect the boosted per-trade risk cap so trades consume more budget.
-            for rule in plan.sizing_rules:
-                if not rule.target_risk_pct or rule.target_risk_pct < plan.risk_constraints.max_position_risk_pct:
-                    rule.target_risk_pct = plan.risk_constraints.max_position_risk_pct
+            max_position_risk = plan.risk_constraints.max_position_risk_pct or 0
             # Use the smallest non-zero sizing target as per-trade risk proxy; fall back to max_position_risk_pct.
             target_risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
-            per_trade_risk = min(target_risks) if target_risks else plan.risk_constraints.max_position_risk_pct
-            if plan.risk_constraints.max_position_risk_pct > 0:
-                per_trade_risk = min(per_trade_risk, plan.risk_constraints.max_position_risk_pct)
+            per_trade_risk = min(target_risks) if target_risks else max_position_risk
+            if max_position_risk > 0:
+                per_trade_risk = min(per_trade_risk, max_position_risk)
             if per_trade_risk and per_trade_risk > 0:
                 per_trade_risk_for_cap = min(per_trade_risk, budget_pct) if budget_pct else per_trade_risk
                 if legacy_cap_floor:
@@ -406,7 +399,7 @@ class StrategyPlanProvider:
                 "max_trades_per_day": plan.max_trades_per_day,
                 "min_trades_per_day": plan.min_trades_per_day,
                 "max_triggers_per_symbol_per_day": plan.max_triggers_per_symbol_per_day,
-                "risk_constraints": plan.risk_constraints.model_dump(),
+                "risk_constraints": plan.risk_constraints.model_dump() if plan.risk_constraints else None,
                 "context_flags": _context_flags(llm_input),
                 "source": (self.last_generation_info or {}).get("source"),
                 "llm_meta": self.last_generation_info,

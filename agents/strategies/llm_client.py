@@ -284,7 +284,8 @@ class LLMClient:
         triggers = parsed.get("triggers")
         if triggers is not None and not isinstance(triggers, list):
             raise ValueError("Strategist output 'triggers' must be a list")
-        required_keys = {"risk_constraints", "sizing_rules"}
+        # Only sizing_rules is strictly required - risk_constraints now optional (user config is authoritative)
+        required_keys = {"sizing_rules"}
         missing = sorted(key for key in required_keys if key not in parsed)
         if missing:
             raise ValueError(f"Strategist output missing keys: {', '.join(missing)}")
@@ -385,9 +386,20 @@ class LLMClient:
     @staticmethod
     @lru_cache(1)
     def _default_prompt() -> str:
-        """Load bundled strategist prompt when no template/env override is provided."""
+        """Load bundled strategist prompt when no template/env override is provided.
 
-        prompt_path = Path(__file__).resolve().parents[2] / "prompts" / "llm_strategist_prompt.txt"
+        Prompt selection via STRATEGIST_PROMPT env var:
+        - "simple" -> llm_strategist_simple.txt (40-line simplified prompt)
+        - "full" or unset -> llm_strategist_prompt.txt (legacy full prompt)
+        """
+        prompt_name = os.environ.get("STRATEGIST_PROMPT", "full").lower()
+        prompts_dir = Path(__file__).resolve().parents[2] / "prompts"
+
+        if prompt_name == "simple":
+            prompt_path = prompts_dir / "llm_strategist_simple.txt"
+        else:
+            prompt_path = prompts_dir / "llm_strategist_prompt.txt"
+
         if prompt_path.exists():
             return prompt_path.read_text(encoding="utf-8").strip()
         return ""

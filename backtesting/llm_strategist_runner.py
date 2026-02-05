@@ -730,9 +730,13 @@ class LLMStrategistBacktester:
         self.last_flat_time_by_symbol: Dict[str, datetime] = {}
         self.last_flat_trigger_by_symbol: Dict[str, str] = {}
         self.current_trigger_engine: TriggerEngine | None = None
+        self.sizing_targets: Dict[str, float] = {}
         # Daily loss anchoring: set once per day at day boundary, never refreshed intraday.
         self.daily_loss_anchor_by_day: Dict[str, float] = {}
         self.llm_generation_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        # Stance tracking: track active/defensive/wait distribution
+        self.stance_distribution_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: {"active": 0, "defensive": 0, "wait": 0})
+        self.stance_events: List[Dict[str, Any]] = []
         logger.debug(
             "Initialized backtester pairs=%s timeframes=%s start=%s end=%s plan_interval_hours=%.2f",
             self.pairs,
@@ -2338,7 +2342,7 @@ class LLMStrategistBacktester:
         plan_log: List[Dict[str, Any]] = []
         latest_prices: Dict[str, float] = {symbol: 0.0 for symbol in self.pairs}
         daily_reports: List[Dict[str, Any]] = []
-        sizing_targets: Dict[str, float] = {}
+        self.sizing_targets = {}
         session_flattened: set[str] = set()
 
         active_assets: Dict[str, AssetState] = {}
@@ -2636,17 +2640,31 @@ class LLMStrategistBacktester:
                     current_plan = self._apply_plan_overrides(current_plan)
                     current_plan = self._apply_trigger_budget(current_plan)
                     current_plan, stripped_by_judge = self._strip_judge_constrained_triggers(current_plan)
+                    # Track stance distribution from plan
+                    plan_stance = getattr(current_plan, "stance", "active")
+                    day_key = ts.strftime("%Y-%m-%d")
+                    self.stance_distribution_by_day[day_key][plan_stance] += 1
                     # Directive 6: accept empty trigger plans as a "wait" stance
-                    wait_stance = False
+                    wait_stance = plan_stance == "wait" or (not current_plan.triggers)
                     if stripped_by_judge and not current_plan.triggers:
                         wait_stance = True
                         logger.info(
                             "Wait stance at %s: all %d triggers stripped by judge constraints",
                             ts.isoformat(), len(stripped_by_judge),
                         )
+                    if wait_stance:
+                        self.stance_events.append({
+                            "timestamp": ts.isoformat(),
+                            "day": day_key,
+                            "stance": plan_stance,
+                            "trigger_count": len(current_plan.triggers),
+                            "stripped_count": len(stripped_by_judge) if stripped_by_judge else 0,
+                            "rationale": getattr(current_plan, "rationale", None),
+                        })
                         self._add_event("wait_stance", {
                             "timestamp": ts.isoformat(),
-                            "stripped_count": len(stripped_by_judge),
+                            "stance": plan_stance,
+                            "stripped_count": len(stripped_by_judge) if stripped_by_judge else 0,
                         })
                     trigger_diff = self._diff_plan_triggers(previous_plan, current_plan)
                     is_replan = judge_triggered_replan or (is_new_day and not is_initial_plan)
@@ -2681,7 +2699,7 @@ class LLMStrategistBacktester:
                 if plan_rebuild:
                     if not is_initial_plan:
                         self.replans_by_day[day_key] += 1
-                    sizing_targets = {
+                    self.sizing_targets = {
                         rule.symbol: (rule.target_risk_pct or self.active_risk_limits.max_position_risk_pct)
                         for rule in current_plan.sizing_rules
                     }
@@ -3045,6 +3063,11 @@ class LLMStrategistBacktester:
                 if baseline_candidate.exists():
                     baseline_summary_path = baseline_candidate
         run_summary = write_run_summary(daily_reports, run_summary_path, baseline_summary_path=baseline_summary_path)
+        # Aggregate stance distribution across all days
+        total_stance_distribution = {"active": 0, "defensive": 0, "wait": 0}
+        for day_stances in self.stance_distribution_by_day.values():
+            for stance, count in day_stances.items():
+                total_stance_distribution[stance] = total_stance_distribution.get(stance, 0) + count
         summary = {
             "final_equity": final_equity,
             "equity_return_pct": equity_return_pct,
@@ -3055,6 +3078,10 @@ class LLMStrategistBacktester:
             "walk_away_enabled": self.walk_away_enabled,
             "walk_away_events": self.walk_away_events,
             "walk_away_days_triggered": list(self.walk_away_triggered_days),
+            # Stance distribution tracking
+            "stance_distribution": total_stance_distribution,
+            "stance_distribution_by_day": dict(self.stance_distribution_by_day),
+            "stance_events": self.stance_events,
             # Debug trigger evaluation samples (if enabled)
             "trigger_evaluation_samples": self._all_trigger_evaluation_samples if self.debug_trigger_sample_rate > 0 else None,
             "trigger_evaluation_sample_count": len(self._all_trigger_evaluation_samples) if self.debug_trigger_sample_rate > 0 else 0,
@@ -3279,9 +3306,7 @@ class LLMStrategistBacktester:
         notional = max(order.quantity * order.price, 0.0)
         if notional <= 0:
             return 0.0
-        target_risk_pct = None
-        if hasattr(self, "sizing_targets"):
-            target_risk_pct = self.sizing_targets.get(order.symbol)
+        target_risk_pct = (self.sizing_targets or {}).get(order.symbol)
         if target_risk_pct is None:
             target_risk_pct = self.active_risk_limits.max_position_risk_pct or 0.0
         # Adaptive boost: based on same-day usage only (no cross-day carry-over).
@@ -3316,8 +3341,8 @@ class LLMStrategistBacktester:
             return
         entry["blocks"][symbol] += 1
 
-    def _risk_budget_summary(self, day_key: str) -> Dict[str, float] | None:
-        entry = self.daily_risk_budget_state.pop(day_key, None)
+    def _risk_budget_summary(self, day_key: str, *, pop: bool = True) -> Dict[str, float] | None:
+        entry = self.daily_risk_budget_state.pop(day_key, None) if pop else self.daily_risk_budget_state.get(day_key)
         if not entry:
             return None
         budget = entry.get("budget_abs", 0.0)
@@ -3637,6 +3662,8 @@ class LLMStrategistBacktester:
             "llm_data_quality": llm_data_quality,
             "replan_rate_per_day": replans_count,
             "no_change_replan_suppressed_count": suppressed_replans,
+            # Stance distribution for the day
+            "stance_distribution": dict(self.stance_distribution_by_day.get(day_key, {})),
         }
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
@@ -4785,7 +4812,7 @@ class LLMStrategistBacktester:
                 summary["market_structure"] = self.last_slot_report.get("market_structure", {}) or {}
             if self.latest_factor_exposures:
                 summary["factor_exposures"] = self.latest_factor_exposures
-            risk_budget = self._risk_budget_summary(day_key) or {}
+            risk_budget = self._risk_budget_summary(day_key, pop=False) or {}
             if not risk_budget:
                 risk_budget = self._risk_budget_fallback(
                     snapshot.get("anchor_equity") or snapshot.get("equity"),

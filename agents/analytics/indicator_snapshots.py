@@ -690,15 +690,26 @@ def _vol_from_snapshot(snapshot: IndicatorSnapshot) -> str:
     return "extreme"
 
 
-def build_asset_state(symbol: str, snapshots: Iterable[IndicatorSnapshot]) -> AssetState:
+def build_asset_state(
+    symbol: str,
+    snapshots: Iterable[IndicatorSnapshot],
+    include_regime_assessment: bool = False,
+) -> AssetState:
     snapshot_list = list(snapshots)
     if not snapshot_list:
         raise ValueError("asset state requires at least one snapshot")
     primary = snapshot_list[0]
-    # TODO: attach MarketStructureTelemetry alongside indicator snapshots when structure schema is plumbed into LLM inputs.
+
+    # Optionally compute regime assessment using deterministic classifier
+    regime_assessment = None
+    if include_regime_assessment:
+        from trading_core.regime_classifier import classify_regime
+        regime_assessment = classify_regime(primary)
+
     return AssetState(
         symbol=symbol,
         indicators=snapshot_list,
         trend_state=_trend_from_snapshot(primary),  # type: ignore[arg-type]
         vol_state=_vol_from_snapshot(primary),  # type: ignore[arg-type]
+        regime_assessment=regime_assessment,
     )

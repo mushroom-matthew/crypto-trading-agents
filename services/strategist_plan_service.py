@@ -74,7 +74,8 @@ class StrategistPlanService:
             object.__setattr__(plan, "_policy_max_trades_per_day", plan.max_trades_per_day)
         if not hasattr(plan, "_policy_max_triggers_per_symbol_per_day"):
             object.__setattr__(plan, "_policy_max_triggers_per_symbol_per_day", plan.max_triggers_per_symbol_per_day)
-        plan.risk_constraints = self._merge_plan_risk_constraints(plan.risk_constraints, risk_limits)
+        # User config is authoritative for risk constraints - LLM output is advisory only
+        plan.risk_constraints = self._build_risk_constraints_from_config(risk_limits, plan.risk_constraints)
         if plan.risk_constraints.max_daily_risk_budget_pct is None and risk_limits.max_daily_risk_budget_pct is not None:
             plan.risk_constraints.max_daily_risk_budget_pct = risk_limits.max_daily_risk_budget_pct
         # Prefer derived caps when a daily budget exists; otherwise derive a fallback.
@@ -159,7 +160,30 @@ class StrategistPlanService:
         return payload
 
     @staticmethod
-    def _merge_plan_risk_constraints(plan_constraints: RiskConstraint, risk_limits: RiskLimitSettings) -> RiskConstraint:
+    def _build_risk_constraints_from_config(
+        risk_limits: RiskLimitSettings,
+        llm_constraints: RiskConstraint | None = None,
+    ) -> RiskConstraint:
+        """Build risk constraints from user config. LLM constraints are ignored - user config is authoritative."""
+        return RiskConstraint(
+            max_position_risk_pct=risk_limits.max_position_risk_pct,
+            max_symbol_exposure_pct=risk_limits.max_symbol_exposure_pct,
+            max_portfolio_exposure_pct=risk_limits.max_portfolio_exposure_pct,
+            max_daily_loss_pct=risk_limits.max_daily_loss_pct,
+            max_daily_risk_budget_pct=risk_limits.max_daily_risk_budget_pct,
+        )
+
+    @staticmethod
+    def _merge_plan_risk_constraints(plan_constraints: RiskConstraint | None, risk_limits: RiskLimitSettings) -> RiskConstraint:
+        """Deprecated: kept for backward compatibility. Use _build_risk_constraints_from_config instead."""
+        if plan_constraints is None:
+            return RiskConstraint(
+                max_position_risk_pct=risk_limits.max_position_risk_pct,
+                max_symbol_exposure_pct=risk_limits.max_symbol_exposure_pct,
+                max_portfolio_exposure_pct=risk_limits.max_portfolio_exposure_pct,
+                max_daily_loss_pct=risk_limits.max_daily_loss_pct,
+                max_daily_risk_budget_pct=risk_limits.max_daily_risk_budget_pct,
+            )
         overrides = risk_limits.to_risk_params()
         return plan_constraints.model_copy(update=overrides)
 

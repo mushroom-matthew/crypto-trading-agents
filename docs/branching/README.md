@@ -16,7 +16,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - `_` prefix = backlog runbooks (often stored in `docs/branching/later/`).
 
 ## Priority Runbooks (Numbered)
-- [01-strategist-simplification.md](01-strategist-simplification.md): Simplify LLM strategist - allow empty triggers, remove risk redundancy, vector store prep.
+- [01-strategist-simplification.md](01-strategist-simplification.md): Simplify LLM strategist - allow empty triggers, remove risk redundancy, vector store prep. **Phase 1 COMPLETE** (schema, classifier, prompt, risk removal, stance tracking). Vector store and regime alerts deferred.
 - ~~04-emergency-exit-runbook-hold-cooldown.md~~: Min-hold and cooldown enforcement. → Completed, see [X-emergency-exit-runbook-hold-cooldown.md](X-emergency-exit-runbook-hold-cooldown.md).
 - ~~05-emergency-exit-runbook-bypass-override.md~~: Bypass and override behavior. → Completed, see [X-emergency-exit-runbook-bypass-override.md](X-emergency-exit-runbook-bypass-override.md).
 - ~~06-emergency-exit-runbook-edge-cases.md~~: Emergency-exit edge cases. → Completed, see [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md).
@@ -62,7 +62,7 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 - ~~**17**~~: Exit taxonomy & partial exit ladder — All 5 phases complete (schema, partial exit execution, risk_reduce guardrails, risk_off latch, strategist integration). Ready for backtest validation.
 
 ### Phase 2 — Strategy architecture
-8. **01**: Strategist simplification (LLM becomes slower controller; supports "wait" stance, regime alerts, RAG)
+8. **01**: Strategist simplification — **Phase 1 COMPLETE** (schema, classifier, prompt, risk removal, stance tracking). Vector store (RAG) and regime alert monitoring deferred to follow-up.
 
 ### Phase 3 — Policy pivot contracts (trigger-gated)
 9. **18**: Deterministic policy integration (mandatory). Triggers remain permission/direction authority; policy owns magnitude/risk expression.
