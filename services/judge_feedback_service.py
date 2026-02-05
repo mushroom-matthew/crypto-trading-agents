@@ -21,7 +21,10 @@ from pydantic import ValidationError
 
 from agents.langfuse_utils import langfuse_span
 from agents.llm.client_factory import get_llm_client
-from schemas.judge_feedback import JudgeFeedback, JudgeConstraints, DisplayConstraints
+from schemas.judge_feedback import (
+    JudgeFeedback, JudgeConstraints, DisplayConstraints,
+    JudgeAttribution, AttributionEvidence, AttributionLayer, RecommendedAction
+)
 from trading_core.trade_quality import TradeMetrics
 
 logger = logging.getLogger(__name__)
@@ -401,6 +404,182 @@ class JudgeFeedbackService:
 
         return analysis
 
+    def compute_attribution(
+        self,
+        heuristics: HeuristicAnalysis,
+        trade_metrics: TradeMetrics | None = None,
+        summary: Dict[str, Any] | None = None,
+    ) -> JudgeAttribution:
+        """Compute attribution based on heuristic analysis and metrics.
+
+        Attribution layers (in evaluation order):
+        1. Safety - emergency controls fired
+        2. Execution - slippage/fill issues
+        3. Policy - sizing/de-risk issues
+        4. Trigger - signal quality issues
+        5. Plan - regime/direction mismatch
+
+        Returns the most probable primary attribution with evidence.
+        """
+        summary = summary or {}
+        evidence_metrics: List[str] = []
+        secondary_factors: List[AttributionLayer] = []
+
+        # Default attribution and action
+        primary: AttributionLayer = "plan"
+        action: RecommendedAction = "hold"
+        confidence: str = "medium"
+        verdict: str = "Evaluation complete."
+
+        # Collect evidence from heuristics
+        for adj in heuristics.score_adjustments:
+            evidence_metrics.append(f"{adj.get('reason', 'unknown')}: {adj.get('delta', 0):+.1f}")
+
+        # Check for safety layer (emergency exits)
+        emergency_exit_pct = 0.0
+        if trade_metrics:
+            emergency_exit_pct = getattr(trade_metrics, "emergency_exit_pct", 0.0) or 0.0
+
+        if emergency_exit_pct > 0.3:
+            # High emergency exit rate - safety layer was active
+            primary = "safety"
+            action = "hold"
+            confidence = "high"
+            verdict = "Emergency controls engaged frequently; outcome acceptable given safety priority."
+            evidence_metrics.append(f"emergency_exit_pct: {emergency_exit_pct * 100:.1f}%")
+
+        # Check for execution issues (slippage, fill quality)
+        # For now, we don't have explicit slippage metrics, so this is placeholder
+        # In future: check theoretical vs realized P&L divergence
+
+        # Check for policy issues (sizing, risk expression)
+        elif trade_metrics and self._is_policy_attribution(trade_metrics, heuristics):
+            primary = "policy"
+            action = "policy_adjust"
+            confidence = "medium"
+            verdict = (
+                "Directional permission was sound, but exposure scaling amplified adverse moves; "
+                "attribution is to policy risk expression."
+            )
+            avg_mae = getattr(trade_metrics, "avg_mae_pct", None)
+            if avg_mae:
+                evidence_metrics.append(f"avg_mae_pct: {avg_mae:.2f}%")
+
+        # Check for trigger issues (signal quality)
+        elif trade_metrics and self._is_trigger_attribution(trade_metrics, heuristics):
+            primary = "trigger"
+            action = "replan"
+            confidence = "medium"
+            verdict = (
+                "Triggers fired permissively in low-quality conditions; "
+                "attribution is to trigger signal quality, not policy behavior."
+            )
+            if trade_metrics.win_rate:
+                evidence_metrics.append(f"win_rate: {trade_metrics.win_rate * 100:.1f}%")
+
+        # Default to plan attribution (regime mismatch)
+        elif heuristics.final_score < 40 or self._is_plan_attribution(trade_metrics, heuristics):
+            primary = "plan"
+            action = "replan"
+            confidence = "medium"
+            verdict = (
+                "The active triggers were structurally misaligned with market regime; "
+                "losses are attributable to plan selection."
+            )
+
+        # If score is good, hold
+        if heuristics.final_score >= 60:
+            action = "hold"
+
+        # Build evidence object
+        evidence = AttributionEvidence(
+            metrics=evidence_metrics[:10],  # Limit to 10 most relevant
+            trade_sets=[],  # TODO: Add trade set IDs when available
+            events=[],  # TODO: Add event IDs when available
+            notes=" | ".join(heuristics.red_flags[:3]) if heuristics.red_flags else None,
+        )
+
+        return JudgeAttribution(
+            primary_attribution=primary,
+            secondary_factors=secondary_factors,
+            confidence=confidence,
+            recommended_action=action,
+            evidence=evidence,
+            canonical_verdict=verdict,
+        )
+
+    def _is_policy_attribution(
+        self, trade_metrics: TradeMetrics, heuristics: HeuristicAnalysis
+    ) -> bool:
+        """Determine if policy is the primary attribution.
+
+        Policy attribution signals:
+        - Direction broadly correct but sizing too large or de-risk too late
+        - Drawdowns are spiky and concentrated
+        - Risk caps frequently rescue oversized exposure
+        """
+        # Direction correct (win rate reasonable) but P&L poor
+        if trade_metrics.win_rate and trade_metrics.win_rate >= 0.45:
+            if trade_metrics.profit_factor and trade_metrics.profit_factor < 1.0:
+                # Winning trades but still losing money = sizing issue
+                return True
+
+        # Large MAE relative to MFE suggests poor de-risk timing
+        avg_mae_pct = getattr(trade_metrics, "avg_mae_pct", None)
+        avg_mfe_pct = getattr(trade_metrics, "avg_mfe_pct", None)
+        if avg_mae_pct and avg_mfe_pct:
+            if avg_mae_pct > avg_mfe_pct * 1.5:
+                return True
+
+        return False
+
+    def _is_trigger_attribution(
+        self, trade_metrics: TradeMetrics, heuristics: HeuristicAnalysis
+    ) -> bool:
+        """Determine if trigger is the primary attribution.
+
+        Trigger attribution signals:
+        - Frequent firing in chop/noise
+        - High false-positive rate (low win rate)
+        - Rapid directional flips
+        """
+        # Very low win rate suggests trigger quality issues
+        if trade_metrics.win_rate and trade_metrics.win_rate < 0.35:
+            return True
+
+        # Many consecutive losses suggest poor entry timing
+        max_consec_losses = getattr(trade_metrics, "max_consecutive_losses", 0) or 0
+        if max_consec_losses >= 4:
+            return True
+
+        # Check for specific trigger-related red flags
+        for flag in heuristics.red_flags:
+            if "win rate" in flag.lower() or "trigger" in flag.lower():
+                return True
+
+        return False
+
+    def _is_plan_attribution(
+        self, trade_metrics: TradeMetrics | None, heuristics: HeuristicAnalysis
+    ) -> bool:
+        """Determine if plan is the primary attribution.
+
+        Plan attribution signals:
+        - Multiple triggers fire correctly but expectancy is poor
+        - Underperformance is broad across symbols/timeframes
+        - Regime appears misaligned
+        """
+        # Check for regime-related red flags
+        for flag in heuristics.red_flags:
+            if "regime" in flag.lower() or "consecutive losses" in flag.lower():
+                return True
+
+        # Very poor overall score suggests fundamental plan issues
+        if heuristics.final_score < 35:
+            return True
+
+        return False
+
     def generate_feedback(
         self,
         summary: Dict[str, Any],
@@ -632,12 +811,17 @@ Your final score can differ from the heuristic score if you have good reasons.""
 
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             logger.warning("Judge feedback parse failed, falling back to heuristics: %s", exc)
-            return self._feedback_from_heuristics(heuristics)
+            return self._feedback_from_heuristics(heuristics, trade_metrics, summary)
         except Exception as exc:
             logger.error("LLM judge call failed, falling back to heuristics: %s", exc)
-            return self._feedback_from_heuristics(heuristics)
+            return self._feedback_from_heuristics(heuristics, trade_metrics, summary)
 
-    def _feedback_from_heuristics(self, heuristics: HeuristicAnalysis) -> JudgeFeedback:
+    def _feedback_from_heuristics(
+        self,
+        heuristics: HeuristicAnalysis,
+        trade_metrics: TradeMetrics | None = None,
+        summary: Dict[str, Any] | None = None,
+    ) -> JudgeFeedback:
         """Build JudgeFeedback directly from heuristics (fallback)."""
         suggested = heuristics.suggested_strategist_constraints
 
@@ -659,6 +843,9 @@ Your final score can differ from the heuristic score if you have good reasons.""
             sizing_adjustments=suggested.get("sizing_adjustments", {}),
         )
 
+        # Compute attribution from heuristics and metrics
+        attribution = self.compute_attribution(heuristics, trade_metrics, summary)
+
         self.last_generation_info = {"source": "heuristics_fallback", "heuristics": heuristics.to_dict()}
 
         return JudgeFeedback(
@@ -666,6 +853,7 @@ Your final score can differ from the heuristic score if you have good reasons.""
             notes=" ".join(heuristics.observations[:5]) if heuristics.observations else "Heuristic-based feedback.",
             constraints=constraints,
             strategist_constraints=strategist_constraints,
+            attribution=attribution,
         )
 
     @staticmethod

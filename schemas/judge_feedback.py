@@ -2,11 +2,105 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Dict, FrozenSet, List, Literal, Optional
+from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 
 from .llm_strategist import SerializableModel
+
+
+# Attribution type definitions (Runbook 20: Judge Attribution Rubric)
+AttributionLayer = Literal["plan", "trigger", "policy", "execution", "safety"]
+AttributionConfidence = Literal["low", "medium", "high"]
+RecommendedAction = Literal["hold", "policy_adjust", "replan", "investigate_execution", "stand_down"]
+
+
+class AttributionEvidence(SerializableModel):
+    """Evidence backing a Judge attribution decision."""
+
+    metrics: List[str] = Field(
+        default_factory=list,
+        description="Metric names/values that informed the attribution",
+    )
+    trade_sets: List[str] = Field(
+        default_factory=list,
+        description="Trade set IDs examined",
+    )
+    events: List[str] = Field(
+        default_factory=list,
+        description="Event IDs (emergency exits, overrides, etc.) considered",
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        description="Additional context for the attribution decision",
+    )
+
+
+class JudgeAttribution(SerializableModel):
+    """Attribution output from Judge evaluation.
+
+    Every evaluation must produce exactly one primary attribution with
+    evidence references. The recommended_action is gated by the attribution:
+    - replan: only valid for 'plan' or 'trigger' attribution
+    - policy_adjust: only valid for 'policy' attribution
+    - stand_down: valid for any attribution
+    - investigate_execution: typically for 'execution' attribution
+    - hold: valid for any attribution (no change needed)
+    """
+
+    primary_attribution: AttributionLayer = Field(
+        description="Single primary layer responsible for outcome",
+    )
+    secondary_factors: List[AttributionLayer] = Field(
+        default_factory=list,
+        description="Contributing factors (not primary cause)",
+    )
+    confidence: AttributionConfidence = Field(
+        default="medium",
+        description="Confidence in the attribution decision",
+    )
+    recommended_action: RecommendedAction = Field(
+        default="hold",
+        description="Recommended action based on attribution",
+    )
+    evidence: AttributionEvidence = Field(
+        default_factory=AttributionEvidence,
+        description="Evidence backing the attribution",
+    )
+    canonical_verdict: Optional[str] = Field(
+        default=None,
+        description="Human-readable verdict explaining the attribution",
+    )
+
+    # Action gating rules
+    REPLAN_ALLOWED_LAYERS: ClassVar[FrozenSet[AttributionLayer]] = frozenset({"plan", "trigger"})
+    POLICY_ADJUST_ALLOWED_LAYERS: ClassVar[FrozenSet[AttributionLayer]] = frozenset({"policy"})
+
+    @model_validator(mode="after")
+    def validate_action_gating(self) -> "JudgeAttribution":
+        """Enforce action gating rules based on attribution layer."""
+        action = self.recommended_action
+        layer = self.primary_attribution
+
+        if action == "replan" and layer not in self.REPLAN_ALLOWED_LAYERS:
+            raise ValueError(
+                f"replan action requires attribution to 'plan' or 'trigger', got '{layer}'"
+            )
+
+        if action == "policy_adjust" and layer not in self.POLICY_ADJUST_ALLOWED_LAYERS:
+            raise ValueError(
+                f"policy_adjust action requires attribution to 'policy', got '{layer}'"
+            )
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_evidence_required(self) -> "JudgeAttribution":
+        """Ensure evidence is provided (at least one field non-empty)."""
+        ev = self.evidence
+        if not ev.metrics and not ev.trade_sets and not ev.events and not ev.notes:
+            raise ValueError("Attribution must include evidence (metrics, trade_sets, events, or notes)")
+        return self
 
 
 class DisplayConstraints(SerializableModel):
@@ -66,6 +160,10 @@ class JudgeFeedback(SerializableModel):
     notes: Optional[str] = None
     constraints: JudgeConstraints = Field(default_factory=JudgeConstraints)
     strategist_constraints: DisplayConstraints = Field(default_factory=DisplayConstraints)
+    attribution: Optional[JudgeAttribution] = Field(
+        default=None,
+        description="Attribution analysis when evaluation determines outcome causes",
+    )
 
 
 def apply_trigger_floor(

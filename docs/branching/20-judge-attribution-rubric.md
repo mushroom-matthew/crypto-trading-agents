@@ -214,8 +214,36 @@ git commit -m "Judge: add attribution rubric contract and action gating"
 ```
 
 ## Change Log (update during implementation)
-- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+- 2026-02-05: Judge Attribution Rubric implementation complete.
+  - Added attribution type definitions to `schemas/judge_feedback.py`: `AttributionLayer`, `AttributionConfidence`, `RecommendedAction`
+  - Added `AttributionEvidence` and `JudgeAttribution` schemas with model validators for action gating
+  - Added `attribution` field to `JudgeFeedback` schema
+  - Implemented `compute_attribution()` method in `services/judge_feedback_service.py`
+  - Added helper methods: `_is_policy_attribution()`, `_is_trigger_attribution()`, `_is_plan_attribution()`
+  - Modified `_feedback_from_heuristics()` to include attribution in fallback path
+  - Created 3 test files with 62 tests covering all acceptance criteria
 
 ## Test Evidence (append results before commit)
 
+```
+uv run pytest tests/test_judge_attribution_schema.py tests/test_judge_attribution_rules.py \
+  tests/test_judge_replan_gating.py -v
+
+============================== 62 passed in 9.16s ==============================
+
+Tests cover:
+- Attribution schema validation (21 tests)
+- Attribution layer selection based on metrics (16 tests)
+- Replan/policy_adjust action gating (25 tests)
+- Evidence requirement validation
+- Serialization/deserialization
+```
+
 ## Human Verification Evidence (append results before commit when required)
+
+**Verified via unit tests:**
+- `test_high_emergency_exit_rate_triggers_safety` - safety attribution with hold action
+- `test_decent_win_rate_poor_profit_factor` - policy attribution with policy_adjust action
+- `test_low_win_rate_triggers_trigger_attribution` - trigger attribution with replan action
+- `test_very_low_score_triggers_plan_attribution` - plan attribution with replan action
+- `test_replan_blocked_for_policy/execution/safety` - action gating enforcement
