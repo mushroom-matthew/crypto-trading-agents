@@ -180,12 +180,13 @@ Execution owns order mechanics:
 - Trigger permission remains authoritative at all times.
 
 ## Key Files
-- `agents/strategies/policy_engine.py` (new deterministic policy module)
-- `agents/strategies/trigger_engine.py` (trigger-state handoff)
-- `agents/strategies/risk_engine.py` (caps + stand-down interface)
-- `backtesting/llm_strategist_runner.py` (policy integration in simulation path)
-- `ops_api/event_store.py` (policy decision persistence)
-- `schemas/` (PolicyConfig and DecisionRecord contracts)
+- `schemas/policy.py` (NEW: PolicyConfig, TriggerState, PolicyDecisionRecord, TriggerStateResult)
+- `agents/strategies/policy_engine.py` (NEW: deterministic policy module with apply_policy, classify_trigger_state, PolicyEngine class)
+- `agents/strategies/policy_trigger_integration.py` (NEW: integration layer between TriggerEngine and PolicyEngine)
+- `schemas/llm_strategist.py` (MODIFIED: added optional policy_config dict field to StrategyPlan)
+- `agents/strategies/trigger_engine.py` (unchanged - integration via wrapper)
+- `agents/strategies/risk_engine.py` (unchanged - caps interface used by policy)
+- `backtesting/llm_strategist_runner.py` (integration deferred - use PolicyTriggerIntegration wrapper)
 
 ## Test Plan (required before commit)
 - `uv run pytest tests/test_policy_engine.py -vv`
@@ -235,8 +236,34 @@ git commit -m "Policy pivot phase1: deterministic trigger-gated policy contract"
 ```
 
 ## Change Log (update during implementation)
-- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+- 2026-02-05: Phase 1 policy engine implementation complete.
+  - Created `schemas/policy.py` with TriggerState, PolicyConfig, PolicyDecisionRecord, TriggerStateResult, StandDownState
+  - Created `agents/strategies/policy_engine.py` with deterministic policy math: classify_trigger_state(), apply_policy(), PolicyEngine class
+  - Created `agents/strategies/policy_trigger_integration.py` as opt-in integration layer
+  - Added `policy_config` dict field to StrategyPlan schema (backward compatible)
+  - Created 4 test files with 52 tests covering all acceptance criteria
+  - DEFERRED: Full backtest runner integration (use PolicyTriggerIntegration wrapper for now)
 
 ## Test Evidence (append results before commit)
 
+```
+uv run pytest tests/test_policy_engine.py tests/test_trigger_policy_contract.py \
+  tests/test_policy_override_precedence.py tests/test_policy_telemetry_persistence.py -v
+
+============================== 52 passed in 1.01s ==============================
+
+Tests cover:
+- Trigger state classification (inactive, long_allowed, short_allowed, exit_only)
+- Policy math (deadband, vol scaling, smoothing, bounds)
+- Override precedence (emergency_exit > stand_down > risk_caps > policy)
+- Replay determinism
+- Telemetry persistence format
+```
+
 ## Human Verification Evidence (append results before commit when required)
+
+**DEFERRED**: Full human verification requires backtest runner integration. The policy engine tests verify:
+- `test_inactive_always_zero` - inactive triggers produce zero weight
+- `test_exit_only_monotone_positive/negative` - exit_only converges monotonically toward zero
+- `test_emergency_exit_overrides_all` - emergency bypasses policy math
+- `test_decision_record_integration_format` - telemetry includes plan_id, trade_set_id, override reasons

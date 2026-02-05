@@ -253,6 +253,12 @@ class StrategyPlan(SerializableModel):
     allowed_symbols: List[str] = Field(default_factory=list)
     allowed_directions: List[TriggerDirection] = Field(default_factory=list)
     allowed_trigger_categories: List[TriggerCategory] = Field(default_factory=list)
+    policy_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional policy configuration dict for deterministic position sizing. "
+        "If set, enables Phase 1 policy integration (trigger-gated target weights). "
+        "Expected schema: schemas.policy.PolicyConfig fields (tau, vol_target, w_min, w_max, etc).",
+    )
 
 
 # Rebuild model for forward references
