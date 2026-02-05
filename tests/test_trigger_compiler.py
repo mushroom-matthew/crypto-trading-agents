@@ -79,6 +79,22 @@ def test_compile_plan_allows_identity_checks(tmp_path):
     assert compiled.triggers[0].entry.normalized == "sma_short is not None and close > sma_short"
 
 
+def test_compile_plan_allows_in_operator(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs_in")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    plan = _strategy_plan(run.run_id, "vol_state in ['high', 'extreme']")
+    compiled = compile_plan(plan)
+    assert "in" in compiled.triggers[0].entry.normalized
+
+
+def test_compile_plan_allows_not_in_operator(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs_not_in")
+    run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))
+    plan = _strategy_plan(run.run_id, "position not in ['long', 'short']")
+    compiled = compile_plan(plan)
+    assert "not in" in compiled.triggers[0].entry.normalized
+
+
 def test_between_allows_identifiers(tmp_path):
     registry = StrategyRunRegistry(tmp_path / "runs_between")
     run = registry.create_strategy_run(StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7))

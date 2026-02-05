@@ -1920,6 +1920,408 @@ async def get_llm_insights(run_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---------------------------------------------------------------------------
+# Hidden-telemetry endpoints — expose rich per-bar / per-trigger diagnostics
+# that are captured during backtests but were not previously queryable.
+# ---------------------------------------------------------------------------
+
+
+async def _load_llm_data(run_id: str) -> Dict[str, Any]:
+    """Load llm_data from cached backtest; raise 404 on miss."""
+    cached = await get_backtest_cached_async(run_id)
+    if not cached:
+        raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
+    llm_data = cached.get("llm_data")
+    if not llm_data:
+        raise HTTPException(
+            status_code=404,
+            detail="No LLM telemetry available for this backtest",
+        )
+    return llm_data
+
+
+@router.get("/{run_id}/trigger-samples")
+async def get_trigger_samples(
+    run_id: str,
+    trigger_id: Optional[str] = Query(default=None, description="Filter by trigger ID"),
+    symbol: Optional[str] = Query(default=None, description="Filter by symbol"),
+    result: Optional[bool] = Query(default=None, description="Filter by evaluation result (true/false)"),
+    limit: int = Query(default=500, le=5000, description="Max samples to return"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
+):
+    """
+    Get trigger evaluation samples captured during the backtest.
+
+    These are per-bar evaluations showing exactly what indicator values
+    were present when each trigger was evaluated, whether it fired, and
+    the sub-expression breakdown. Only available when debug_trigger_sample_rate > 0.
+    """
+    try:
+        llm_data = await _load_llm_data(run_id)
+        samples = llm_data.get("trigger_evaluation_samples", [])
+
+        if trigger_id:
+            samples = [s for s in samples if s.get("trigger_id") == trigger_id]
+        if symbol:
+            samples = [s for s in samples if s.get("symbol") == symbol]
+        if result is not None:
+            samples = [s for s in samples if s.get("result") is result]
+
+        total = len(samples)
+        samples = samples[offset : offset + limit]
+
+        return {
+            "run_id": run_id,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "samples": samples,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get trigger samples: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/bar-decisions")
+async def get_bar_decisions(
+    run_id: str,
+    date: Optional[str] = Query(default=None, description="Filter by date (YYYY-MM-DD)"),
+    has_orders: Optional[bool] = Query(default=None, description="Only bars with orders"),
+    symbol: Optional[str] = Query(default=None, description="Filter orders by symbol"),
+    limit: int = Query(default=200, le=2000, description="Max bars to return"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
+):
+    """
+    Get per-bar decision records with indicator state, orders, and market structure.
+
+    Each record represents a 15m bar evaluation with the full context of what the
+    system saw when making (or not making) a trade decision.
+    """
+    try:
+        llm_data = await _load_llm_data(run_id)
+        bar_decisions = llm_data.get("bar_decisions", {})
+
+        all_bars: List[Dict[str, Any]] = []
+        dates = [date] if date and date in bar_decisions else sorted(bar_decisions.keys())
+        for d in dates:
+            for bar in bar_decisions.get(d, []):
+                bar_entry = dict(bar)
+                bar_entry["date"] = d
+                all_bars.append(bar_entry)
+
+        if has_orders is True:
+            all_bars = [b for b in all_bars if b.get("orders")]
+        elif has_orders is False:
+            all_bars = [b for b in all_bars if not b.get("orders")]
+
+        if symbol:
+            # Filter to bars that have orders for this symbol, or if no order filter,
+            # include all bars but filter the indicator_context to this symbol.
+            if has_orders is True:
+                all_bars = [
+                    b for b in all_bars
+                    if any(o.get("symbol") == symbol for o in (b.get("orders") or []))
+                ]
+
+        total = len(all_bars)
+        page = all_bars[offset : offset + limit]
+
+        # Clean NaN values in nested dicts
+        def _clean(obj):
+            if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+                return None
+            if isinstance(obj, dict):
+                return {k: _clean(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_clean(v) for v in obj]
+            return obj
+
+        return {
+            "run_id": run_id,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "bars": _clean(page),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get bar decisions: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/judge-history")
+async def get_judge_history(run_id: str):
+    """
+    Get intraday judge evaluation history.
+
+    Shows every judge evaluation with scores, replan decisions, and trigger reasons.
+    Reveals how the judge assessed performance over time and whether it intervened.
+    """
+    try:
+        llm_data = await _load_llm_data(run_id)
+        history = llm_data.get("intraday_judge_history", [])
+        replans = llm_data.get("judge_triggered_replans", [])
+
+        return {
+            "run_id": run_id,
+            "total_evaluations": len(history),
+            "total_replans": len(replans),
+            "evaluations": history,
+            "replans": replans,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get judge history: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/trigger-analytics")
+async def get_trigger_analytics(run_id: str):
+    """
+    Computed per-trigger performance analytics.
+
+    Aggregates trades by trigger_id to show which triggers are profitable,
+    which have the best/worst R-multiples, and fire/execute/block rates.
+    Combines trade data with trigger evaluation samples and daily trigger stats.
+    """
+    try:
+        cached = await get_backtest_cached_async(run_id)
+        if not cached:
+            raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
+
+        llm_data = cached.get("llm_data") or {}
+        trades = cached.get("trades") or []
+        daily_reports = llm_data.get("daily_reports") or []
+        samples = llm_data.get("trigger_evaluation_samples") or []
+
+        # --- Per-trigger trade P&L ---
+        trigger_pnl: Dict[str, Dict[str, Any]] = {}
+        for t in trades:
+            tid = t.get("trigger_id", "unknown")
+            if tid not in trigger_pnl:
+                trigger_pnl[tid] = {
+                    "trigger_id": tid,
+                    "symbol": t.get("symbol"),
+                    "trades": 0,
+                    "buys": 0,
+                    "sells": 0,
+                    "pnl": 0.0,
+                    "fees": 0.0,
+                    "r_multiples": [],
+                    "risk_used_total": 0.0,
+                }
+            entry = trigger_pnl[tid]
+            entry["trades"] += 1
+            if t.get("side") == "buy":
+                entry["buys"] += 1
+            else:
+                entry["sells"] += 1
+            entry["pnl"] += float(t.get("pnl") or 0)
+            entry["fees"] += float(t.get("fee") or 0)
+            r = t.get("r_multiple")
+            if r is not None and r != 0.0:
+                entry["r_multiples"].append(float(r))
+            entry["risk_used_total"] += float(t.get("risk_used_abs") or 0)
+
+        # Compute aggregates
+        for entry in trigger_pnl.values():
+            rm = entry.pop("r_multiples")
+            entry["avg_r_multiple"] = clean_nan(sum(rm) / len(rm)) if rm else None
+            entry["best_r"] = clean_nan(max(rm)) if rm else None
+            entry["worst_r"] = clean_nan(min(rm)) if rm else None
+            entry["win_count"] = sum(1 for r in rm if r > 0)
+            entry["loss_count"] = sum(1 for r in rm if r <= 0)
+            total_exits = entry["win_count"] + entry["loss_count"]
+            entry["win_rate"] = clean_nan(entry["win_count"] / total_exits) if total_exits else None
+            entry["pnl"] = clean_nan(entry["pnl"])
+            entry["fees"] = clean_nan(entry["fees"])
+            entry["risk_used_total"] = clean_nan(entry["risk_used_total"])
+
+        # --- Per-trigger evaluation stats from samples ---
+        trigger_eval_stats: Dict[str, Dict[str, int]] = {}
+        for s in samples:
+            tid = s.get("trigger_id", "unknown")
+            if tid not in trigger_eval_stats:
+                trigger_eval_stats[tid] = {"evaluated": 0, "fired": 0, "not_fired": 0}
+            trigger_eval_stats[tid]["evaluated"] += 1
+            if s.get("result"):
+                trigger_eval_stats[tid]["fired"] += 1
+            else:
+                trigger_eval_stats[tid]["not_fired"] += 1
+
+        # --- Aggregate trigger_stats from daily reports ---
+        trigger_daily_totals: Dict[str, Dict[str, int]] = {}
+        for report in daily_reports:
+            ts = report.get("trigger_stats") or {}
+            for tid, stats in ts.items():
+                if tid not in trigger_daily_totals:
+                    trigger_daily_totals[tid] = {"executed": 0, "blocked": 0, "blocked_reasons": {}}
+                trigger_daily_totals[tid]["executed"] += stats.get("executed", 0)
+                trigger_daily_totals[tid]["blocked"] += stats.get("blocked", 0)
+                for reason, count in (stats.get("blocked_by_reason") or {}).items():
+                    trigger_daily_totals[tid]["blocked_reasons"][reason] = (
+                        trigger_daily_totals[tid]["blocked_reasons"].get(reason, 0) + count
+                    )
+
+        # --- Aggregate trigger_quality from daily reports ---
+        trigger_quality_agg: Dict[str, Dict[str, Any]] = {}
+        for report in daily_reports:
+            tq = report.get("trigger_quality") or {}
+            for tid, quality in tq.items():
+                if tid not in trigger_quality_agg:
+                    trigger_quality_agg[tid] = {
+                        "total_trades": 0,
+                        "total_pnl": 0.0,
+                        "total_risk": 0.0,
+                        "wins": 0,
+                        "losses": 0,
+                    }
+                agg = trigger_quality_agg[tid]
+                agg["total_trades"] += quality.get("trades", 0)
+                agg["total_pnl"] += quality.get("pnl", 0.0)
+                agg["total_risk"] += quality.get("risk_used_abs", 0.0)
+                agg["wins"] += quality.get("wins", 0)
+                agg["losses"] += quality.get("losses", 0)
+
+        # --- Merge into final analytics ---
+        all_trigger_ids = set(trigger_pnl.keys()) | set(trigger_eval_stats.keys()) | set(trigger_daily_totals.keys())
+        analytics = []
+        for tid in sorted(all_trigger_ids):
+            entry = trigger_pnl.get(tid, {"trigger_id": tid, "trades": 0, "pnl": 0.0})
+            entry["eval_stats"] = trigger_eval_stats.get(tid, {})
+            entry["daily_totals"] = trigger_daily_totals.get(tid, {})
+            entry["quality_agg"] = trigger_quality_agg.get(tid, {})
+            analytics.append(entry)
+
+        return {
+            "run_id": run_id,
+            "total_triggers": len(analytics),
+            "triggers": analytics,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get trigger analytics: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/block-analysis")
+async def get_block_analysis(run_id: str):
+    """
+    Aggregated block event analysis from daily reports.
+
+    Shows why trades were blocked across the entire backtest, with breakdowns
+    by reason, symbol, trigger, and day.
+    """
+    try:
+        llm_data = await _load_llm_data(run_id)
+        daily_reports = llm_data.get("daily_reports") or []
+
+        total_blocks = 0
+        reason_totals: Dict[str, int] = {}
+        symbol_blocks: Dict[str, int] = {}
+        trigger_blocks: Dict[str, int] = {}
+        daily_blocks: List[Dict[str, Any]] = []
+        all_block_details: List[Dict[str, Any]] = []
+
+        for report in daily_reports:
+            ls = report.get("limit_stats") or {}
+            date = report.get("date", "unknown")
+
+            blocked_details = ls.get("blocked_details") or []
+            day_block_count = len(blocked_details)
+            total_blocks += day_block_count
+
+            day_reasons: Dict[str, int] = {}
+            for block in blocked_details:
+                reason = block.get("reason", "unknown")
+                reason_totals[reason] = reason_totals.get(reason, 0) + 1
+                day_reasons[reason] = day_reasons.get(reason, 0) + 1
+
+                sym = block.get("symbol", "unknown")
+                symbol_blocks[sym] = symbol_blocks.get(sym, 0) + 1
+
+                tid = block.get("trigger_id", "unknown")
+                trigger_blocks[tid] = trigger_blocks.get(tid, 0) + 1
+
+                all_block_details.append({**block, "date": date})
+
+            # Also pull structured block counters
+            risk_breakdown = ls.get("risk_block_breakdown") or {}
+            for reason, count in risk_breakdown.items():
+                if reason not in day_reasons:
+                    reason_totals[reason] = reason_totals.get(reason, 0) + count
+
+            daily_blocks.append({
+                "date": date,
+                "total_blocks": day_block_count,
+                "executed_trades": report.get("trade_count", 0),
+                "execution_rate": clean_nan(ls.get("execution_rate")),
+                "risk_budget_used_pct": clean_nan(ls.get("risk_budget_used_pct")),
+                "min_hold_binding_pct": clean_nan(ls.get("min_hold_binding_pct")),
+                "reasons": day_reasons,
+            })
+
+        return {
+            "run_id": run_id,
+            "total_blocks": total_blocks,
+            "reason_totals": dict(sorted(reason_totals.items(), key=lambda x: -x[1])),
+            "symbol_blocks": dict(sorted(symbol_blocks.items(), key=lambda x: -x[1])),
+            "trigger_blocks": dict(sorted(trigger_blocks.items(), key=lambda x: -x[1])),
+            "daily_blocks": daily_blocks,
+            "block_details": all_block_details[:500],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get block analysis: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/daily-diagnostics")
+async def get_daily_diagnostics(
+    run_id: str,
+    date: Optional[str] = Query(default=None, description="Filter to single date (YYYY-MM-DD)"),
+):
+    """
+    Get rich daily diagnostic reports with trigger quality, risk usage, and judge feedback.
+
+    More detailed than llm-insights daily_reports — includes trigger_quality,
+    archetype_quality, risk_budget, cap_state, and limit enforcement breakdowns.
+    """
+    try:
+        llm_data = await _load_llm_data(run_id)
+        daily_reports = llm_data.get("daily_reports") or []
+
+        if date:
+            daily_reports = [r for r in daily_reports if r.get("date") == date]
+
+        # Clean NaN values for JSON serialization
+        def _clean(obj):
+            if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+                return None
+            if isinstance(obj, dict):
+                return {k: _clean(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_clean(v) for v in obj]
+            return obj
+
+        return {
+            "run_id": run_id,
+            "total_days": len(daily_reports),
+            "reports": _clean(daily_reports),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get daily diagnostics: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("", response_model=List[BacktestListItem])
 async def list_backtests(
     status: Optional[str] = Query(default=None, description="Filter by status"),

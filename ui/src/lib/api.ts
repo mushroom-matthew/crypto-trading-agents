@@ -416,6 +416,51 @@ export const backtestAPI = {
     });
     return response.data;
   },
+
+  // Signal diagnostics endpoints
+  getTriggerAnalytics: async (runId: string) => {
+    const response = await api.get(`/backtests/${runId}/trigger-analytics`);
+    return response.data;
+  },
+
+  getTriggerSamples: async (runId: string, params?: {
+    trigger_id?: string;
+    symbol?: string;
+    result?: boolean;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const response = await api.get(`/backtests/${runId}/trigger-samples`, { params });
+    return response.data;
+  },
+
+  getBlockAnalysis: async (runId: string) => {
+    const response = await api.get(`/backtests/${runId}/block-analysis`);
+    return response.data;
+  },
+
+  getJudgeHistory: async (runId: string) => {
+    const response = await api.get(`/backtests/${runId}/judge-history`);
+    return response.data;
+  },
+
+  getBarDecisions: async (runId: string, params?: {
+    date?: string;
+    has_orders?: boolean;
+    symbol?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const response = await api.get(`/backtests/${runId}/bar-decisions`, { params });
+    return response.data;
+  },
+
+  getDailyDiagnostics: async (runId: string, date?: string) => {
+    const response = await api.get(`/backtests/${runId}/daily-diagnostics`, {
+      params: date ? { date } : undefined,
+    });
+    return response.data;
+  },
 };
 
 export const marketAPI = {

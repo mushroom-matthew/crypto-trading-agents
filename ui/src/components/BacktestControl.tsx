@@ -10,6 +10,7 @@ import { EventTimeline } from './EventTimeline';
 import { CandlestickChart } from './CandlestickChart';
 import { BacktestPlaybackViewer } from './BacktestPlaybackViewer';
 import { LLMInsights } from './LLMInsights';
+import { SignalDiagnostics } from './SignalDiagnostics';
 import { LiveProgressMonitor } from './LiveProgressMonitor';
 import { BacktestHistoryPanel } from './BacktestHistoryPanel';
 import { PromptEditor } from './PromptEditor';
@@ -1169,6 +1170,13 @@ export function BacktestControl() {
         {isComplete && selectedRun && (
           <div className="mt-6">
             <LLMInsights runId={selectedRun} />
+          </div>
+        )}
+
+        {/* Signal Diagnostics */}
+        {isComplete && selectedRun && (
+          <div className="mt-6">
+            <SignalDiagnostics runId={selectedRun} />
           </div>
         )}
 

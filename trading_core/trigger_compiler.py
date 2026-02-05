@@ -189,6 +189,10 @@ _ALLOWED_NODES = (
     ast.NotEq,
     ast.Is,
     ast.IsNot,
+    ast.In,
+    ast.NotIn,
+    ast.List,
+    ast.Tuple,
 )
 
 

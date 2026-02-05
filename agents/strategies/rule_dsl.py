@@ -151,6 +151,8 @@ class RuleEvaluator:
             return getattr(base, node.attr, None)
         if isinstance(node, ast.Constant):
             return node.value
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return [self._eval_node(elt, ctx, allowed) for elt in node.elts]
         raise RuleSyntaxError(f"unsupported expression in rule: {ast.dump(node)}")
 
     def _compare(self, op: ast.cmpop, left: Any, right: Any) -> bool:
@@ -168,6 +170,10 @@ class RuleEvaluator:
             return left == right
         if isinstance(op, ast.NotEq):
             return left != right
+        if isinstance(op, ast.In):
+            return left in right
+        if isinstance(op, ast.NotIn):
+            return left not in right
         raise RuleSyntaxError("unsupported comparison operator")
 
     def _eval_binop(self, op: ast.operator, left: Any, right: Any) -> Any:

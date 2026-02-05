@@ -282,7 +282,12 @@ class BacktestWorkflow:
         await workflow.execute_activity(
             persist_results_activity,
             args=[self.run_id, final_results],
-            schedule_to_close_timeout=timedelta(seconds=10),
+            schedule_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(
+                maximum_attempts=3,
+                initial_interval=timedelta(seconds=2),
+                maximum_interval=timedelta(seconds=10),
+            ),
         )
 
         self.progress = 100.0

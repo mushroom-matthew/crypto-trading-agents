@@ -540,7 +540,7 @@ async def persist_results_activity(
         run_id: Backtest run identifier
         results: Complete backtest results to persist
 
-    Timeout: 10 seconds (disk I/O)
+    Timeout: 120 seconds (DB persist + disk I/O for large payloads)
     """
     from ops_api.routers.backtests import save_backtest_to_disk
     from backtesting.persistence import persist_backtest_results
