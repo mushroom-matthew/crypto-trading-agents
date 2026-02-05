@@ -582,8 +582,10 @@ class TriggerEngine:
                     continue
                 # Use exit_fraction for partial exits (risk_reduce category)
                 exit_fraction = trigger.exit_fraction if trigger.exit_fraction is not None else 1.0
+                # Emergency exits should only flatten live exposure, not entries staged earlier in this bar.
+                exit_portfolio = portfolio_base if trigger.category == "emergency_exit" else portfolio_for_eval
                 exit_order = self._flatten_order(
-                    trigger, bar, portfolio_for_eval, f"{trigger.id}_exit", block_entries,
+                    trigger, bar, exit_portfolio, f"{trigger.id}_exit", block_entries,
                     fraction=exit_fraction,
                 )
                 if exit_order:

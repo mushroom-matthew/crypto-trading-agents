@@ -246,21 +246,24 @@ class StrategistPlanService:
 
         if plan.risk_constraints.max_daily_risk_budget_pct is None:
             return plan
+        budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
+        per_trade_risk = None
+        if plan.sizing_rules:
+            risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
+            if risks:
+                per_trade_risk = min(risks)
+        if per_trade_risk is None or per_trade_risk <= 0:
+            per_trade_risk = plan.risk_constraints.max_position_risk_pct
+        per_trade_risk_for_cap = None
+        if per_trade_risk and per_trade_risk > 0 and budget_pct and budget_pct > 0:
+            per_trade_risk_for_cap = min(per_trade_risk, budget_pct)
+        budget_tighter_than_trade = bool(budget_pct and per_trade_risk and per_trade_risk > budget_pct)
         derived_cap = getattr(plan, "_derived_trade_cap", None)
         if not derived_cap:
-            budget_pct = plan.risk_constraints.max_daily_risk_budget_pct
-            per_trade_risk = None
-            if plan.sizing_rules:
-                risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
-                if risks:
-                    per_trade_risk = min(risks)
-            if per_trade_risk is None or per_trade_risk <= 0:
-                per_trade_risk = plan.risk_constraints.max_position_risk_pct
-            if per_trade_risk and per_trade_risk > 0 and budget_pct and budget_pct > 0:
-                per_trade_risk_for_cap = min(per_trade_risk, budget_pct)
+            if per_trade_risk_for_cap is not None:
                 derived_cap = self._derive_trade_cap(budget_pct, per_trade_risk_for_cap)
             cap_inputs = getattr(plan, "_cap_inputs", None) or {}
-            if budget_pct and per_trade_risk:
+            if budget_pct and per_trade_risk_for_cap:
                 cap_inputs = {"risk_budget_pct": budget_pct, "per_trade_risk_pct": per_trade_risk_for_cap}
             if cap_inputs:
                 object.__setattr__(plan, "_cap_inputs", cap_inputs)
@@ -270,6 +273,9 @@ class StrategistPlanService:
         object.__setattr__(plan, "_derived_trigger_cap", int(derived_cap))
         if self.strict_fixed_caps:
             # In fixed-cap mode, do not overwrite policy caps.
+            return plan
+        if budget_tighter_than_trade:
+            # Let the risk budget gate execution when a single trade can consume the full budget.
             return plan
         plan = plan.model_copy(update={"max_trades_per_day": int(derived_cap)})
         if plan.max_triggers_per_symbol_per_day is None or plan.max_triggers_per_symbol_per_day < derived_cap:
@@ -290,16 +296,28 @@ class StrategistPlanService:
             policy_trigger = max(policy_trigger, default_triggers)
         derived_trade = getattr(plan, "_derived_trade_cap", None)
         derived_trigger = getattr(plan, "_derived_trigger_cap", derived_trade)
+        budget_pct = plan.risk_constraints.max_daily_risk_budget_pct if plan.risk_constraints else None
+        per_trade_risk = None
+        if plan.sizing_rules:
+            risks = [rule.target_risk_pct for rule in plan.sizing_rules if rule.target_risk_pct and rule.target_risk_pct > 0]
+            if risks:
+                per_trade_risk = min(risks)
+        if per_trade_risk is None or per_trade_risk <= 0:
+            per_trade_risk = plan.risk_constraints.max_position_risk_pct if plan.risk_constraints else None
+        budget_tighter_than_trade = bool(budget_pct and per_trade_risk and per_trade_risk > budget_pct)
 
         if self.strict_fixed_caps:
             resolved_trade = policy_trade
             resolved_trigger = policy_trigger
         else:
-            resolved_trade = derived_trade if derived_trade is not None else policy_trade
-            if derived_trigger is not None and policy_trigger is not None:
+            use_derived = not budget_tighter_than_trade
+            resolved_trade = derived_trade if (use_derived and derived_trade is not None) else policy_trade
+            if use_derived and derived_trigger is not None and policy_trigger is not None:
                 resolved_trigger = min(policy_trigger, derived_trigger)
+            elif use_derived and derived_trigger is not None:
+                resolved_trigger = derived_trigger
             else:
-                resolved_trigger = derived_trigger if derived_trigger is not None else policy_trigger
+                resolved_trigger = policy_trigger
 
         if judge_constraints:
             judge_trade = judge_constraints.max_trades_per_day
