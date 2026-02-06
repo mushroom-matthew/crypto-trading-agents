@@ -41,7 +41,15 @@ from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_tran
 from services.judge_feedback_service import JudgeFeedbackService
 from backtesting.reports import write_run_summary
 from schemas.judge_feedback import JudgeFeedback, JudgeConstraints, apply_trigger_floor
-from schemas.llm_strategist import AssetState, IndicatorSnapshot, LLMInput, PortfolioState, StrategyPlan, TriggerSummary
+from schemas.llm_strategist import (
+    AssetState,
+    IndicatorSnapshot,
+    LLMInput,
+    PortfolioState,
+    StrategyPlan,
+    TriggerCondition,
+    TriggerSummary,
+)
 from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings
 from services.risk_adjustment_service import apply_judge_risk_feedback, effective_risk_limits, snapshot_adjustments, build_risk_profile
 from services.strategy_run_registry import StrategyRunConfig, StrategyRunRegistry, strategy_run_registry
@@ -1424,8 +1432,10 @@ class LLMStrategistBacktester:
         day_key: str,
         since_ts: datetime | None,
         until_ts: datetime,
+        *,
+        limit_entry: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        limit_entry = self.limit_enforcement_by_day.get(day_key)
+        limit_entry = limit_entry or self.limit_enforcement_by_day.get(day_key)
         if not limit_entry:
             return {}
         stats: Dict[str, Dict[str, Any]] = defaultdict(
@@ -2619,7 +2629,10 @@ class LLMStrategistBacktester:
                         "judge_triggered": judge_triggered_replan,
                         "is_new_day": is_new_day,
                     })
+                    previous_generated_ts = getattr(current_plan, "_plan_generated_at_ts", None)
                     current_plan = current_plan.model_copy(update={"valid_until": day_end})
+                    if previous_generated_ts:
+                        object.__setattr__(current_plan, "_plan_generated_at_ts", previous_generated_ts)
                     plan_rebuild = False
                 else:
                     current_plan = self.plan_service.generate_plan_for_run(
@@ -2644,6 +2657,7 @@ class LLMStrategistBacktester:
                             "valid_until": plan_end,
                         }
                     )
+                    object.__setattr__(current_plan, "_plan_generated_at_ts", ts)
                     current_plan = self._apply_plan_overrides(current_plan)
                     current_plan = self._apply_trigger_budget(current_plan)
                     current_plan, stripped_by_judge = self._strip_judge_constrained_triggers(current_plan)
@@ -2703,6 +2717,11 @@ class LLMStrategistBacktester:
                             "Generated new plan at %s (day boundary replan). Judge timer preserved at %s",
                             ts.isoformat(), self.next_judge_time.isoformat() if self.next_judge_time else "unset"
                         )
+                carried_forward_exits: list[dict] = []
+                if plan_rebuild and current_plan is not None:
+                    current_plan, carried_forward_exits = self._carry_forward_exit_triggers(
+                        current_plan, previous_plan
+                    )
                 if plan_rebuild:
                     if not is_initial_plan:
                         self.replans_by_day[day_key] += 1
@@ -2841,6 +2860,7 @@ class LLMStrategistBacktester:
                         "latest_judge_strategist_constraints_present": latest_judge_strategist_constraints_present,
                         "llm_meta": llm_meta_compact,
                         "stripped_by_judge": stripped_by_judge,
+                        "carried_forward_exit_triggers": carried_forward_exits,
                         "stance": "wait" if wait_stance else "active",
                     }
                 )
@@ -3236,6 +3256,72 @@ class LLMStrategistBacktester:
                 len(stripped), len(plan.triggers), len(filtered),
             )
         return plan.model_copy(update={"triggers": filtered}), stripped
+
+    def _carry_forward_exit_triggers(
+        self,
+        plan: StrategyPlan,
+        previous_plan: StrategyPlan | None,
+    ) -> tuple[StrategyPlan, list[dict]]:
+        """Ensure exit rules remain available for open positions after replans."""
+        if not previous_plan or not previous_plan.triggers:
+            return plan, []
+        open_positions = {
+            symbol: meta
+            for symbol, meta in self.portfolio.position_meta.items()
+            if abs(self.portfolio.positions.get(symbol, 0.0)) > 1e-9
+        }
+        if not open_positions:
+            return plan, []
+
+        existing_keys = {(t.symbol, t.category) for t in plan.triggers}
+        prev_by_id = {t.id: t for t in previous_plan.triggers}
+        prev_by_key: Dict[tuple[str, str | None], List[TriggerCondition]] = defaultdict(list)
+        for trig in previous_plan.triggers:
+            prev_by_key[(trig.symbol, trig.category)].append(trig)
+
+        carried: list[dict] = []
+        new_triggers = list(plan.triggers)
+        for symbol, meta in open_positions.items():
+            entry_category = meta.get("entry_category") or meta.get("category")
+            if not entry_category:
+                continue
+            key = (symbol, entry_category)
+            if key in existing_keys:
+                continue
+            entry_trigger_id = meta.get("entry_trigger_id") or meta.get("reason")
+            candidate = None
+            if entry_trigger_id and entry_trigger_id in prev_by_id:
+                candidate = prev_by_id[entry_trigger_id]
+            else:
+                for trig in prev_by_key.get(key, []):
+                    if (trig.exit_rule or "").strip():
+                        candidate = trig
+                        break
+            if candidate is None:
+                continue
+            exit_only = candidate.model_copy(update={"entry_rule": "false"})
+            if any(t.id == exit_only.id for t in new_triggers):
+                exit_only = exit_only.model_copy(update={"id": f"{exit_only.id}__exit_only"})
+            new_triggers.append(exit_only)
+            carried.append(
+                {
+                    "symbol": symbol,
+                    "category": entry_category,
+                    "entry_trigger_id": entry_trigger_id,
+                    "source_trigger_id": candidate.id,
+                    "carried_trigger_id": exit_only.id,
+                }
+            )
+            existing_keys.add(key)
+
+        if carried:
+            logger.info(
+                "Carried forward %d exit triggers for open positions: %s",
+                len(carried),
+                carried,
+            )
+            return plan.model_copy(update={"triggers": new_triggers}), carried
+        return plan, []
 
     def _apply_plan_overrides(self, plan: StrategyPlan) -> StrategyPlan:
         updates: Dict[str, Any] = {}
@@ -3714,6 +3800,15 @@ class LLMStrategistBacktester:
             # Stance distribution for the day
             "stance_distribution": dict(self.stance_distribution_by_day.get(day_key, {})),
         }
+        report_end_ts = self._coerce_timestamp(reports[-1]["timestamp"])
+        if report_end_ts is None:
+            report_end_ts = datetime.fromisoformat(f"{day_key}T23:59:59+00:00")
+        summary["trigger_attempts"] = self._build_trigger_attempt_stats(
+            day_key,
+            None,
+            report_end_ts,
+            limit_entry=limit_entry,
+        )
         blocked_daily_cap = skipped_counts.get(BlockReason.DAILY_CAP.value, 0)
         blocked_symbol_veto = skipped_counts.get(BlockReason.SYMBOL_VETO.value, 0)
         blocked_direction = skipped_counts.get(BlockReason.DIRECTION.value, 0)
@@ -3844,8 +3939,10 @@ class LLMStrategistBacktester:
                 "inputs": plan_limits.get("cap_inputs") or {},
             }
         if self.adaptive_replanning:
+            last_feedback = {}
             if self.intraday_judge_history:
-                summary["judge_feedback"] = self.intraday_judge_history[-1].get("feedback", {})
+                last_feedback = self.intraday_judge_history[-1].get("feedback", {}) or {}
+                summary["judge_feedback"] = last_feedback
             else:
                 summary["judge_feedback"] = {}
             if self.use_judge_shim:
@@ -3857,6 +3954,18 @@ class LLMStrategistBacktester:
             else:
                 summary["canonical_judge_snapshot"] = {}
             summary["risk_adjustments"] = []
+            if last_feedback:
+                try:
+                    feedback_obj = JudgeFeedback.model_validate(last_feedback)
+                    run = self._apply_feedback_adjustments(
+                        run_id,
+                        feedback_obj,
+                        equity_return_pct > 0,
+                        advance_day=True,
+                    )
+                    summary["risk_adjustments"] = list(snapshot_adjustments(run.risk_adjustments or {}))
+                except Exception as exc:
+                    logger.warning("Failed to apply adaptive judge adjustments at day close: %s", exc)
         else:
             raw_feedback = self._judge_feedback(summary)
             summary["judge_feedback"] = raw_feedback
@@ -4525,9 +4634,16 @@ class LLMStrategistBacktester:
         )
         return feedback.model_dump()
 
-    def _apply_feedback_adjustments(self, run_id: str, feedback: JudgeFeedback, winning_day: bool):
+    def _apply_feedback_adjustments(
+        self,
+        run_id: str,
+        feedback: JudgeFeedback,
+        winning_day: bool,
+        *,
+        advance_day: bool = True,
+    ):
         run = self.run_registry.get_strategy_run(run_id)
-        apply_judge_risk_feedback(run, feedback, winning_day)
+        apply_judge_risk_feedback(run, feedback, winning_day, advance_day=advance_day)
         updated = self.run_registry.update_strategy_run(run)
         self._refresh_risk_state_from_run(updated)
         return updated
@@ -4906,7 +5022,9 @@ class LLMStrategistBacktester:
 
         # Condition 3: No trades but should have (triggers exist but not firing)
         if current_plan and len(current_plan.triggers) > 3:
-            plan_start = self._coerce_timestamp(getattr(current_plan, "generated_at", None))
+            plan_start = self._coerce_timestamp(
+                getattr(current_plan, "_plan_generated_at_ts", None)
+            ) or self._coerce_timestamp(getattr(current_plan, "generated_at", None))
             if plan_start:
                 trades_since_plan, invalid_count, invalid_samples = self._count_fills_between(plan_start, ts)
                 if invalid_count:
@@ -4968,13 +5086,23 @@ class LLMStrategistBacktester:
             "next_judge_time": self.next_judge_time.isoformat(),
         }
 
-        # Persist judge feedback to the StrategyRun so downstream consumers see it
+        # Persist judge feedback and apply risk adjustments (intraday, no day-advance).
         try:
-            run = self.run_registry.get_strategy_run(run_id)
-            run.latest_judge_feedback = JudgeFeedback.model_validate(feedback)
-            self.run_registry.update_strategy_run(run)
+            feedback_obj = JudgeFeedback.model_validate(feedback)
+            self._apply_feedback_adjustments(
+                run_id,
+                feedback_obj,
+                snapshot.get("return_pct", 0.0) > 0,
+                advance_day=False,
+            )
         except (KeyError, Exception) as exc:
-            logger.warning("Failed to persist judge feedback to run: %s", exc)
+            logger.warning("Failed to apply judge adjustments intraday: %s", exc)
+            try:
+                run = self.run_registry.get_strategy_run(run_id)
+                run.latest_judge_feedback = JudgeFeedback.model_validate(feedback)
+                self.run_registry.update_strategy_run(run)
+            except (KeyError, Exception) as inner_exc:
+                logger.warning("Failed to persist judge feedback to run: %s", inner_exc)
 
         # Log the evaluation
         self.intraday_judge_history.append(result)

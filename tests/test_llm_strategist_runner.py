@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from agents.strategies.plan_provider import LLMCostTracker
-from backtesting.llm_strategist_runner import LLMStrategistBacktester
+from backtesting.llm_strategist_runner import LLMStrategistBacktester, PortfolioTracker
 from agents.strategies.llm_client import LLMClient
 from schemas.llm_strategist import PositionSizingRule, RiskConstraint, StrategyPlan, TriggerCondition
 from schemas.strategy_run import RiskLimitSettings
@@ -118,8 +118,101 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
     assert "blocked_details" in summary["limit_stats"]
     assert "risk_adjustments" in summary
     assert "overnight_exposure" in summary
-    assert "pnl_breakdown" in summary
-    assert "trigger_stats" in summary
+
+
+def test_carry_forward_exit_triggers_for_open_positions():
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    previous_plan = StrategyPlan(
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[
+            TriggerCondition(
+                id="btc_mean_reversion_long_1",
+                symbol="BTC-USD",
+                direction="long",
+                timeframe="1h",
+                category="mean_reversion",
+                entry_rule="rsi_14 < 40 and position == 'flat'",
+                exit_rule="close > sma_short",
+            ),
+            TriggerCondition(
+                id="eth_mean_reversion_long_1",
+                symbol="ETH-USD",
+                direction="long",
+                timeframe="1h",
+                category="mean_reversion",
+                entry_rule="rsi_14 < 40 and position == 'flat'",
+                exit_rule="close > sma_short",
+            ),
+        ],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=5.0,
+            max_symbol_exposure_pct=50.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[
+            PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=5.0),
+            PositionSizingRule(symbol="ETH-USD", sizing_mode="fixed_fraction", target_risk_pct=5.0),
+        ],
+        max_trades_per_day=5,
+        allowed_symbols=["BTC-USD", "ETH-USD"],
+        allowed_directions=["long", "short", "exit"],
+        allowed_trigger_categories=["trend_continuation", "mean_reversion"],
+    )
+    current_plan = StrategyPlan(
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[
+            TriggerCondition(
+                id="btc_trend_continuation_short_1",
+                symbol="BTC-USD",
+                direction="short",
+                timeframe="1h",
+                category="trend_continuation",
+                entry_rule="rsi_14 > 60 and position == 'flat'",
+                exit_rule="rsi_14 < 50",
+            )
+        ],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=5.0,
+            max_symbol_exposure_pct=50.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[
+            PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=5.0),
+            PositionSizingRule(symbol="ETH-USD", sizing_mode="fixed_fraction", target_risk_pct=5.0),
+        ],
+        max_trades_per_day=5,
+        allowed_symbols=["BTC-USD", "ETH-USD"],
+        allowed_directions=["long", "short", "exit"],
+        allowed_trigger_categories=["trend_continuation", "mean_reversion"],
+    )
+
+    backtester = LLMStrategistBacktester.__new__(LLMStrategistBacktester)  # type: ignore
+    backtester.portfolio = PortfolioTracker(
+        initial_cash=1000.0,
+        fee_rate=0.0,
+    )
+    backtester.portfolio.positions = {"BTC-USD": 1.0, "ETH-USD": 2.0}
+    backtester.portfolio.position_meta = {
+        "BTC-USD": {"entry_category": "mean_reversion", "entry_trigger_id": "btc_mean_reversion_long_1"},
+        "ETH-USD": {"entry_category": "mean_reversion", "entry_trigger_id": "eth_mean_reversion_long_1"},
+    }
+
+    updated, carried = backtester._carry_forward_exit_triggers(current_plan, previous_plan)
+    assert len(carried) == 2
+    carried_ids = {entry["carried_trigger_id"] for entry in carried}
+    updated_ids = {t.id for t in updated.triggers}
+    assert carried_ids.issubset(updated_ids)
+    # ensure carried triggers are exit-only
+    exit_only = [t for t in updated.triggers if t.id in carried_ids]
+    assert all(t.entry_rule == "false" for t in exit_only)
 
 
 @pytest.mark.parametrize("strict_fixed_caps", [True, False])

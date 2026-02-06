@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import { ChevronDown, ChevronUp, AlertTriangle, Info, Zap, Shield, Target } from 'lucide-react';
 import { numberOrFallback, parseOptionalNumber } from '../lib/utils';
+import { useDebouncedCallback } from '../hooks/useDebounce';
 
 // Generic type for aggressive trading settings shared by BacktestConfig and PaperTradingSessionConfig
 export interface AggressiveSettings {
@@ -66,11 +67,14 @@ const WHIPSAW_PRESETS = {
   },
 };
 
-export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, onChange, disabled }: AggressiveSettingsPanelProps<T>) {
+function AggressiveSettingsPanelInner<T extends AggressiveSettings>({ config, onChange, disabled }: AggressiveSettingsPanelProps<T>) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [whipsawPreset, setWhipsawPreset] = useState<string>('conservative');
 
-  const applyWhipsawPreset = (presetKey: string) => {
+  // Debounce config updates to prevent lag on rapid input changes
+  const debouncedOnChange = useDebouncedCallback(onChange, 150);
+
+  const applyWhipsawPreset = useCallback((presetKey: string) => {
     setWhipsawPreset(presetKey);
     const preset = WHIPSAW_PRESETS[presetKey as keyof typeof WHIPSAW_PRESETS];
     if (preset) {
@@ -81,12 +85,75 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
         confidence_override_threshold: preset.confidence_override_threshold,
       });
     }
-  };
+  }, [config, onChange]);
 
   const portfolioExposure = numberOrFallback(config.max_portfolio_exposure_pct, 80);
   const isLeveraged = portfolioExposure > 100;
   const isScalperMode = config.min_hold_hours === 0 && config.min_flat_hours === 0;
   const conflictPolicy = config.conflicting_signal_policy ?? 'reverse';
+
+  // Memoized handlers for numeric inputs
+  const handlePositionRiskChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, max_position_risk_pct: next });
+  }, [config, debouncedOnChange]);
+
+  const handlePortfolioExposureChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, max_portfolio_exposure_pct: next });
+  }, [config, debouncedOnChange]);
+
+  const handleSymbolExposureChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, max_symbol_exposure_pct: next });
+  }, [config, debouncedOnChange]);
+
+  const handleDailyLossChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, max_daily_loss_pct: next });
+  }, [config, debouncedOnChange]);
+
+  const handleMinPriceMoveChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, min_price_move_pct: next });
+  }, [config, debouncedOnChange]);
+
+  const handleMinHoldHoursChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, min_hold_hours: next });
+    setWhipsawPreset('custom');
+  }, [config, debouncedOnChange]);
+
+  const handleMinFlatHoursChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, min_flat_hours: next });
+    setWhipsawPreset('custom');
+  }, [config, debouncedOnChange]);
+
+  const handleConflictPolicyChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    onChange({ ...config, conflicting_signal_policy: e.target.value as AggressiveSettings['conflicting_signal_policy'] });
+  }, [config, onChange]);
+
+  const handleWalkAwayEnabledChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    onChange({ ...config, walk_away_enabled: e.target.checked });
+  }, [config, onChange]);
+
+  const handleWalkAwayTargetChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, walk_away_profit_target_pct: next });
+  }, [config, debouncedOnChange]);
+
+  const handleFlattenDailyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    onChange({ ...config, flatten_positions_daily: e.target.checked });
+  }, [config, onChange]);
 
   return (
     <div className="border border-orange-200 dark:border-orange-800 rounded-lg overflow-hidden">
@@ -146,13 +213,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={numberOrFallback(config.max_position_risk_pct, 2)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, max_position_risk_pct: next });
-                  }}
+                  onChange={handlePositionRiskChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={0.1}
                   max={20}
@@ -175,13 +236,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={portfolioExposure}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, max_portfolio_exposure_pct: next });
-                  }}
+                  onChange={handlePortfolioExposureChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={10}
                   max={500}
@@ -199,13 +254,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={numberOrFallback(config.max_symbol_exposure_pct, 25)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, max_symbol_exposure_pct: next });
-                  }}
+                  onChange={handleSymbolExposureChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={5}
                   max={100}
@@ -223,13 +272,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={numberOrFallback(config.max_daily_loss_pct, 3)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, max_daily_loss_pct: next });
-                  }}
+                  onChange={handleDailyLossChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={50}
@@ -256,13 +299,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={numberOrFallback(config.min_price_move_pct, 0.5)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, min_price_move_pct: next });
-                  }}
+                  onChange={handleMinPriceMoveChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={0}
                   max={10}
@@ -318,14 +355,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={numberOrFallback(config.min_hold_hours, 2)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, min_hold_hours: next });
-                    setWhipsawPreset('custom');
-                  }}
+                  onChange={handleMinHoldHoursChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={0}
                   max={24}
@@ -343,14 +373,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={numberOrFallback(config.min_flat_hours, 2)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, min_flat_hours: next });
-                    setWhipsawPreset('custom');
-                  }}
+                  onChange={handleMinFlatHoursChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={0}
                   max={24}
@@ -381,7 +404,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
               </label>
               <select
                 value={conflictPolicy}
-                onChange={(e) => onChange({ ...config, conflicting_signal_policy: e.target.value as AggressiveSettings['conflicting_signal_policy'] })}
+                onChange={handleConflictPolicyChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 disabled={disabled}
               >
@@ -426,7 +449,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="checkbox"
                   checked={config.walk_away_enabled ?? false}
-                  onChange={(e) => onChange({ ...config, walk_away_enabled: e.target.checked })}
+                  onChange={handleWalkAwayEnabledChange}
                   className="w-4 h-4 rounded border-gray-300 text-orange-500 focus:ring-orange-500"
                   disabled={disabled}
                 />
@@ -442,13 +465,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="number"
                   value={numberOrFallback(config.walk_away_profit_target_pct, 25)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, walk_away_profit_target_pct: next });
-                  }}
+                  onChange={handleWalkAwayTargetChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={100}
@@ -469,7 +486,7 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
                 <input
                   type="checkbox"
                   checked={config.flatten_positions_daily ?? false}
-                  onChange={(e) => onChange({ ...config, flatten_positions_daily: e.target.checked })}
+                  onChange={handleFlattenDailyChange}
                   className="w-4 h-4 rounded border-gray-300 text-orange-500 focus:ring-orange-500"
                   disabled={disabled}
                 />
@@ -488,3 +505,6 @@ export function AggressiveSettingsPanel<T extends AggressiveSettings>({ config, 
     </div>
   );
 }
+
+// Wrap with React.memo to prevent re-renders when parent state changes but props are the same
+export const AggressiveSettingsPanel = memo(AggressiveSettingsPanelInner) as typeof AggressiveSettingsPanelInner;

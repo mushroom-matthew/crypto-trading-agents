@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import { ChevronDown, ChevronUp, Calendar } from 'lucide-react';
 import { numberOrFallback, parseOptionalInteger, parseOptionalNumber } from '../lib/utils';
+import { useDebouncedCallback } from '../hooks/useDebounce';
 
 export interface PlanningSettings {
   max_trades_per_day?: number;
@@ -22,7 +23,7 @@ interface PlanningSettingsPanelProps<T extends PlanningSettings> {
   showDayBoundaryReplan?: boolean;
 }
 
-export function PlanningSettingsPanel<T extends PlanningSettings>({
+function PlanningSettingsPanelInner<T extends PlanningSettings>({
   config,
   onChange,
   disabled,
@@ -30,6 +31,62 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
   showDayBoundaryReplan = false,
 }: PlanningSettingsPanelProps<T>) {
   const [isExpanded, setIsExpanded] = useState(false);
+
+  // Debounce config updates to prevent lag on rapid input changes
+  const debouncedOnChange = useDebouncedCallback(onChange, 150);
+
+  // Memoized handlers for inputs
+  const handleMaxTradesChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalInteger(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, max_trades_per_day: next });
+  }, [config, debouncedOnChange]);
+
+  const handleMaxTriggersChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalInteger(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, max_triggers_per_symbol_per_day: next });
+  }, [config, debouncedOnChange]);
+
+  const handleJudgeCadenceChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, judge_cadence_hours: next });
+  }, [config, debouncedOnChange]);
+
+  const handleJudgeCheckAfterChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalInteger(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, judge_check_after_trades: next });
+  }, [config, debouncedOnChange]);
+
+  const handleReplanChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    onChange({ ...config, replan_on_day_boundary: e.target.checked });
+  }, [config, onChange]);
+
+  const handleDebugSampleRateChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, debug_trigger_sample_rate: next });
+  }, [config, debouncedOnChange]);
+
+  const handleDebugMaxSamplesChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalInteger(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, debug_trigger_max_samples: next });
+  }, [config, debouncedOnChange]);
+
+  const handleDebugModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    onChange({ ...config, indicator_debug_mode: e.target.value });
+  }, [config, onChange]);
+
+  const handleDebugKeysChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const keys = e.target.value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    debouncedOnChange({ ...config, indicator_debug_keys: keys });
+  }, [config, debouncedOnChange]);
 
   return (
     <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
@@ -67,13 +124,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               <input
                 type="number"
                 value={numberOrFallback(config.max_trades_per_day, 10)}
-                onChange={(e) => {
-                  const next = parseOptionalInteger(e.target.value);
-                  if (next === undefined) {
-                    return;
-                  }
-                  onChange({ ...config, max_trades_per_day: next });
-                }}
+                onChange={handleMaxTradesChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={1}
                 max={200}
@@ -89,13 +140,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               <input
                 type="number"
                 value={numberOrFallback(config.max_triggers_per_symbol_per_day, 5)}
-                onChange={(e) => {
-                  const next = parseOptionalInteger(e.target.value);
-                  if (next === undefined) {
-                    return;
-                  }
-                  onChange({ ...config, max_triggers_per_symbol_per_day: next });
-                }}
+                onChange={handleMaxTriggersChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={1}
                 max={50}
@@ -112,13 +157,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                 <input
                   type="number"
                   value={numberOrFallback(config.judge_cadence_hours, 4)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, judge_cadence_hours: next });
-                  }}
+                  onChange={handleJudgeCadenceChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={24}
@@ -139,13 +178,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                 <input
                   type="number"
                   value={numberOrFallback(config.judge_check_after_trades, 3)}
-                  onChange={(e) => {
-                    const next = parseOptionalInteger(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, judge_check_after_trades: next });
-                  }}
+                  onChange={handleJudgeCheckAfterChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={100}
@@ -167,9 +200,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
                   <input
                     type="checkbox"
                     checked={config.replan_on_day_boundary ?? true}
-                    onChange={(e) =>
-                      onChange({ ...config, replan_on_day_boundary: e.target.checked })
-                    }
+                    onChange={handleReplanChange}
                     className="w-4 h-4 text-blue-600 rounded"
                     disabled={disabled}
                   />
@@ -190,13 +221,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               <input
                 type="number"
                 value={numberOrFallback(config.debug_trigger_sample_rate, 0)}
-                onChange={(e) => {
-                  const next = parseOptionalNumber(e.target.value);
-                  if (next === undefined) {
-                    return;
-                  }
-                  onChange({ ...config, debug_trigger_sample_rate: next });
-                }}
+                onChange={handleDebugSampleRateChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={0}
                 max={1}
@@ -215,13 +240,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               <input
                 type="number"
                 value={numberOrFallback(config.debug_trigger_max_samples, 100)}
-                onChange={(e) => {
-                  const next = parseOptionalInteger(e.target.value);
-                  if (next === undefined) {
-                    return;
-                  }
-                  onChange({ ...config, debug_trigger_max_samples: next });
-                }}
+                onChange={handleDebugMaxSamplesChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 min={1}
                 max={1000}
@@ -239,9 +258,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               </label>
               <select
                 value={config.indicator_debug_mode ?? 'off'}
-                onChange={(e) =>
-                  onChange({ ...config, indicator_debug_mode: e.target.value })
-                }
+                onChange={handleDebugModeChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 disabled={disabled}
               >
@@ -261,13 +278,7 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
               <input
                 type="text"
                 value={(config.indicator_debug_keys ?? []).join(', ')}
-                onChange={(e) => {
-                  const keys = e.target.value
-                    .split(',')
-                    .map((entry) => entry.trim())
-                    .filter(Boolean);
-                  onChange({ ...config, indicator_debug_keys: keys });
-                }}
+                onChange={handleDebugKeysChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                 placeholder="rsi_14, ema_short, ema_long"
                 disabled={disabled || (config.indicator_debug_mode ?? 'off') !== 'keys'}
@@ -282,3 +293,6 @@ export function PlanningSettingsPanel<T extends PlanningSettings>({
     </div>
   );
 }
+
+// Wrap with React.memo to prevent re-renders when parent state changes but props are the same
+export const PlanningSettingsPanel = memo(PlanningSettingsPanelInner) as typeof PlanningSettingsPanelInner;

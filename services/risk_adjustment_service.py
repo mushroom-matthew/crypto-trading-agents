@@ -63,18 +63,29 @@ def _global_multiplier(adjustments: Dict[str, RiskAdjustmentState]) -> float:
     return min(state.multiplier for state in adjustments.values())
 
 
-def apply_judge_risk_feedback(run: StrategyRun, feedback: JudgeFeedback, winning_day: bool) -> bool:
-    """Update StrategyRun risk adjustments based on judge feedback."""
+def apply_judge_risk_feedback(
+    run: StrategyRun,
+    feedback: JudgeFeedback,
+    winning_day: bool,
+    *,
+    advance_day: bool = True,
+) -> bool:
+    """Update StrategyRun risk adjustments based on judge feedback.
+
+    Set advance_day=False to apply sizing instructions without progressing
+    win-based restoration counters (useful for intraday adjustments).
+    """
 
     adjustments = dict(run.risk_adjustments or {})
     changed = False
-    # First update existing adjustments for new performance info.
-    for symbol, state in list(adjustments.items()):
-        if state.record_day(winning_day):
-            adjustments.pop(symbol, None)
-            changed = True
-        else:
-            adjustments[symbol] = state
+    # First update existing adjustments for new performance info (day-level only).
+    if advance_day:
+        for symbol, state in list(adjustments.items()):
+            if state.record_day(winning_day):
+                adjustments.pop(symbol, None)
+                changed = True
+            else:
+                adjustments[symbol] = state
 
     instructions = feedback.strategist_constraints.sizing_adjustments or {}
     for symbol, instruction in instructions.items():
@@ -86,6 +97,14 @@ def apply_judge_risk_feedback(run: StrategyRun, feedback: JudgeFeedback, winning
             if symbol in adjustments:
                 adjustments.pop(symbol, None)
                 changed = True
+            continue
+        existing = adjustments.get(symbol)
+        if existing and existing.multiplier == multiplier and existing.restore_after_wins == wins_req:
+            if existing.instruction != instruction:
+                existing.instruction = instruction
+                adjustments[symbol] = existing
+                changed = True
+            feedback.constraints.symbol_risk_multipliers[symbol] = multiplier
             continue
         adjustments[symbol] = RiskAdjustmentState(
             multiplier=multiplier,

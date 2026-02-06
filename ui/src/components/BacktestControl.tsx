@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, Fragment } from 'react';
+import { useEffect, useMemo, useState, useCallback, Fragment } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { PlayCircle, Loader2, TrendingUp, TrendingDown, Info, ChevronDown, ChevronRight } from 'lucide-react';
@@ -210,6 +210,21 @@ export function BacktestControl() {
   const activeSymbol = selectedSymbol || availableSymbols[0] || '';
   const showSymbolPicker = availableSymbols.length > 1;
 
+  // Memoized config update handler for settings panels to prevent re-renders
+  const handleConfigChange = useCallback((newConfig: BacktestConfig) => {
+    setConfig(newConfig);
+  }, []);
+
+  // Memoized handlers for text inputs
+  const handleSymbolsChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setSymbolsInput(e.target.value);
+    setSymbolsError(null);
+  }, []);
+
+  const handleAllocationChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setAllocationInput(e.target.value);
+  }, []);
+
   const { data: candles = [] } = useQuery({
     queryKey: ['candles', selectedRun, activeSymbol],
     queryFn: () => backtestAPI.getPlaybackCandles(selectedRun!, activeSymbol, 0, 2000),
@@ -393,10 +408,7 @@ export function BacktestControl() {
               <input
                 type="text"
                 value={symbolsInput}
-                onChange={(e) => {
-                  setSymbolsInput(e.target.value);
-                  setSymbolsError(null);
-                }}
+                onChange={handleSymbolsChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
                 placeholder="BTC-USD, ETH-USD"
                 disabled={isRunning}
@@ -524,7 +536,7 @@ export function BacktestControl() {
               <input
                 type="text"
                 value={allocationInput}
-                onChange={(e) => setAllocationInput(e.target.value)}
+                onChange={handleAllocationChange}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
                 placeholder="cash:2000, BTC:4000, ETH:4000"
                 disabled={isRunning}
@@ -580,13 +592,13 @@ export function BacktestControl() {
             {/* Advanced Trading Settings (Scalper Mode, Leverage, Walk-Away) */}
             <AggressiveSettingsPanel
               config={config}
-              onChange={setConfig}
+              onChange={handleConfigChange}
               disabled={isRunning}
             />
             {config.strategy === 'llm_strategist' && (
               <PlanningSettingsPanel
                 config={config}
-                onChange={setConfig}
+                onChange={handleConfigChange}
                 disabled={isRunning}
                 showDayBoundaryReplan
               />
@@ -595,7 +607,7 @@ export function BacktestControl() {
             {config.strategy === 'llm_strategist' && (
               <LearningBookPanel
                 config={config}
-                onChange={setConfig}
+                onChange={handleConfigChange}
                 disabled={isRunning}
               />
             )}

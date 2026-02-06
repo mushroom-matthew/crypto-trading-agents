@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import { ChevronDown, ChevronUp, FlaskConical } from 'lucide-react';
 import { numberOrFallback, parseOptionalInteger, parseOptionalNumber } from '../lib/utils';
+import { useDebouncedCallback } from '../hooks/useDebounce';
 
 export interface LearningBookSettings {
   learning_book_enabled?: boolean;
@@ -14,12 +15,32 @@ interface LearningBookPanelProps<T extends LearningBookSettings> {
   disabled?: boolean;
 }
 
-export function LearningBookPanel<T extends LearningBookSettings>({
+function LearningBookPanelInner<T extends LearningBookSettings>({
   config,
   onChange,
   disabled,
 }: LearningBookPanelProps<T>) {
   const [isExpanded, setIsExpanded] = useState(false);
+
+  // Debounce config updates to prevent lag on rapid input changes
+  const debouncedOnChange = useDebouncedCallback(onChange, 150);
+
+  // Memoized handlers
+  const handleEnabledChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    onChange({ ...config, learning_book_enabled: e.target.checked });
+  }, [config, onChange]);
+
+  const handleRiskBudgetChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, learning_daily_risk_budget_pct: next });
+  }, [config, debouncedOnChange]);
+
+  const handleMaxTradesChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalInteger(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, learning_max_trades_per_day: next });
+  }, [config, debouncedOnChange]);
 
   return (
     <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
@@ -54,9 +75,7 @@ export function LearningBookPanel<T extends LearningBookSettings>({
               type="checkbox"
               id="learningBookEnabled"
               checked={config.learning_book_enabled ?? false}
-              onChange={(e) =>
-                onChange({ ...config, learning_book_enabled: e.target.checked })
-              }
+              onChange={handleEnabledChange}
               className="w-4 h-4 text-blue-600 rounded"
               disabled={disabled}
             />
@@ -74,13 +93,7 @@ export function LearningBookPanel<T extends LearningBookSettings>({
                 <input
                   type="number"
                   value={numberOrFallback(config.learning_daily_risk_budget_pct, 1.0)}
-                  onChange={(e) => {
-                    const next = parseOptionalNumber(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, learning_daily_risk_budget_pct: next });
-                  }}
+                  onChange={handleRiskBudgetChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={0.1}
                   max={10}
@@ -99,13 +112,7 @@ export function LearningBookPanel<T extends LearningBookSettings>({
                 <input
                   type="number"
                   value={numberOrFallback(config.learning_max_trades_per_day, 3)}
-                  onChange={(e) => {
-                    const next = parseOptionalInteger(e.target.value);
-                    if (next === undefined) {
-                      return;
-                    }
-                    onChange({ ...config, learning_max_trades_per_day: next });
-                  }}
+                  onChange={handleMaxTradesChange}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
                   min={1}
                   max={20}
@@ -123,3 +130,6 @@ export function LearningBookPanel<T extends LearningBookSettings>({
     </div>
   );
 }
+
+// Wrap with React.memo to prevent re-renders when parent state changes but props are the same
+export const LearningBookPanel = memo(LearningBookPanelInner) as typeof LearningBookPanelInner;
