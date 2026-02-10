@@ -22,8 +22,8 @@ Required output fields:
 - sizing_rules: array with one entry per symbol
 
 Optional output fields:
-- regime_alerts: conditions that would change your stance
-- sizing_hints: advisory sizing suggestions (not enforced)
+- regime_alerts: array of alert objects (see StrategyPlan schema)
+- sizing_hints: array of hint objects (see StrategyPlan schema)
 - rationale: brief explanation of your stance
 
 Trigger schema (each trigger needs):

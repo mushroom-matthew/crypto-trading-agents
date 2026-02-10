@@ -50,3 +50,11 @@ Risk constraints MUST include:
 
 Sizing rules MUST include one entry per symbol. If unsure, use:
 { "symbol": "<SYMBOL>", "sizing_mode": "fixed_fraction", "target_risk_pct": <max_position_risk_pct> }
+
+Optional fields (if provided) MUST follow these schemas:
+- regime_alerts: array of objects with keys:
+  indicator (string), threshold (number), direction (above|below|crosses), symbol (string), interpretation (string), priority (high|medium|low)
+- sizing_hints: array of objects with keys:
+  symbol (string), suggested_risk_pct (number), rationale (string)
+- max_triggers_per_symbol_per_day: integer
+- trigger_budgets: object mapping symbol -> integer (per-symbol trigger caps)

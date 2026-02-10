@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from agents.langfuse_utils import langfuse_span
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import completion_token_args, reasoning_effort_args
+from agents.llm.model_utils import output_token_args, reasoning_args
 from schemas.judge_feedback import (
     JudgeFeedback, JudgeConstraints, DisplayConstraints,
     JudgeAttribution, AttributionEvidence, AttributionLayer, RecommendedAction
@@ -778,20 +778,20 @@ Your final score can differ from the heuristic score if you have good reasons.""
 
         try:
             with langfuse_span("judge_feedback.backtest", metadata={"model": self.model}) as span:
-                response = self.client.chat.completions.create(
+                response = self.client.responses.create(
                     model=self.model,
-                    messages=[
+                    input=[
                         {
                             "role": "system",
                             "content": "You are an expert trading analyst evaluating algorithmic trading decisions. Provide objective, data-driven analysis.",
                         },
                         {"role": "user", "content": analysis_prompt},
                     ],
-                    **completion_token_args(self.model, 800),
-                    **reasoning_effort_args(self.model, effort="low"),
+                    **output_token_args(self.model, 800),
+                    **reasoning_args(self.model, effort="low"),
                 )
 
-                analysis_text = response.choices[0].message.content
+                analysis_text = response.output_text
                 if span:
                     span.end(output=analysis_text)
 

@@ -64,7 +64,7 @@ def tool_result_data(result: Any) -> Any:
 
 
 def stream_chat_completion(client, *, prefix: str = "", color: str = "", reset: str = "", **kwargs) -> dict:
-    """Stream chat completion tokens to stdout and return the final message.
+    """Stream Responses API tokens to stdout and return the final message.
 
     Parameters
     ----------
@@ -77,42 +77,75 @@ def stream_chat_completion(client, *, prefix: str = "", color: str = "", reset: 
     reset:
         ANSI escape code used to reset the terminal color when streaming ends.
     kwargs:
-        Additional parameters forwarded to ``client.chat.completions.create``.
+        Additional parameters forwarded to ``client.responses.create``.
+        Accepts ``messages`` (remapped to ``input``) and Chat Completions
+        tool format (automatically unwrapped for the Responses API).
     """
+    from agents.llm.model_utils import reasoning_args, output_token_args, temperature_args
 
-    stream = client.chat.completions.create(stream=True, **kwargs)
+    # Remap Chat Completions-style 'messages' to Responses API 'input'
+    messages = kwargs.pop("messages", None)
+    if messages is not None:
+        kwargs["input"] = messages
+
+    model = kwargs.get("model")
+
+    # Transform tools from Chat Completions format to Responses API format
+    tools = kwargs.pop("tools", None)
+    if tools:
+        responses_tools = []
+        for tool in tools:
+            if tool.get("type") == "function" and "function" in tool:
+                func = tool["function"]
+                responses_tools.append({
+                    "type": "function",
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "parameters": func.get("parameters", {}),
+                })
+            else:
+                responses_tools.append(tool)
+        kwargs["tools"] = responses_tools
+
+    # Add model-specific parameters if not already specified
+    if "reasoning" not in kwargs:
+        kwargs.update(reasoning_args(model))
+    if "max_output_tokens" not in kwargs:
+        kwargs.update(output_token_args(model, 4096))
+    if "temperature" not in kwargs:
+        kwargs.update(temperature_args(model, 0.7))
+
+    stream = client.responses.create(stream=True, **kwargs)
     content_parts: list[str] = []
     tool_calls: dict[int, dict] = {}
+    current_tool_idx = -1
     first_token = True
 
-    for chunk in stream:
-        choice = chunk.choices[0]
-        delta = getattr(choice, "delta", None)
-        if not delta:
-            continue
-        token = getattr(delta, "content", None)
-        if token:
-            if first_token:
-                if prefix or color:
-                    print(f"{color}{prefix}", end="", flush=True)
-                first_token = False
-            print(token, end="", flush=True)
-            content_parts.append(token)
-        for tc in getattr(delta, "tool_calls", []) or []:
-            entry = tool_calls.setdefault(
-                getattr(tc, "index", 0),
-                {
-                    "id": tc.id,
-                    "type": getattr(tc, "type", "function"),
-                    "function": {"name": "", "arguments": ""},
-                },
-            )
-            name = getattr(tc.function, "name", "")
-            if name:
-                entry["function"]["name"] += name
-            args = getattr(tc.function, "arguments", "")
-            if args:
-                entry["function"]["arguments"] += args
+    for event in stream:
+        if event.type == "response.output_text.delta":
+            token = event.delta
+            if token:
+                if first_token:
+                    if prefix or color:
+                        print(f"{color}{prefix}", end="", flush=True)
+                    first_token = False
+                print(token, end="", flush=True)
+                content_parts.append(token)
+        elif event.type == "response.output_item.added":
+            item = getattr(event, "item", None)
+            if item and getattr(item, "type", None) == "function_call":
+                current_tool_idx += 1
+                tool_calls[current_tool_idx] = {
+                    "id": getattr(item, "call_id", f"call_{current_tool_idx}"),
+                    "type": "function",
+                    "function": {
+                        "name": getattr(item, "name", ""),
+                        "arguments": "",
+                    },
+                }
+        elif event.type == "response.function_call_arguments.delta":
+            if current_tool_idx >= 0 and current_tool_idx in tool_calls:
+                tool_calls[current_tool_idx]["function"]["arguments"] += event.delta
 
     if not first_token and reset:
         print(reset)

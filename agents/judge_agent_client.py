@@ -31,7 +31,7 @@ from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import init_langfuse
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import completion_token_args, reasoning_effort_args
+from agents.llm.model_utils import output_token_args, reasoning_args
 from agents.event_emitter import emit_event
 from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
 from services.risk_adjustment_service import multiplier_from_instruction
@@ -386,9 +386,9 @@ JSON:
         
         try:
             _model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-            response = openai_client.chat.completions.create(
+            response = openai_client.responses.create(
                 model=_model,
-                messages=[
+                input=[
                     {
                         "role": "system",
                         "content": "You are an expert trading analyst evaluating algorithmic trading decisions. Provide objective, data-driven analysis."
@@ -398,11 +398,11 @@ JSON:
                         "content": analysis_prompt
                     }
                 ],
-                **completion_token_args(_model, 800),
-                **reasoning_effort_args(_model, effort="low"),
+                **output_token_args(_model, 800),
+                **reasoning_args(_model, effort="low"),
             )
 
-            analysis_text = response.choices[0].message.content
+            analysis_text = response.output_text
             if not analysis_text:
                 raise ValueError("Empty judge response")
             notes_text, json_block = _split_notes_and_json(analysis_text)
@@ -662,14 +662,14 @@ Return ONLY the improved system prompt, no explanations."""
 
         try:
             _model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-            response = openai_client.chat.completions.create(
+            response = openai_client.responses.create(
                 model=_model,
-                messages=[{"role": "user", "content": improvement_prompt}],
-                **completion_token_args(_model, 2000),
-                **reasoning_effort_args(_model, effort="low"),
+                input=[{"role": "user", "content": improvement_prompt}],
+                **output_token_args(_model, 2000),
+                **reasoning_args(_model, effort="low"),
             )
-            
-            improved_prompt = response.choices[0].message.content.strip()
+
+            improved_prompt = response.output_text.strip()
             
             # Remove any markdown code blocks if present
             if improved_prompt.startswith("```") and improved_prompt.endswith("```"):

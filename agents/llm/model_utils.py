@@ -1,4 +1,4 @@
-"""Model capability helpers for OpenAI calls."""
+"""Model capability helpers for OpenAI Responses API calls."""
 
 from __future__ import annotations
 
@@ -38,31 +38,20 @@ def reasoning_args(model: str | None, effort: str = "low") -> Dict[str, Any]:
     return {"reasoning": {"effort": effort}}
 
 
-def reasoning_effort_args(model: str | None, effort: str = "low") -> Dict[str, str]:
-    """Return reasoning_effort kwarg for Chat Completions API, else empty.
-
-    Chat Completions uses a top-level ``reasoning_effort`` string param,
-    unlike the Responses API which nests it under ``reasoning.effort``.
-    """
-    if not is_reasoning_model(model):
-        return {}
-    return {"reasoning_effort": effort}
-
-
-def completion_token_args(
+def output_token_args(
     model: str | None,
     desired_output_tokens: int,
     reasoning_headroom: int = 4096,
 ) -> Dict[str, int]:
-    """Return max_completion_tokens for Chat Completions API.
+    """Return max_output_tokens for the Responses API.
 
     For reasoning models, adds headroom for reasoning tokens on top of
     the desired visible output tokens.  For non-reasoning models, returns
     the desired output tokens directly.
     """
     if is_reasoning_model(model):
-        return {"max_completion_tokens": desired_output_tokens + reasoning_headroom}
-    return {"max_completion_tokens": desired_output_tokens}
+        return {"max_output_tokens": desired_output_tokens + reasoning_headroom}
+    return {"max_output_tokens": desired_output_tokens}
 
 
 __all__ = [
@@ -70,6 +59,5 @@ __all__ = [
     "supports_temperature",
     "temperature_args",
     "reasoning_args",
-    "reasoning_effort_args",
-    "completion_token_args",
+    "output_token_args",
 ]

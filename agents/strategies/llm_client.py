@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from agents.langfuse_utils import langfuse_span
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import reasoning_args, temperature_args
+from agents.llm.model_utils import output_token_args, reasoning_args, temperature_args
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
 from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint, StrategyPlan
@@ -199,7 +199,7 @@ class LLMClient:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": llm_input.to_json()},
                         ],
-                        max_output_tokens=16000,
+                        **output_token_args(self.model, 2500),
                         **temperature_args(self.model, 0.1),
                         **reasoning_args(self.model, effort="low"),
                     )
@@ -419,7 +419,146 @@ class LLMClient:
                     trig["entry_rule"] = "false"
             cleaned.append(trig)
         data["triggers"] = cleaned
+        data["regime_alerts"] = self._normalize_regime_alerts(data.get("regime_alerts"))
+        data["sizing_hints"] = self._normalize_sizing_hints(data.get("sizing_hints"))
+        data["trigger_budgets"] = self._normalize_trigger_budgets(data.get("trigger_budgets"))
+        data["max_triggers_per_symbol_per_day"] = self._normalize_max_triggers_per_symbol_per_day(
+            data.get("max_triggers_per_symbol_per_day"),
+            data,
+        )
         return data
+
+    @staticmethod
+    def _normalize_regime_alerts(value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        if not isinstance(value, list):
+            logging.warning("Dropping invalid regime_alerts (expected list, got %s)", type(value).__name__)
+            return []
+        normalized: List[Dict[str, Any]] = []
+        dropped_strings = False
+        allowed_direction = {"above", "below", "crosses"}
+        allowed_priority = {"high", "medium", "low"}
+        for item in value:
+            if isinstance(item, dict):
+                indicator = item.get("indicator")
+                threshold = item.get("threshold")
+                direction = item.get("direction")
+                symbol = item.get("symbol")
+                interpretation = item.get("interpretation")
+                if not all([indicator, threshold, direction, symbol, interpretation]):
+                    continue
+                try:
+                    threshold_val = float(threshold)
+                except (TypeError, ValueError):
+                    continue
+                direction_val = str(direction).lower()
+                if direction_val not in allowed_direction:
+                    continue
+                priority_val = str(item.get("priority", "medium")).lower()
+                if priority_val not in allowed_priority:
+                    priority_val = "medium"
+                normalized.append(
+                    {
+                        "indicator": str(indicator),
+                        "threshold": threshold_val,
+                        "direction": direction_val,
+                        "symbol": str(symbol),
+                        "interpretation": str(interpretation),
+                        "priority": priority_val,
+                    }
+                )
+            elif isinstance(item, str):
+                dropped_strings = True
+        if dropped_strings:
+            logging.warning("Dropping string regime_alerts entries; expected structured objects.")
+        return normalized
+
+    @staticmethod
+    def _normalize_sizing_hints(value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        if not isinstance(value, list):
+            logging.warning("Dropping invalid sizing_hints (expected list, got %s)", type(value).__name__)
+            return []
+        normalized: List[Dict[str, Any]] = []
+        dropped_strings = False
+        for item in value:
+            if isinstance(item, dict):
+                symbol = item.get("symbol")
+                suggested = item.get("suggested_risk_pct")
+                rationale = item.get("rationale")
+                if not all([symbol, suggested, rationale]):
+                    continue
+                try:
+                    suggested_val = float(suggested)
+                except (TypeError, ValueError):
+                    continue
+                normalized.append(
+                    {
+                        "symbol": str(symbol),
+                        "suggested_risk_pct": suggested_val,
+                        "rationale": str(rationale),
+                    }
+                )
+            elif isinstance(item, str):
+                dropped_strings = True
+        if dropped_strings:
+            logging.warning("Dropping string sizing_hints entries; expected structured objects.")
+        return normalized
+
+    @staticmethod
+    def _normalize_trigger_budgets(value: Any) -> Dict[str, int]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            logging.warning("Dropping invalid trigger_budgets (expected dict, got %s)", type(value).__name__)
+            return {}
+        normalized: Dict[str, int] = {}
+        for key, raw_val in value.items():
+            if key is None:
+                continue
+            try:
+                int_val = int(raw_val)
+            except (TypeError, ValueError):
+                continue
+            if int_val < 0:
+                continue
+            normalized[str(key)] = int_val
+        return normalized
+
+    def _normalize_max_triggers_per_symbol_per_day(self, value: Any, data: Dict[str, Any]) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            # LLM sometimes emits per-symbol dict here; treat as trigger_budgets instead.
+            migrated = self._normalize_trigger_budgets(value)
+            if migrated:
+                existing = data.get("trigger_budgets")
+                if isinstance(existing, dict):
+                    merged = {**existing, **migrated}
+                    data["trigger_budgets"] = merged
+                else:
+                    data["trigger_budgets"] = migrated
+                max_val = max(migrated.values()) if migrated else None
+                logging.warning(
+                    "Coerced max_triggers_per_symbol_per_day dict into trigger_budgets; using max=%s",
+                    max_val,
+                )
+                return max_val
+            return None
+        try:
+            int_val = int(value)
+        except (TypeError, ValueError):
+            logging.warning("Dropping invalid max_triggers_per_symbol_per_day (expected int, got %s)", type(value).__name__)
+            return None
+        if int_val < 0:
+            return None
+        return int_val
 
     @staticmethod
     @lru_cache(1)

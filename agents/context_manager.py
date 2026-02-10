@@ -9,7 +9,7 @@ import tiktoken
 
 from agents.langfuse_utils import openai, init_langfuse
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import completion_token_args, reasoning_effort_args, temperature_args
+from agents.llm.model_utils import output_token_args, reasoning_args, temperature_args
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +94,9 @@ class ContextManager:
         
         try:
             _model = "gpt-5-mini"
-            response = self.openai_client.chat.completions.create(
+            response = self.openai_client.responses.create(
                 model=_model,
-                messages=[
+                input=[
                     {
                         "role": "system",
                         "content": (
@@ -111,11 +111,11 @@ class ContextManager:
                         "content": f"Summarize this conversation:\n\n{conversation_text}"
                     }
                 ],
-                **completion_token_args(_model, 300),
-                **reasoning_effort_args(_model, effort="low"),
+                **output_token_args(_model, 300),
+                **reasoning_args(_model, effort="low"),
                 **temperature_args(_model, 0.1),
             )
-            summary = response.choices[0].message.content
+            summary = response.output_text
             return f"[CONVERSATION SUMMARY] {summary}"
         except Exception as exc:
             logger.error("Failed to generate summary: %s", exc)

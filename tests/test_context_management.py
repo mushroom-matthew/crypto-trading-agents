@@ -93,12 +93,11 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_context_management_with_summarization(self):
         """Test context management with summarization."""
-        # Mock OpenAI client
+        # Mock OpenAI client (Responses API)
         mock_client = Mock()
         mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = "Summary of previous conversation"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_response.output_text = "Summary of previous conversation"
+        mock_client.responses.create.return_value = mock_response
         
         manager = ContextManager(
             max_tokens=100,  # Very small to trigger summarization

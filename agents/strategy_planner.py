@@ -15,7 +15,7 @@ from agents.prompt_manager import PromptManager
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import init_langfuse
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import reasoning_args, temperature_args
+from agents.llm.model_utils import output_token_args, reasoning_args, temperature_args
 from agents.workflows.strategy_spec_workflow import StrategySpecWorkflow
 from tools.strategy_spec import StrategySpec
 
