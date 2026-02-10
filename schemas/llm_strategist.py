@@ -28,6 +28,9 @@ class IndicatorSnapshot(SerializableModel):
     symbol: str
     timeframe: str
     as_of: datetime
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
     close: float
     volume: float | None = None
     volume_multiple: float | None = None
@@ -36,6 +39,7 @@ class IndicatorSnapshot(SerializableModel):
     sma_long: float | None = None
     ema_short: float | None = None
     ema_medium: float | None = None
+    ema_long: float | None = None
     rsi_14: float | None = None
     macd: float | None = None
     macd_signal: float | None = None
@@ -49,6 +53,7 @@ class IndicatorSnapshot(SerializableModel):
     donchian_lower_short: float | None = None
     bollinger_upper: float | None = None
     bollinger_lower: float | None = None
+    bollinger_middle: float | None = None
     # Cycle indicators (200-bar window for cyclical analysis)
     cycle_high_200: float | None = None
     cycle_low_200: float | None = None

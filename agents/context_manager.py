@@ -9,6 +9,7 @@ import tiktoken
 
 from agents.langfuse_utils import openai, init_langfuse
 from agents.llm.client_factory import get_llm_client
+from agents.llm.model_utils import temperature_args
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class ContextManager:
 
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: str = "gpt-5-mini",
         max_tokens: int = 8000,
         summary_threshold: int = 6000,
         min_recent_messages: int = 5,
@@ -93,7 +94,7 @@ class ContextManager:
         
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",  # Use smaller model for summarization
+                model="gpt-5-mini",  # Use compact model for summarization
                 messages=[
                     {
                         "role": "system",
@@ -110,7 +111,7 @@ class ContextManager:
                     }
                 ],
                 max_tokens=300,
-                temperature=0.1
+                **temperature_args("gpt-5-mini", 0.1)
             )
             summary = response.choices[0].message.content
             return f"[CONVERSATION SUMMARY] {summary}"
@@ -229,12 +230,15 @@ class ContextManager:
 
 
 def create_context_manager(
-    model: str = "gpt-4o",
+    model: str = "gpt-5-mini",
     openai_client: openai.OpenAI | None = None
 ) -> ContextManager:
     """Factory function to create a context manager with sensible defaults."""
     # Model-specific token limits (conservative estimates)
     model_limits = {
+        "gpt-5-mini": 120000,
+        "gpt-5": 120000,
+        "gpt-5.1": 120000,
         "gpt-4o": 120000,
         "gpt-4o-mini": 120000,
         "gpt-4": 8000,

@@ -122,7 +122,7 @@ async def persist_backtest_results(run_id: str, results: Dict[str, Any]) -> None
 
     db = Database()
     results_payload = _sanitize_json(_build_results_payload(results))
-    config = results_payload.get("config") or {}
+    incoming_config = results_payload.get("config") or {}
     status = _status_from_results(results_payload.get("status"))
     started_at = _parse_ts(results_payload.get("started_at"))
     completed_at = _parse_ts(results_payload.get("completed_at"))
@@ -138,12 +138,14 @@ async def persist_backtest_results(run_id: str, results: Dict[str, Any]) -> None
                 started_at = record.started_at
             if completed_at is None:
                 completed_at = record.completed_at
-            if not config:
+            existing_config: Dict[str, Any] = {}
+            if record.config:
                 try:
-                    config = json.loads(record.config) if record.config else {}
+                    existing_config = json.loads(record.config)
                 except json.JSONDecodeError:
-                    config = {}
-            config_json = json.dumps(config, default=_json_default)
+                    existing_config = {}
+            merged_config = {**existing_config, **incoming_config} if existing_config or incoming_config else {}
+            config_json = json.dumps(merged_config, default=_json_default)
             record.config = config_json
             record.status = status
             record.started_at = started_at
@@ -154,7 +156,7 @@ async def persist_backtest_results(run_id: str, results: Dict[str, Any]) -> None
         else:
             if started_at is None:
                 started_at = datetime.now(timezone.utc)
-            config_json = json.dumps(config, default=_json_default)
+            config_json = json.dumps(incoming_config, default=_json_default)
             record = BacktestRun(
                 run_id=run_id,
                 config=config_json,

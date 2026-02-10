@@ -129,7 +129,7 @@ curl -X POST http://localhost:8081/paper-trading/sessions/paper-trading-a1b2c3d4
 | `plan_interval_hours` | number | 4 | How often to regenerate strategy |
 | `enable_symbol_discovery` | boolean | false | Auto-discover high-volume pairs daily |
 | `min_volume_24h` | number | 1000000 | Min 24h volume for discovery |
-| `llm_model` | string | "gpt-4o-mini" | OpenAI model to use |
+| `llm_model` | string | "gpt-5-mini" | OpenAI model to use |
 
 ### Available Strategy Templates
 
@@ -295,7 +295,7 @@ Add to `.env` for customization:
 ```bash
 # LLM Configuration
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-5-mini
 
 # Paper Trading Defaults
 PAPER_TRADING_PLAN_INTERVAL_HOURS=4

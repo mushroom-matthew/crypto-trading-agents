@@ -194,7 +194,7 @@ class JudgeFeedbackService:
         model: str | None = None,
     ) -> None:
         self.transport = transport
-        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-5-mini")
         self._client = None
         self.last_generation_info: Dict[str, Any] = {}
 

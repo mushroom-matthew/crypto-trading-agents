@@ -23,6 +23,7 @@ from backtesting.simulator import run_portfolio_backtest, PortfolioBacktestResul
 from backtesting.strategies import StrategyWrapperConfig
 from backtesting.dataset import load_ohlcv
 from backtesting.llm_strategist_runner import LLMStrategistBacktester
+from backtesting.warmup import compute_indicator_warmup_candles
 from agents.strategies.llm_client import LLMClient
 from metrics.technical import sma, ema, rsi, macd, atr, bollinger_bands
 from data_loader.utils import ensure_utc, timeframe_to_seconds
@@ -637,7 +638,8 @@ async def start_backtest(config: BacktestConfig):
         run_id = f"backtest-{uuid4()}"
 
         symbols = [symbol.upper() for symbol in config.symbols]
-        warmup_delta = timedelta(seconds=granularity_seconds * (MIN_FEATURE_CANDLES - 1))
+        warmup_candles = max(MIN_FEATURE_CANDLES, compute_indicator_warmup_candles(config.timeframe))
+        warmup_delta = timedelta(seconds=granularity_seconds * (warmup_candles - 1))
         buffered_start_dt = requested_start_dt - warmup_delta
         initial_allocations = None
         if config.initial_allocations:
@@ -1417,7 +1419,8 @@ async def get_playback_candles(
         end_date = datetime.fromisoformat(config.get("requested_end_date", config["end_date"]))
         timeframe = config.get("timeframe", "1h")
         granularity_seconds = timeframe_to_seconds(timeframe)
-        warmup_delta = timedelta(seconds=granularity_seconds * (MIN_FEATURE_CANDLES - 1))
+        warmup_candles = max(MIN_FEATURE_CANDLES, compute_indicator_warmup_candles(request.timeframe))
+        warmup_delta = timedelta(seconds=granularity_seconds * (warmup_candles - 1))
         buffered_start = start_date - warmup_delta
 
         # Check if indicators are already cached

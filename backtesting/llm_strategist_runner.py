@@ -57,7 +57,12 @@ from services.strategist_plan_service import StrategistPlanService
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
 from tools import execution_tools
-from trading_core.trigger_compiler import compile_plan, validate_min_hold_vs_exits, validate_plan_timeframes
+from trading_core.trigger_compiler import (
+    compile_plan,
+    validate_min_hold_vs_exits,
+    validate_plan_identifiers,
+    validate_plan_timeframes,
+)
 from trading_core.trigger_budget import enforce_trigger_budget
 from trading_core.execution_engine import BlockReason
 from trading_core.trade_quality import (
@@ -585,16 +590,16 @@ class LLMStrategistBacktester:
         self.daily_risk_budget_state: Dict[str, Dict[str, float]] = {}
         self.daily_risk_budget_pct = self.active_risk_limits.max_daily_risk_budget_pct
         self.strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
-        # Use strategy_prompt directly if provided, otherwise load from file path
-        # Auto-select scalper prompt for fast timeframes when no explicit prompt given
+        # Strategy guidance is injected into the prompt context, not used as a base prompt.
+        # Auto-select scalper guidance for fast timeframes when no explicit guidance provided.
+        self.strategy_guidance = None
         if strategy_prompt:
-            self.prompt_template = strategy_prompt
+            self.strategy_guidance = strategy_prompt
         elif prompt_template_path and prompt_template_path.exists():
-            self.prompt_template = prompt_template_path.read_text()
+            self.strategy_guidance = prompt_template_path.read_text()
         elif self._has_fast_timeframes():
-            self.prompt_template = self._load_scalper_prompt()
-        else:
-            self.prompt_template = None
+            self.strategy_guidance = self._load_scalper_prompt()
+        self.prompt_template = None
         self.slot_reports_by_day: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.bar_decisions_by_day: Dict[str, List[Dict[str, Any]]] = {}
         self.trigger_activity_by_day: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -1188,6 +1193,8 @@ class LLMStrategistBacktester:
             context["factor_exposures"] = self.latest_factor_exposures
         if self.auto_hedge_market:
             context["auto_hedge_mode"] = "market"
+        if self.strategy_guidance:
+            context["strategy_guidance"] = self.strategy_guidance
         return LLMInput(
             portfolio=portfolio_state,
             assets=list(asset_states.values()),
@@ -2745,6 +2752,20 @@ class LLMStrategistBacktester:
                             sorted({tf for w in tf_warnings for tf in w.missing_timeframes}),
                         )
 
+                    identifier_warnings = validate_plan_identifiers(current_plan, available_tfs)
+                    identifier_warning_payload = []
+                    if identifier_warnings:
+                        identifier_warning_payload = [
+                            {
+                                "trigger_id": warning.trigger_id,
+                                "rule_type": warning.rule_type,
+                                "unknown_identifiers": sorted(warning.unknown_identifiers),
+                            }
+                            for warning in identifier_warnings
+                        ]
+                        for warning in identifier_warnings:
+                            logger.warning("Plan %s: %s", current_plan.plan_id, warning)
+
                     # Runbook 15: warn when min_hold >= smallest exit timeframe
                     min_hold_warnings = validate_min_hold_vs_exits(current_plan, self.min_hold_hours)
                     for mhw in min_hold_warnings:
@@ -2861,6 +2882,7 @@ class LLMStrategistBacktester:
                         "llm_meta": llm_meta_compact,
                         "stripped_by_judge": stripped_by_judge,
                         "carried_forward_exit_triggers": carried_forward_exits,
+                        "identifier_warnings": identifier_warning_payload,
                         "stance": "wait" if wait_stance else "active",
                     }
                 )
@@ -4893,7 +4915,7 @@ class LLMStrategistBacktester:
                     "consecutive_stale_skips": self.consecutive_stale_skips,
                 })
             logger.debug("Stale snapshot, skipping judge evaluation at %s", ts.isoformat())
-            return {
+            result = {
                 "timestamp": ts.isoformat(),
                 "score": None,
                 "should_replan": False,
@@ -4902,7 +4924,17 @@ class LLMStrategistBacktester:
                 "feedback": {},
                 "snapshot": snapshot,
                 "next_judge_time": (self.next_judge_time.isoformat() if self.next_judge_time else None),
+                "skipped": True,
             }
+            self.intraday_judge_history.append(result)
+            self._add_event("intraday_judge", {
+                "score": None,
+                "should_replan": False,
+                "reason": result["replan_reason"],
+                "trigger_reason": trigger_reason,
+                "skipped": True,
+            })
+            return result
         self.last_judge_snapshot_key = snapshot_key
         self.consecutive_stale_skips = 0
 

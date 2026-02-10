@@ -91,6 +91,25 @@ class RuleEvaluator:
         allowed = set(context.keys()) | self.allowed_names | {"True", "False", "true", "false", "None", "none"}
         return bool(self._eval_node(tree.body, context, allowed))
 
+    def extract_identifiers(self, expr: str) -> set[str]:
+        """Return the identifier names referenced by an expression."""
+        if not expr:
+            return set()
+        normalized = self._normalize(expr)
+        try:
+            tree = ast.parse(normalized, mode="eval")
+        except SyntaxError:
+            return set()
+        identifiers = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                name = node.id
+                lower = name.lower()
+                if lower in {"true", "false", "none"}:
+                    continue
+                identifiers.add(name)
+        return identifiers
+
     def _eval_node(self, node: ast.AST, ctx: Mapping[str, Any], allowed: set[str]) -> Any:
         if isinstance(node, ast.BinOp):
             left = self._eval_node(node.left, ctx, allowed)

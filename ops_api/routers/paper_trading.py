@@ -57,7 +57,7 @@ class PaperTradingSessionConfig(BaseModel):
     )
     llm_model: Optional[str] = Field(
         default=None,
-        description="LLM model to use (defaults to gpt-4o-mini)"
+        description="LLM model to use (defaults to gpt-5-mini)"
     )
 
     # ============================================================================

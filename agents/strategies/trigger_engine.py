@@ -140,6 +140,7 @@ class TriggerEngine:
         self.exit_binding_mode = exit_binding_mode
         self.conflicting_signal_policy = conflicting_signal_policy
         self.risk_off_latch = risk_off_latch
+        self._unknown_identifier_warnings: set[tuple[str, str, tuple[str, ...]]] = set()
         # Store trigger confidence for deduplication
         self._trigger_confidence: dict[str, Literal["A", "B", "C"] | None] = {
             t.id: t.confidence_grade for t in plan.triggers
@@ -196,6 +197,7 @@ class TriggerEngine:
         asset_state: AssetState | None,
         market_structure: dict[str, float | str | None] | None = None,
         portfolio: PortfolioState | None = None,
+        position_meta: Mapping[str, dict[str, Any]] | None = None,
     ) -> dict[str, float | str | None]:
         """Build evaluation context, including cross-timeframe aliases."""
 
@@ -210,10 +212,11 @@ class TriggerEngine:
             alias = _alias_key(key)
             if alias and alias not in context:
                 context[alias] = value
-        upper = context.get("bollinger_upper")
-        lower = context.get("bollinger_lower")
-        if upper is not None and lower is not None:
-            context["bollinger_middle"] = (upper + lower) / 2.0
+        if context.get("bollinger_middle") is None:
+            upper = context.get("bollinger_upper")
+            lower = context.get("bollinger_lower")
+            if upper is not None and lower is not None:
+                context["bollinger_middle"] = (upper + lower) / 2.0
         if asset_state:
             context["trend_state"] = asset_state.trend_state
             context["vol_state"] = asset_state.vol_state
@@ -231,6 +234,9 @@ class TriggerEngine:
                     alias = _alias_key(key)
                     if alias:
                         context[f"{prefix}_{alias}"] = value
+                # Provide derived trend/vol states per timeframe for LLM flexibility.
+                context[f"{prefix}_trend_state"] = self._trend_state_from_snapshot(snapshot)
+                context[f"{prefix}_vol_state"] = self._vol_state_from_snapshot(snapshot)
         ms_keys = ("nearest_support", "nearest_resistance", "distance_to_support_pct", "distance_to_resistance_pct", "trend")
         if market_structure:
             # Surface market-structure telemetry fields directly for rule expressions.
@@ -251,7 +257,104 @@ class TriggerEngine:
             context["is_flat"] = position == "flat"
             context["is_long"] = position == "long"
             context["is_short"] = position == "short"
+            qty = portfolio.positions.get(indicator.symbol, 0.0)
+            context["position_qty"] = qty
+            context["position_value"] = qty * (indicator.close or 0.0)
+            entry_price = None
+            entry_side = None
+            opened_at = None
+            if position_meta:
+                meta = position_meta.get(indicator.symbol) or {}
+                entry_price = meta.get("entry_price")
+                entry_side = meta.get("entry_side")
+                opened_at = meta.get("opened_at")
+                context["entry_price"] = entry_price
+                context["avg_entry_price"] = entry_price
+                context["entry_side"] = entry_side
+                context["position_opened_at"] = opened_at
+            opened_at_ts = opened_at
+            if isinstance(opened_at_ts, str):
+                try:
+                    opened_at_ts = datetime.fromisoformat(opened_at_ts)
+                except ValueError:
+                    opened_at_ts = None
+            if opened_at_ts and indicator.as_of:
+                if opened_at_ts.tzinfo is None and indicator.as_of.tzinfo is not None:
+                    opened_at_ts = opened_at_ts.replace(tzinfo=indicator.as_of.tzinfo)
+                if indicator.as_of.tzinfo is None and opened_at_ts.tzinfo is not None:
+                    current_ts = indicator.as_of.replace(tzinfo=opened_at_ts.tzinfo)
+                else:
+                    current_ts = indicator.as_of
+                if current_ts is not None:
+                    age_minutes = (current_ts - opened_at_ts).total_seconds() / 60.0
+                    if age_minutes >= 0:
+                        context["position_age_minutes"] = age_minutes
+                        context["position_age_hours"] = age_minutes / 60.0
+                        context["holding_minutes"] = age_minutes
+                        context["holding_hours"] = age_minutes / 60.0
+                        context["time_in_trade_min"] = age_minutes
+                        context["time_in_trade_hours"] = age_minutes / 60.0
+            if entry_price and indicator.close:
+                if entry_side == "short" or qty < 0:
+                    pnl_pct = (entry_price - indicator.close) / entry_price * 100.0
+                    pnl_abs = (entry_price - indicator.close) * abs(qty)
+                else:
+                    pnl_pct = (indicator.close - entry_price) / entry_price * 100.0
+                    pnl_abs = (indicator.close - entry_price) * abs(qty)
+                context["unrealized_pnl_pct"] = pnl_pct
+                context["unrealized_pnl_abs"] = pnl_abs
+                context["unrealized_pnl"] = pnl_abs
+                context["position_pnl_pct"] = pnl_pct
+                context["position_pnl_abs"] = pnl_abs
+            else:
+                # Seed common PnL fields to avoid expression errors for unprompted LLM outputs.
+                context.setdefault("unrealized_pnl_pct", None)
+                context.setdefault("unrealized_pnl_abs", None)
+                context.setdefault("unrealized_pnl", None)
+                context.setdefault("position_pnl_pct", None)
+                context.setdefault("position_pnl_abs", None)
+            for key in (
+                "position_age_minutes",
+                "position_age_hours",
+                "holding_minutes",
+                "holding_hours",
+                "time_in_trade_min",
+                "time_in_trade_hours",
+            ):
+                context.setdefault(key, None)
         return context
+
+    def _trend_state_from_snapshot(self, snapshot: IndicatorSnapshot) -> str:
+        sma_short = snapshot.sma_short
+        sma_medium = snapshot.sma_medium
+        sma_long = snapshot.sma_long
+        if sma_short and sma_medium and sma_long:
+            if sma_short > sma_medium > sma_long:
+                return "uptrend"
+            if sma_short < sma_medium < sma_long:
+                return "downtrend"
+        ema_short = snapshot.ema_short
+        ema_medium = snapshot.ema_medium
+        if ema_short and ema_medium:
+            if ema_short > ema_medium * 1.005:
+                return "uptrend"
+            if ema_short < ema_medium * 0.995:
+                return "downtrend"
+        return "sideways"
+
+    def _vol_state_from_snapshot(self, snapshot: IndicatorSnapshot) -> str:
+        atr = snapshot.atr_14 or 0.0
+        realized = snapshot.realized_vol_short or 0.0
+        price = snapshot.close or 1.0
+        atr_ratio = atr / price if price else 0.0
+        vol_metric = max(atr_ratio, realized)
+        if vol_metric < 0.01:
+            return "low"
+        if vol_metric < 0.02:
+            return "normal"
+        if vol_metric < 0.05:
+            return "high"
+        return "extreme"
 
     def _position_direction(self, symbol: str, portfolio: PortfolioState) -> Literal["long", "short", "flat"]:
         qty = portfolio.positions.get(symbol, 0.0)
@@ -367,6 +470,35 @@ class TriggerEngine:
             payload.update(extra)
         container.append(payload)
 
+    def _unknown_identifiers(self, expr: str, context: Mapping[str, Any]) -> list[str]:
+        identifiers = self.evaluator.extract_identifiers(expr)
+        if not identifiers:
+            return []
+        allowed = set(context.keys()) | self.evaluator.allowed_names | {"True", "False", "true", "false", "None", "none"}
+        unknown = [name for name in identifiers if name not in allowed and name.lower() not in allowed]
+        return sorted(unknown)
+
+    def _log_unknown_identifiers(
+        self,
+        trigger: TriggerCondition,
+        rule_type: Literal["entry", "exit", "hold"],
+        unknown: list[str],
+        expr: str,
+    ) -> None:
+        if not unknown:
+            return
+        key = (trigger.id, rule_type, tuple(unknown))
+        if key in self._unknown_identifier_warnings:
+            return
+        self._unknown_identifier_warnings.add(key)
+        logger.warning(
+            "Trigger %s %s_rule references unknown identifiers %s; expr=%s",
+            trigger.id,
+            rule_type,
+            unknown,
+            expr,
+        )
+
     def _emergency_cooldown_bars(self) -> int:
         return max(1, self.trade_cooldown_bars, self.min_hold_bars)
 
@@ -440,7 +572,13 @@ class TriggerEngine:
 
         portfolio_base = portfolio
         portfolio_for_eval = portfolio_base
-        context = self._context(indicator, asset_state, market_structure, portfolio_for_eval)
+        context = self._context(
+            indicator,
+            asset_state,
+            market_structure,
+            portfolio_for_eval,
+            position_meta,
+        )
 
         # Track how many triggers have fired for this symbol this bar
         # (used for max_triggers_per_symbol_per_bar enforcement)
@@ -518,8 +656,14 @@ class TriggerEngine:
                 self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, detail, bar)
                 continue
             except RuleSyntaxError as exc:
+                unknown = self._unknown_identifiers(trigger.exit_rule, context)
                 detail = f"{exc}; exit_rule='{trigger.exit_rule}'"
-                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar)
+                extra = None
+                if unknown:
+                    detail = f"{detail}; unknown_identifiers={unknown}"
+                    extra = {"unknown_identifiers": unknown}
+                    self._log_unknown_identifiers(trigger, "exit", unknown, trigger.exit_rule)
+                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar, extra=extra)
                 continue
 
             if exit_fired:
@@ -611,8 +755,14 @@ class TriggerEngine:
                 self._record_block(block_entries, trigger, BlockReason.MISSING_INDICATOR.value, detail, bar)
                 continue
             except RuleSyntaxError as exc:
+                unknown = self._unknown_identifiers(trigger.entry_rule, context)
                 detail = f"{exc}; entry_rule='{trigger.entry_rule}'"
-                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar)
+                extra = None
+                if unknown:
+                    detail = f"{detail}; unknown_identifiers={unknown}"
+                    extra = {"unknown_identifiers": unknown}
+                    self._log_unknown_identifiers(trigger, "entry", unknown, trigger.entry_rule)
+                self._record_block(block_entries, trigger, BlockReason.EXPRESSION_ERROR.value, detail, bar, extra=extra)
                 continue
 
             if entry_fired:

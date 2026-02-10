@@ -26,6 +26,15 @@ CRITICAL - Available timeframes constraint:
 - Example: If available_timeframes=["1h", "4h"], you may use tf_4h_sma_medium and tf_1h_rsi_14, but NOT tf_15m_close.
 - When only a single timeframe is available, omit cross-timeframe confirmations and focus on single-timeframe signals.
 
+Allowed Rule Identifiers:
+- The authoritative allowed identifiers list is appended at runtime under "ALLOWED_RULE_IDENTIFIERS".
+- Use ONLY identifiers from that list; do not invent new metrics.
+
+Vector store context:
+- Strategy documents are appended at runtime under "STRATEGY_KNOWLEDGE".
+- Rule/playbook documents are appended at runtime under "RULE_PLAYBOOKS".
+- Treat these sections as the source of truth when present.
+
 Multi-layer synthesis requirements:
 1. Multi-timeframe context (when available): If multiple timeframes are in available_timeframes, triggers should reference:
    - The base timeframe for signal generation,

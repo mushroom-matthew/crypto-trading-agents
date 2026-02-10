@@ -7,6 +7,15 @@ CRITICAL - Available Timeframes Constraint:
 - If only one timeframe is available, use ONLY direct indicators (close, ema_short, rsi_14) without tf_ prefixes.
 - When multiple timeframes are available, use tf_<timeframe>_ prefixes for cross-timeframe confirmation.
 
+Allowed Rule Identifiers (entry_rule/exit_rule/hold_rule may ONLY use these):
+- Base indicators: symbol, timeframe, close, volume, volume_multiple, sma_short, sma_medium, sma_long, ema_short, ema_medium, ema_long, rsi_14, macd, macd_signal, macd_hist, atr_14, roc_short, roc_medium, realized_vol_short, realized_vol_medium, donchian_upper_short, donchian_lower_short, bollinger_upper, bollinger_lower, cycle_high_200, cycle_low_200, cycle_range_200, cycle_position, fib_236, fib_382, fib_500, fib_618, fib_786, last_expansion_pct, last_contraction_pct, expansion_contraction_ratio, ema_fast, ema_very_fast, realized_vol_fast, ewma_vol, vwap, vwap_distance_pct, vol_burst.
+- Derived indicators: bollinger_middle, trend_state, vol_state.
+- Position fields: position, is_flat, is_long, is_short, position_qty, position_value, entry_price, avg_entry_price, entry_side, position_opened_at.
+- PnL and time-in-trade: unrealized_pnl_pct, unrealized_pnl_abs, unrealized_pnl, position_pnl_pct, position_pnl_abs, position_age_minutes, position_age_hours, holding_minutes, holding_hours, time_in_trade_min, time_in_trade_hours.
+- Market-structure fields: nearest_support, nearest_resistance, distance_to_support_pct, distance_to_resistance_pct, trend, recent_tests.
+- Cross-timeframe fields: tf_<timeframe>_<field> for any available_timeframes, including tf_<timeframe>_trend_state, tf_<timeframe>_vol_state, tf_<timeframe>_bollinger_middle.
+- Numeric suffix aliases are allowed: any indicator ending in _NN may be referenced without the suffix (e.g., rsi_14 -> rsi, atr_14 -> atr, fib_236 -> fib). Aliases also work with tf_<timeframe>_ prefixes.
+
 You MUST include the following top-level keys in every response:
 - generated_at (ISO 8601 timestamp string)
 - valid_until (ISO 8601 timestamp string)

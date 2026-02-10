@@ -8,7 +8,7 @@ from agents.context_manager import ContextManager, create_context_manager
 class TestContextManager:
     def test_token_counting(self):
         """Test token counting functionality."""
-        manager = ContextManager()
+        manager = ContextManager(openai_client=None)
         
         # Test simple message
         messages = [
@@ -23,7 +23,7 @@ class TestContextManager:
     
     def test_tool_call_token_counting(self):
         """Test token counting with tool calls."""
-        manager = ContextManager()
+        manager = ContextManager(openai_client=None)
         
         messages = [
             {
@@ -50,7 +50,7 @@ class TestContextManager:
     
     def test_format_messages_for_summary(self):
         """Test message formatting for summarization."""
-        manager = ContextManager()
+        manager = ContextManager(openai_client=None)
         
         messages = [
             {"role": "system", "content": "System prompt"},
@@ -77,7 +77,7 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_context_management_no_summarization_needed(self):
         """Test context management when no summarization is needed."""
-        manager = ContextManager(max_tokens=10000, summary_threshold=8000)
+        manager = ContextManager(max_tokens=10000, summary_threshold=8000, openai_client=None)
         
         conversation = [
             {"role": "system", "content": "You are a trading agent."},
@@ -149,10 +149,10 @@ class TestContextManager:
 
 def test_create_context_manager():
     """Test the factory function for creating context managers."""
-    manager = create_context_manager(model="gpt-4o")
+    manager = create_context_manager(model="gpt-5-mini")
     
     assert isinstance(manager, ContextManager)
-    assert manager.model == "gpt-4o"
+    assert manager.model == "gpt-5-mini"
     assert manager.max_tokens > 0
     assert manager.summary_threshold > 0
     assert manager.min_recent_messages == 5

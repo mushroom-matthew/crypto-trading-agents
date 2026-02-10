@@ -337,6 +337,7 @@ def compute_indicator_snapshot(
     window = config or IndicatorWindowConfig(timeframe=timeframe)
     prepared = _ensure_timestamp(df)
     close = prepared["close"]
+    open_series = prepared["open"] if "open" in prepared.columns else None
     high = prepared["high"]
     low = prepared["low"]
     volume_series = prepared["volume"] if "volume" in prepared.columns else None
@@ -346,10 +347,12 @@ def compute_indicator_snapshot(
     sma_long = _result_to_value(tech.sma(prepared, period=window.long_window))
     ema_short = _result_to_value(tech.ema(prepared, period=window.short_window))
     ema_medium = _result_to_value(tech.ema(prepared, period=window.medium_window))
+    ema_long = _result_to_value(tech.ema(prepared, period=window.long_window))
     rsi_val = _result_to_value(tech.rsi(prepared, period=window.rsi_period))
     macd_val, macd_signal, macd_hist = _macd_values(prepared, window.macd_fast, window.macd_slow, window.macd_signal)
     atr_val = _result_to_value(tech.atr(prepared, period=window.atr_period))
     boll = tech.bollinger_bands(prepared, period=window.short_window, mult=2.0)
+    boll_middle = _latest(boll.series_list[0].series)
     boll_upper = _latest(boll.series_list[1].series)
     boll_lower = _latest(boll.series_list[2].series)
     donchian_upper = float(high.tail(window.short_window).max()) if len(high) >= window.short_window else None
@@ -397,6 +400,9 @@ def compute_indicator_snapshot(
         symbol=symbol,
         timeframe=timeframe,
         as_of=as_of,
+        open=float(open_series.iloc[-1]) if open_series is not None else None,
+        high=float(high.iloc[-1]) if high is not None else None,
+        low=float(low.iloc[-1]) if low is not None else None,
         close=float(close.iloc[-1]),
         volume=volume_val,
         volume_multiple=volume_multiple,
@@ -405,6 +411,7 @@ def compute_indicator_snapshot(
         sma_long=sma_long,
         ema_short=ema_short,
         ema_medium=ema_medium,
+        ema_long=ema_long,
         rsi_14=rsi_val,
         macd=macd_val,
         macd_signal=macd_signal,
@@ -418,6 +425,7 @@ def compute_indicator_snapshot(
         donchian_lower_short=donchian_lower,
         bollinger_upper=boll_upper,
         bollinger_lower=boll_lower,
+        bollinger_middle=boll_middle,
         cycle_high_200=cycle_high,
         cycle_low_200=cycle_low,
         cycle_range_200=cycle_range,
@@ -449,6 +457,7 @@ def precompute_indicator_frame(
     window = config or IndicatorWindowConfig(timeframe="unknown")
     prepared = _ensure_timestamp(df)
     close = prepared["close"]
+    open_series = prepared["open"] if "open" in prepared.columns else None
     high = prepared["high"]
     low = prepared["low"]
     volume_series = prepared["volume"] if "volume" in prepared.columns else None
@@ -458,6 +467,7 @@ def precompute_indicator_frame(
     sma_long = tech.sma(prepared, period=window.long_window).series_list[0].series
     ema_short = tech.ema(prepared, period=window.short_window).series_list[0].series
     ema_medium = tech.ema(prepared, period=window.medium_window).series_list[0].series
+    ema_long = tech.ema(prepared, period=window.long_window).series_list[0].series
     rsi_val = tech.rsi(prepared, period=window.rsi_period).series_list[0].series
     macd_result = tech.macd(prepared, fast=window.macd_fast, slow=window.macd_slow, signal=window.macd_signal)
     macd_line = macd_result.series_list[0].series
@@ -465,6 +475,7 @@ def precompute_indicator_frame(
     macd_hist = macd_result.series_list[2].series
     atr_val = tech.atr(prepared, period=window.atr_period).series_list[0].series
     boll = tech.bollinger_bands(prepared, period=window.short_window, mult=2.0)
+    boll_middle = boll.series_list[0].series
     boll_upper = boll.series_list[1].series
     boll_lower = boll.series_list[2].series
     donchian_upper = high.rolling(window=window.short_window, min_periods=window.short_window).max()
@@ -509,6 +520,9 @@ def precompute_indicator_frame(
     frame = pd.DataFrame(
         {
             "timestamp": prepared["timestamp"],
+            "open": open_series,
+            "high": high,
+            "low": low,
             "close": close,
             "volume": volume_series,
             "volume_multiple": volume_multiple,
@@ -517,6 +531,7 @@ def precompute_indicator_frame(
             "sma_long": sma_long,
             "ema_short": ema_short,
             "ema_medium": ema_medium,
+            "ema_long": ema_long,
             "rsi_14": rsi_val,
             "macd": macd_line,
             "macd_signal": macd_signal,
@@ -530,6 +545,7 @@ def precompute_indicator_frame(
             "donchian_lower_short": donchian_lower,
             "bollinger_upper": boll_upper,
             "bollinger_lower": boll_lower,
+            "bollinger_middle": boll_middle,
             "cycle_high_200": cycle_high,
             "cycle_low_200": cycle_low,
             "cycle_range_200": cycle_range,
@@ -603,6 +619,9 @@ def snapshot_from_frame(
         symbol=symbol,
         timeframe=timeframe,
         as_of=as_of_dt,
+        open=_optional_float(row.get("open")),
+        high=_optional_float(row.get("high")),
+        low=_optional_float(row.get("low")),
         close=float(row["close"]),
         volume=_optional_float(row.get("volume")),
         volume_multiple=_optional_float(row.get("volume_multiple")),
@@ -611,6 +630,7 @@ def snapshot_from_frame(
         sma_long=_optional_float(row.get("sma_long")),
         ema_short=_optional_float(row.get("ema_short")),
         ema_medium=_optional_float(row.get("ema_medium")),
+        ema_long=_optional_float(row.get("ema_long")),
         rsi_14=_optional_float(row.get("rsi_14")),
         macd=_optional_float(row.get("macd")),
         macd_signal=_optional_float(row.get("macd_signal")),
@@ -624,6 +644,7 @@ def snapshot_from_frame(
         donchian_lower_short=_optional_float(row.get("donchian_lower_short")),
         bollinger_upper=_optional_float(row.get("bollinger_upper")),
         bollinger_lower=_optional_float(row.get("bollinger_lower")),
+        bollinger_middle=_optional_float(row.get("bollinger_middle")),
         cycle_high_200=_optional_float(row.get("cycle_high_200")),
         cycle_low_200=_optional_float(row.get("cycle_low_200")),
         cycle_range_200=_optional_float(row.get("cycle_range_200")),

@@ -659,7 +659,7 @@ Return ONLY the improved system prompt, no explanations."""
 
         try:
             response = openai_client.chat.completions.create(
-                model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+                model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
                 messages=[{"role": "user", "content": improvement_prompt}]
             )
             

@@ -18,9 +18,14 @@ from pydantic import ValidationError
 
 from agents.langfuse_utils import langfuse_span
 from agents.llm.client_factory import get_llm_client
+from agents.llm.model_utils import temperature_args
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
 from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint, StrategyPlan
+
+from .prompt_builder import build_prompt_context
+from .trigger_vector_store import get_trigger_vector_store
+from vector_store.retriever import get_strategy_vector_store, vector_store_enabled
 
 
 def _repair_json(raw: str) -> str:
@@ -96,7 +101,7 @@ class LLMClient:
         allow_fallback: bool | None = None,
     ) -> None:
         self.transport = transport
-        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-5-mini")
         env_flag = os.environ.get("LLM_CLIENT_ALLOW_FALLBACK")
         if allow_fallback is None and env_flag is not None:
             allow_fallback = env_flag.lower() not in {"0", "false", "no"}
@@ -178,8 +183,15 @@ class LLMClient:
         start_time = time.monotonic()
         for attempt in range(1, attempts + 1):
             try:
+                strategy_context = self._get_strategy_context(llm_input)
                 vector_context = self._get_vector_context(llm_input) if use_vector_store else None
-                system_prompt = self._build_system_prompt(prompt_template, vector_context)
+                prompt_context = build_prompt_context(llm_input)
+                system_prompt = self._build_system_prompt(
+                    prompt_template,
+                    vector_context,
+                    prompt_context,
+                    strategy_context,
+                )
                 with langfuse_span("llm_strategist.backtest", metadata={"model": self.model}) as span:
                     completion = self.client.responses.create(
                         model=self.model,
@@ -187,8 +199,8 @@ class LLMClient:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": llm_input.to_json()},
                         ],
-                        temperature=0.1,
                         max_output_tokens=2500,
+                        **temperature_args(self.model, 0.1),
                     )
                     content = completion.output[0].content[0].text
                     raw_output = content
@@ -294,8 +306,6 @@ class LLMClient:
     def _get_vector_context(self, llm_input: LLMInput) -> str | None:
         """Get relevant trigger examples from vector store."""
         try:
-            from .trigger_vector_store import get_trigger_vector_store
-
             store = get_trigger_vector_store()
             if not store.examples:
                 return None
@@ -328,11 +338,34 @@ class LLMClient:
             logging.warning("Failed to get vector context: %s", e)
             return None
 
-    def _build_system_prompt(self, prompt_template: str | None, vector_context: str | None = None) -> str:
-        base = prompt_template or os.environ.get("LLM_STRATEGIST_PROMPT", "") or self._default_prompt()
+    def _get_strategy_context(self, llm_input: LLMInput) -> str | None:
+        """Get retrieved strategy/rule docs from the strategy vector store."""
+        if not vector_store_enabled():
+            return None
+        try:
+            store = get_strategy_vector_store()
+            return store.retrieve_context(llm_input)
+        except Exception as exc:
+            logging.warning("Failed to get strategy context: %s", exc)
+            return None
+
+    def _build_system_prompt(
+        self,
+        prompt_template: str | None,
+        vector_context: str | None = None,
+        prompt_context: str | None = None,
+        strategy_context: str | None = None,
+    ) -> str:
+        base = self._default_prompt()
         schema = self._schema_prompt()
         if schema and schema not in base:
             base = f"{base}\n\n{schema}"
+        if prompt_template:
+            base = f"{base}\n\nSTRATEGY_GUIDANCE:\n{prompt_template.strip()}"
+        if prompt_context:
+            base = f"{base}\n\n{prompt_context}"
+        if strategy_context:
+            base = f"{base}\n\n{strategy_context}"
         if vector_context:
             base = f"{base}\n\n{vector_context}"
         return base
@@ -389,10 +422,10 @@ class LLMClient:
         """Load bundled strategist prompt when no template/env override is provided.
 
         Prompt selection via STRATEGIST_PROMPT env var:
-        - "simple" -> llm_strategist_simple.txt (40-line simplified prompt)
-        - "full" or unset -> llm_strategist_prompt.txt (legacy full prompt)
+        - "simple" or unset -> llm_strategist_simple.txt (simplified prompt)
+        - "full" -> llm_strategist_prompt.txt (legacy full prompt)
         """
-        prompt_name = os.environ.get("STRATEGIST_PROMPT", "full").lower()
+        prompt_name = os.environ.get("STRATEGIST_PROMPT", "simple").lower()
         prompts_dir = Path(__file__).resolve().parents[2] / "prompts"
 
         if prompt_name == "simple":

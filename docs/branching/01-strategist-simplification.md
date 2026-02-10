@@ -287,6 +287,15 @@ git commit -m "Strategist: <phase description>"
   - `backtesting/llm_strategist_runner.py` - Added stance_distribution_by_day, stance_events tracking; added to daily reports and summary
   - `tests/test_regime_classifier.py` - NEW: 6 tests for regime classifier
 - Decision: Vector store and regime alert monitoring deferred to separate runbook (infrastructure exists but content/monitoring can be added later)
+- 2026-02-08: Vector store infrastructure + strategist integration. Files touched:
+  - `vector_store/embeddings.py` - Local embedding fallback + optional OpenAI embeddings
+  - `vector_store/retriever.py` - Strategy/playbook retrieval + prompt formatting
+  - `vector_store/strategies/*.md` - Regime strategy docs (bull/bear/range/volatile/uncertain)
+  - `vector_store/playbooks/*.md` - Indicator playbooks (RSI, MACD, Bollinger)
+  - `agents/strategies/llm_client.py` - Inject STRATEGY_KNOWLEDGE / RULE_PLAYBOOKS into prompt
+  - `prompts/llm_strategist_simple.txt` - Document dynamic sections for vector store
+  - `prompts/llm_strategist_prompt.txt` - Document vector store context
+  - `tests/test_vector_store.py` - Retrieval smoke tests
 
 ## Test Evidence (append results before commit)
 

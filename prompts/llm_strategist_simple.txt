@@ -5,6 +5,15 @@ CRITICAL: You may return an empty triggers list if no good setups exist. "Wait" 
 Input: JSON with portfolio state, asset indicators, and risk parameters.
 Output: Valid JSON matching StrategyPlan schema.
 
+Dynamic prompt sections:
+- STRATEGY_GUIDANCE (if provided)
+- REGIME_RECOMMENDATIONS (if provided)
+- STRATEGY_KNOWLEDGE (retrieved strategy docs)
+- RULE_PLAYBOOKS (retrieved rule/triggers guidance)
+- ALLOWED_RULE_IDENTIFIERS (authoritative list of rule identifiers)
+Use ONLY identifiers from ALLOWED_RULE_IDENTIFIERS in entry/exit/hold rules.
+Treat STRATEGY_KNOWLEDGE and RULE_PLAYBOOKS as the source of truth when present.
+
 Required output fields:
 - generated_at, valid_until: ISO timestamps
 - regime: bull | bear | range | high_vol | mixed

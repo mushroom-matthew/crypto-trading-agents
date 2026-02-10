@@ -15,6 +15,7 @@ from agents.prompt_manager import PromptManager
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import init_langfuse
 from agents.llm.client_factory import get_llm_client
+from agents.llm.model_utils import temperature_args
 from agents.workflows.strategy_spec_workflow import StrategySpecWorkflow
 from tools.strategy_spec import StrategySpec
 
@@ -113,10 +114,10 @@ async def plan_strategy_spec(
         {"role": "user", "content": json.dumps(payload)},
     ]
     completion = openai_client.responses.create(
-        model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+        model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
         input=messages,
         max_output_tokens=512,
-        temperature=0.2,
+        **temperature_args(os.environ.get("OPENAI_MODEL", "gpt-5-mini"), 0.2),
     )
     content = completion.output[0].content[0].text
     data = json.loads(content)

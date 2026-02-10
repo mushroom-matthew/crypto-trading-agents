@@ -541,7 +541,7 @@ uv run python -m app.cli.main reconcile run --threshold 0.0001
 | Developer | 100K | ~$50 |
 | Production | 1M+ | ~$100+ |
 
-### LLM Costs (GPT-4o-mini)
+### LLM Costs (gpt-5-mini)
 
 | Usage | Tokens/Week | Cost/Week |
 |-------|-------------|-----------|

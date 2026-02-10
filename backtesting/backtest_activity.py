@@ -33,7 +33,7 @@ class BacktestRequest(BaseModel):
     candles: List[Dict[str, Any]]
     initial_cash: float = Field(default=1000.0, ge=0)
     fee_rate: float = 0.001
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-5-mini"
     llm_calls_per_day: int = 1
     llm_cache_dir: str = ".cache/strategy_plans"
     risk_params: Dict[str, float | None] = Field(default_factory=_default_risk_params)

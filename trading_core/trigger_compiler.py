@@ -8,7 +8,7 @@ import re
 from typing import Iterable, List, Optional, Set, Tuple
 
 from data_loader.utils import timeframe_to_seconds
-from schemas.llm_strategist import StrategyPlan, TriggerCondition
+from schemas.llm_strategist import IndicatorSnapshot, StrategyPlan, TriggerCondition
 from schemas.compiled_plan import CompiledExpression, CompiledPlan, CompiledTrigger
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,19 @@ class TimeframeMismatchWarning:
     def __str__(self) -> str:
         tfs = ", ".join(sorted(self.missing_timeframes))
         return f"Trigger '{self.trigger_id}' {self.rule_type}_rule references unavailable timeframes: {tfs}"
+
+
+class IdentifierMismatchWarning:
+    """Warning about triggers referencing unknown identifiers."""
+
+    def __init__(self, trigger_id: str, unknown_identifiers: Set[str], rule_type: str):
+        self.trigger_id = trigger_id
+        self.unknown_identifiers = unknown_identifiers
+        self.rule_type = rule_type  # 'entry', 'exit', or 'hold'
+
+    def __str__(self) -> str:
+        identifiers = ", ".join(sorted(self.unknown_identifiers))
+        return f"Trigger '{self.trigger_id}' {self.rule_type}_rule references unknown identifiers: {identifiers}"
 
 
 # Pattern to extract timeframe prefixes like tf_4h_, tf_1h_, tf_15m_
@@ -118,6 +131,106 @@ def validate_plan_timeframes(
                 )
 
     return all_warnings, blocked_ids
+
+
+def _indicator_field_names() -> Set[str]:
+    fields = set(IndicatorSnapshot.model_fields.keys())
+    fields.discard("as_of")
+    return fields
+
+
+def _alias_names(names: Iterable[str]) -> Set[str]:
+    aliases: Set[str] = set()
+    for name in names:
+        parts = name.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            aliases.add(parts[0])
+    return aliases
+
+
+def build_allowed_identifiers(available_timeframes: Iterable[str]) -> Set[str]:
+    """Return the allowed identifier set for trigger expressions."""
+    indicator_fields = _indicator_field_names()
+    indicator_aliases = _alias_names(indicator_fields)
+
+    derived_fields = {
+        "bollinger_middle",
+        "trend_state",
+        "vol_state",
+        "position",
+        "is_flat",
+        "is_long",
+        "is_short",
+        "position_qty",
+        "position_value",
+        "entry_price",
+        "avg_entry_price",
+        "entry_side",
+        "position_opened_at",
+        "unrealized_pnl_pct",
+        "unrealized_pnl_abs",
+        "unrealized_pnl",
+        "position_pnl_pct",
+        "position_pnl_abs",
+        "position_age_minutes",
+        "position_age_hours",
+        "holding_minutes",
+        "holding_hours",
+        "time_in_trade_min",
+        "time_in_trade_hours",
+        "nearest_support",
+        "nearest_resistance",
+        "distance_to_support_pct",
+        "distance_to_resistance_pct",
+        "trend",
+        "recent_tests",
+    }
+
+    allowed = set(indicator_fields) | indicator_aliases | derived_fields
+
+    tf_indicator_fields = {name for name in indicator_fields if name not in {"symbol", "timeframe"}}
+    tf_aliases = _alias_names(tf_indicator_fields)
+    tf_fields = tf_indicator_fields | tf_aliases | {"bollinger_middle", "trend_state", "vol_state"}
+
+    for timeframe in available_timeframes:
+        prefix = f"tf_{timeframe.replace('-', '_')}_"
+        for field in tf_fields:
+            allowed.add(f"{prefix}{field}")
+
+    return allowed
+
+
+def validate_trigger_identifiers(
+    trigger: TriggerCondition,
+    allowed_identifiers: Set[str],
+) -> List[IdentifierMismatchWarning]:
+    warnings: List[IdentifierMismatchWarning] = []
+    for rule_type, expr in (
+        ("entry", trigger.entry_rule),
+        ("exit", trigger.exit_rule),
+        ("hold", trigger.hold_rule),
+    ):
+        if not expr:
+            continue
+        identifiers = _collect_identifiers(expr)
+        unknown = {
+            name for name in identifiers
+            if name not in allowed_identifiers and name.lower() not in {"true", "false", "none"}
+        }
+        if unknown:
+            warnings.append(IdentifierMismatchWarning(trigger.id, unknown, rule_type))
+    return warnings
+
+
+def validate_plan_identifiers(
+    plan: StrategyPlan,
+    available_timeframes: Set[str],
+) -> List[IdentifierMismatchWarning]:
+    warnings: List[IdentifierMismatchWarning] = []
+    allowed = build_allowed_identifiers(available_timeframes)
+    for trigger in plan.triggers:
+        warnings.extend(validate_trigger_identifiers(trigger, allowed))
+    return warnings
 
 
 def validate_min_hold_vs_exits(

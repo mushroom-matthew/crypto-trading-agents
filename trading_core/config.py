@@ -25,7 +25,7 @@ class RiskSettings:
 @dataclass
 class PlannerSettings:
     max_calls_per_day: int = 1
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-5-mini"
     min_lookback_bars: int = 50
     max_lookback_bars: int = 300
 

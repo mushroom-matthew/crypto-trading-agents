@@ -80,7 +80,7 @@ JUDGE_COOLDOWN_HOURS=4               # Hours between evaluations
 EVALUATION_WINDOW_DAYS=7             # Days to analyze per evaluation
 
 # Model settings
-OPENAI_MODEL=gpt-4o                  # Model for analysis
+OPENAI_MODEL=gpt-5-mini              # Model for analysis
 OPENAI_API_KEY=your_api_key         # OpenAI API key
 
 # Temporal settings

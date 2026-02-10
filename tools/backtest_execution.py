@@ -80,14 +80,9 @@ class BacktestWorkflow:
         """
         self.run_id = config["run_id"]
         self._config = {
-            "symbols": config.get("symbols", []),
-            "start_date": config.get("start_date"),
-            "end_date": config.get("end_date"),
-            "requested_start_date": config.get("requested_start_date"),
-            "requested_end_date": config.get("requested_end_date"),
-            "timeframe": config.get("timeframe", "1h"),
-            "initial_cash": config.get("initial_cash", 10000),
-            "strategy": config.get("strategy", "baseline"),
+            key: value
+            for key, value in config.items()
+            if key not in {"resume_state", "ohlcv_data"}
         }
         self.status = "running"
         self.started_at = workflow.now().isoformat()

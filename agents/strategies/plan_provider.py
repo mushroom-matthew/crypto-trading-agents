@@ -35,9 +35,12 @@ def _prompt_catalog() -> dict[str, str]:
     """Load known prompt templates and return sha256 hashes keyed by template id."""
     base_dir = Path(__file__).resolve().parents[2] / "prompts"
     catalog: dict[str, str] = {}
-    base_prompt = base_dir / "llm_strategist_prompt.txt"
-    if base_prompt.exists():
-        catalog["default"] = hashlib.sha256(base_prompt.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    simple_prompt = base_dir / "llm_strategist_simple.txt"
+    full_prompt = base_dir / "llm_strategist_prompt.txt"
+    if simple_prompt.exists():
+        catalog["simple"] = hashlib.sha256(simple_prompt.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    if full_prompt.exists():
+        catalog["full"] = hashlib.sha256(full_prompt.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
     strategies_dir = base_dir / "strategies"
     if strategies_dir.exists():
         for path in sorted(strategies_dir.glob("*.txt")):
@@ -56,25 +59,33 @@ def _schema_prompt() -> str:
 
 
 def _resolve_prompt_template(prompt_template: str | None) -> str:
-    """Resolve the actual prompt template using the same fallback order as LLMClient."""
+    """Resolve strategist prompt addendum (strategy guidance, not the base prompt)."""
     if prompt_template:
-        base = prompt_template
-    else:
-        env_prompt = os.environ.get("LLM_STRATEGIST_PROMPT")
-        if env_prompt:
-            base = env_prompt
-        else:
-            base_prompt = Path(__file__).resolve().parents[2] / "prompts" / "llm_strategist_prompt.txt"
-            base = base_prompt.read_text(encoding="utf-8").strip() if base_prompt.exists() else ""
-    schema = _schema_prompt()
-    if schema and schema not in base:
-        return f"{base}\n\n{schema}"
-    return base
+        return prompt_template.strip()
+    env_prompt = os.environ.get("LLM_STRATEGIST_PROMPT", "").strip()
+    return env_prompt
 
 
 def _prompt_metadata(prompt_template: str | None) -> dict[str, object]:
     """Return prompt template metadata for logging/telemetry."""
     resolved = _resolve_prompt_template(prompt_template)
+    if not resolved:
+        prompt_name = os.environ.get("STRATEGIST_PROMPT", "simple").lower()
+        prompts_dir = Path(__file__).resolve().parents[2] / "prompts"
+        if prompt_name == "full":
+            prompt_path = prompts_dir / "llm_strategist_prompt.txt"
+            template_id = "full"
+        else:
+            prompt_path = prompts_dir / "llm_strategist_simple.txt"
+            template_id = "simple"
+        if prompt_path.exists():
+            resolved = prompt_path.read_text(encoding="utf-8").strip()
+            resolved_hash = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+            return {
+                "prompt_template_id": template_id,
+                "prompt_template_hash": resolved_hash,
+                "prompt_template_chars": len(resolved),
+            }
     if not resolved:
         return {}
     resolved_hash = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
