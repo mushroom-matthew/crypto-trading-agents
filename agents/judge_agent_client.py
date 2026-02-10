@@ -31,6 +31,7 @@ from agents.logging_utils import setup_logging
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import init_langfuse
 from agents.llm.client_factory import get_llm_client
+from agents.llm.model_utils import completion_token_args, reasoning_effort_args
 from agents.event_emitter import emit_event
 from schemas.judge_feedback import JudgeFeedback, JudgeConstraints
 from services.risk_adjustment_service import multiplier_from_instruction
@@ -384,8 +385,9 @@ JSON:
         )
         
         try:
+            _model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
             response = openai_client.chat.completions.create(
-                model="gpt-5-mini",
+                model=_model,
                 messages=[
                     {
                         "role": "system",
@@ -396,7 +398,8 @@ JSON:
                         "content": analysis_prompt
                     }
                 ],
-                max_completion_tokens=800
+                **completion_token_args(_model, 800),
+                **reasoning_effort_args(_model, effort="low"),
             )
 
             analysis_text = response.choices[0].message.content
@@ -658,9 +661,12 @@ CRITICAL REQUIREMENTS TO PRESERVE:
 Return ONLY the improved system prompt, no explanations."""
 
         try:
+            _model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
             response = openai_client.chat.completions.create(
-                model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
-                messages=[{"role": "user", "content": improvement_prompt}]
+                model=_model,
+                messages=[{"role": "user", "content": improvement_prompt}],
+                **completion_token_args(_model, 2000),
+                **reasoning_effort_args(_model, effort="low"),
             )
             
             improved_prompt = response.choices[0].message.content.strip()

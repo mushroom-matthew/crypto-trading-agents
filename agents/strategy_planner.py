@@ -15,7 +15,7 @@ from agents.prompt_manager import PromptManager
 from agents.temporal_utils import connect_temporal
 from agents.langfuse_utils import init_langfuse
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import temperature_args
+from agents.llm.model_utils import reasoning_args, temperature_args
 from agents.workflows.strategy_spec_workflow import StrategySpecWorkflow
 from tools.strategy_spec import StrategySpec
 
@@ -113,13 +113,19 @@ async def plan_strategy_spec(
         {"role": "system", "content": _strategy_spec_prompt()},
         {"role": "user", "content": json.dumps(payload)},
     ]
+    model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
     completion = openai_client.responses.create(
-        model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+        model=model,
         input=messages,
-        max_output_tokens=512,
-        **temperature_args(os.environ.get("OPENAI_MODEL", "gpt-5-mini"), 0.2),
+        max_output_tokens=4000,
+        **temperature_args(model, 0.2),
+        **reasoning_args(model, effort="low"),
     )
-    content = completion.output[0].content[0].text
+    content = completion.output_text
+    if not content:
+        raise ValueError(
+            f"LLM returned empty content; output={completion.output!r}"
+        )
     data = json.loads(content)
     spec = StrategySpec.model_validate(data)
     await store_strategy(temporal, spec)

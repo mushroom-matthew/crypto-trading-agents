@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from agents.langfuse_utils import langfuse_span
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import temperature_args
+from agents.llm.model_utils import reasoning_args, temperature_args
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
 from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint, StrategyPlan
@@ -199,10 +199,15 @@ class LLMClient:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": llm_input.to_json()},
                         ],
-                        max_output_tokens=2500,
+                        max_output_tokens=16000,
                         **temperature_args(self.model, 0.1),
+                        **reasoning_args(self.model, effort="low"),
                     )
-                    content = completion.output[0].content[0].text
+                    content = completion.output_text
+                    if not content:
+                        raise ValueError(
+                            f"LLM returned empty content; output={completion.output!r}"
+                        )
                     raw_output = content
                     if span:
                         span.end(output=content)

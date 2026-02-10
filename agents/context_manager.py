@@ -9,7 +9,7 @@ import tiktoken
 
 from agents.langfuse_utils import openai, init_langfuse
 from agents.llm.client_factory import get_llm_client
-from agents.llm.model_utils import temperature_args
+from agents.llm.model_utils import completion_token_args, reasoning_effort_args, temperature_args
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +93,9 @@ class ContextManager:
         conversation_text = self._format_messages_for_summary(messages)
         
         try:
+            _model = "gpt-5-mini"
             response = self.openai_client.chat.completions.create(
-                model="gpt-5-mini",  # Use compact model for summarization
+                model=_model,
                 messages=[
                     {
                         "role": "system",
@@ -106,12 +107,13 @@ class ContextManager:
                         )
                     },
                     {
-                        "role": "user", 
+                        "role": "user",
                         "content": f"Summarize this conversation:\n\n{conversation_text}"
                     }
                 ],
-                max_tokens=300,
-                **temperature_args("gpt-5-mini", 0.1)
+                **completion_token_args(_model, 300),
+                **reasoning_effort_args(_model, effort="low"),
+                **temperature_args(_model, 0.1),
             )
             summary = response.choices[0].message.content
             return f"[CONVERSATION SUMMARY] {summary}"
