@@ -16,6 +16,7 @@ from backtesting.llm_strategist_runner import LLMStrategistBacktester
 from services.strategy_run_registry import StrategyRunRegistry
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.risk_engine import RiskProfile
+from trading_core.execution_engine import ExecutionEngine
 from tests.helpers.stub_plan_provider import AlwaysLongPlanProvider
 
 
@@ -27,7 +28,7 @@ def _downtrend(start: datetime, periods: int) -> pd.DataFrame:
     return df
 
 
-def test_tight_daily_loss_stops_new_entries(tmp_path: Path) -> None:
+def test_tight_daily_loss_stops_new_entries(tmp_path: Path, monkeypatch) -> None:
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     provider = AlwaysLongPlanProvider(
         symbol="BTC-USD",
@@ -53,7 +54,7 @@ def test_tight_daily_loss_stops_new_entries(tmp_path: Path) -> None:
         initial_cash=1000.0,
         fee_rate=0.0,
         llm_client=LLMClient(allow_fallback=True),
-        cache_dir=Path(".cache/strategy_plans"),
+        cache_dir=tmp_path / "cache",
         llm_calls_per_day=8,
         risk_params=risk_params,
         plan_provider=provider,
@@ -63,8 +64,9 @@ def test_tight_daily_loss_stops_new_entries(tmp_path: Path) -> None:
         min_hold_hours=0.0,
         min_flat_hours=0.0,
     )
-    # Ensure the deterministic execution tool shares the same registry as this run.
-    execution_tools.registry = run_registry
+    # Ensure the deterministic execution tool shares the same registry and a fresh engine.
+    monkeypatch.setattr(execution_tools, "registry", run_registry)
+    monkeypatch.setattr(execution_tools, "engine", ExecutionEngine())
     # Force unity risk profile to avoid size being zeroed by multipliers.
     backtester.risk_profile = RiskProfile(global_multiplier=1.0, symbol_multipliers={"BTC-USD": 1.0})
     backtester.plan_service.plan_provider = provider

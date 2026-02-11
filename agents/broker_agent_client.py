@@ -39,7 +39,14 @@ ALLOWED_TOOLS = {
 logger = setup_logging(__name__)
 
 init_langfuse()
-_openai_client = get_llm_client()
+_openai_client = None
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = get_llm_client()
+    return _openai_client
 
 
 SYSTEM_PROMPT = (
@@ -135,8 +142,12 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
     
     # Initialize context manager
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-    context_manager = create_context_manager(model=model, openai_client=_openai_client)
-    
+    try:
+        client = _get_openai_client()
+    except RuntimeError:
+        client = None
+    context_manager = create_context_manager(model=model, openai_client=client)
+
     async with streamablehttp_client(url) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
@@ -147,10 +158,10 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
                 f"[BrokerAgent] Connected to MCP server with tools: {[t.name for t in tools]}"
             )
 
-            if _openai_client is not None:
+            if client is not None:
                 try:
                     msg_dict = stream_chat_completion(
-                        _openai_client,
+                        client,
                         model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
                         messages=conversation,
                         prefix="[BrokerAgent] ",
@@ -170,7 +181,7 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
                     await asyncio.sleep(1)
                     continue
 
-                if _openai_client is None:
+                if client is None:
                     logger.warning("LLM unavailable; echoing command.")
                     continue
 
@@ -199,7 +210,7 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
 
                 try:
                     msg_dict = stream_chat_completion(
-                        _openai_client,
+                        client,
                         model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
                         messages=conversation,
                         tools=tools_payload,
@@ -237,7 +248,7 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
 
                     try:
                         followup = stream_chat_completion(
-                            _openai_client,
+                            client,
                             model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
                             messages=conversation,
                             tools=tools_payload,
@@ -271,7 +282,7 @@ async def run_broker_agent(server_url: str = "http://localhost:8080"):
                     conversation.append({"role": "function", "name": func_name, "content": json.dumps(result_data)})
                     try:
                         followup = stream_chat_completion(
-                            _openai_client,
+                            client,
                             model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
                             messages=conversation,
                             tools=tools_payload,

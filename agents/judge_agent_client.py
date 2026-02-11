@@ -39,7 +39,14 @@ from services.risk_adjustment_service import multiplier_from_instruction
 logger = setup_logging(__name__, level="INFO")
 
 init_langfuse()
-openai_client = get_llm_client()
+_openai_client = None
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = get_llm_client()
+    return _openai_client
 
 
 def _split_notes_and_json(response_text: str) -> Tuple[str, str]:
@@ -386,7 +393,7 @@ JSON:
         
         try:
             _model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-            response = openai_client.responses.create(
+            response = _get_openai_client().responses.create(
                 model=_model,
                 input=[
                     {
@@ -662,7 +669,7 @@ Return ONLY the improved system prompt, no explanations."""
 
         try:
             _model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-            response = openai_client.responses.create(
+            response = _get_openai_client().responses.create(
                 model=_model,
                 input=[{"role": "user", "content": improvement_prompt}],
                 **output_token_args(_model, 2000),

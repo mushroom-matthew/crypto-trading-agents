@@ -222,17 +222,15 @@ JSON:
 }
 """
 
-        class StubCompletions:
+        class StubResponses:
             def __init__(self, payload):
                 self.payload = payload
 
             def create(self, **kwargs):
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content=self.payload))]
-                )
+                return SimpleNamespace(output_text=self.payload)
 
-        stub_client = SimpleNamespace(chat=SimpleNamespace(completions=StubCompletions(response_text)))
-        monkeypatch.setattr("agents.judge_agent_client.openai_client", stub_client)
+        stub_client = SimpleNamespace(responses=StubResponses(response_text))
+        monkeypatch.setattr("agents.judge_agent_client._openai_client", stub_client)
 
         judge = JudgeAgent(Mock(), AsyncMock())
         tx_history = [
@@ -260,17 +258,15 @@ JSON:
     async def test_analyze_decision_quality_raises_on_invalid_json(self, monkeypatch):
         bad_response = "NOTES:\n- text only\nJSON:\ninvalid"
 
-        class StubCompletions:
+        class StubResponses:
             def __init__(self, payload):
                 self.payload = payload
 
             def create(self, **kwargs):
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content=self.payload))]
-                )
+                return SimpleNamespace(output_text=self.payload)
 
-        stub_client = SimpleNamespace(chat=SimpleNamespace(completions=StubCompletions(bad_response)))
-        monkeypatch.setattr("agents.judge_agent_client.openai_client", stub_client)
+        stub_client = SimpleNamespace(responses=StubResponses(bad_response))
+        monkeypatch.setattr("agents.judge_agent_client._openai_client", stub_client)
 
         judge = JudgeAgent(Mock(), AsyncMock())
         tx_history = [

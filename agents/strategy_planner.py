@@ -22,8 +22,15 @@ from tools.strategy_spec import StrategySpec
 logger = setup_logging(__name__)
 
 init_langfuse()
-openai_client: OpenAI = get_llm_client()
+_openai_client: OpenAI | None = None
 prompt_manager = PromptManager()
+
+
+def _get_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = get_llm_client()
+    return _openai_client
 
 
 def _strategy_spec_prompt() -> str:
@@ -114,7 +121,7 @@ async def plan_strategy_spec(
         {"role": "user", "content": json.dumps(payload)},
     ]
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-    completion = openai_client.responses.create(
+    completion = _get_client().responses.create(
         model=model,
         input=messages,
         max_output_tokens=4000,

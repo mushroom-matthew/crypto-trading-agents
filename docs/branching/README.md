@@ -34,6 +34,13 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - ~~18-phase1-deterministic-policy-integration.md~~: Phase 1 policy pivot contract — deterministic, trigger-gated target-weight policy (mandatory). → Completed, see [X-18-phase1-deterministic-policy-integration.md](18-phase1-deterministic-policy-integration.md). (schemas, policy_engine.py, integration layer, backtest runner wiring, 52 tests).
 - [19-phase2-model-phat-integration.md](19-phase2-model-phat-integration.md): Phase 2 contract — `p_hat` as signal source only (optional/reversible).
 - ~~20-judge-attribution-rubric.md~~: Judge attribution contract — single-bucket blame model and replan/policy-adjust action gating. → **COMPLETE** (attribution schema, compute_attribution, action gating validators, 62 tests).
+- [21-emergency-exit-sensitivity.md](21-emergency-exit-sensitivity.md): Fix overly sensitive emergency exit (`tf_1d_atr > tf_4h_atr` tautology). Emergency exits dominated 80% of all exits in backtest ebf53879.
+- [22-exit-binding-prompt-gap.md](22-exit-binding-prompt-gap.md): Document exit category binding rules in LLM prompts. LLM generates cross-category exits that are silently blocked (11 blocks in ebf53879).
+- [23-hold-rule-calibration.md](23-hold-rule-calibration.md): Tighten hold rule guidance — `rsi_14 > 45` is near-always true, making normal exits dead code (12 blocks in ebf53879).
+- [24-judge-eval-flood.md](24-judge-eval-flood.md): Fix stale snapshot skip not advancing `next_judge_time`, causing 109 hourly stale skips instead of ~28 total evals. Change default cadence from 4h to 12h.
+- [25-trade-volume-deficit.md](25-trade-volume-deficit.md): Address systemic under-trading (0.43 entries/day). Dead trigger detection, fire rate guidance, drought telemetry.
+- [26-risk-telemetry-accuracy.md](26-risk-telemetry-accuracy.md): Fix phantom `risk=50` in judge snapshot that wastes feedback slots on non-issues.
+- [27-stance-diversity.md](27-stance-diversity.md): LLM never uses defensive/wait stance despite judge recommending it. Add defensive examples, structured stance hints.
 
 Learning-risk runbooks (09-12) are all complete — implemented together on branch `main`. Tag propagation, learning book settings, experiment specs, and no-learn zones/kill switches are all landed.
 
@@ -71,9 +78,20 @@ The numbered runbooks reflect creation order, not execution priority. Based on a
 ### Phase 3B — Judge attribution governance
 11. **20**: Judge attribution rubric and action gating. Enforces single primary attribution with evidence and prevents cross-layer blame smearing.
 
-### Phase 4 — Infrastructure expansion
-12. **07**: AWS deploy / CI/CD
-13. **08**: Multi-wallet (Phantom/Solana/EVM read-only + reconciliation)
+### Phase 4 — Backtest quality (from ebf53879 analysis)
+Runbooks 21-27 address issues discovered in backtest ebf53879. Recommended sub-order:
+
+12. **24**: Judge eval flood (quick bug fix — stale skip timer advancement)
+13. **26**: Risk telemetry accuracy (fix phantom risk values polluting judge feedback)
+14. **21**: Emergency exit sensitivity (biggest impact — 80% of exits are emergency)
+15. **22**: Exit binding prompt gap (11 silent blocks per backtest)
+16. **23**: Hold rule calibration (12 blocks, makes normal exits dead code)
+17. **25**: Trade volume deficit (meta-fix — depends on 21-23 landing first)
+18. **27**: Stance diversity (prompt enrichment, lowest urgency)
+
+### Phase 5 — Infrastructure expansion
+19. **07**: AWS deploy / CI/CD
+20. **08**: Multi-wallet (Phantom/Solana/EVM read-only + reconciliation)
 
 > **Why this order differs from filenames:** The true blocker for the policy pivot is "anti-churn + continuity + clean replans," not just risk math. Learning Book isolation is trust infrastructure, not a feature — without it, experiments muddy PnL and interpretability is lost. Strategist simplification (01) is major but moves later because emergency exits and judge robustness are hard safety invariants that must be machine-enforced first. After those are green, Phase 1 policy integration (18) is mandatory; Phase 2 model integration (19) is optional and reversible.
 

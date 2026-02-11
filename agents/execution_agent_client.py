@@ -63,7 +63,14 @@ ALLOWED_TOOLS = {
 logger = setup_logging(__name__)
 
 init_langfuse()
-openai_client = get_llm_client()
+_openai_client = None
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = get_llm_client()
+    return _openai_client
 
 DEFAULT_STRATEGY_TIMEFRAME = os.environ.get("STRATEGY_TIMEFRAME", "15m")
 USE_LEGACY_LLM_EXECUTION = os.environ.get("USE_LEGACY_LLM_EXECUTION", "0") == "1"
@@ -698,7 +705,7 @@ async def run_execution_agent(server_url: str = "http://localhost:8080") -> None
     
     # Initialize context manager
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-    context_manager = create_context_manager(model=model, openai_client=openai_client)
+    context_manager = create_context_manager(model=model, openai_client=_get_openai_client())
     symbols: Set[str] = set()
     current_preferences: dict = {}
     _symbol_task = asyncio.create_task(_watch_symbols(temporal, symbols))
@@ -935,7 +942,7 @@ async def run_execution_agent(server_url: str = "http://localhost:8080") -> None
                 while True:
                     try:
                         msg = stream_chat_completion(
-                            openai_client,
+                            _get_openai_client(),
                             model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
                             messages=conversation,
                             tools=openai_tools,
