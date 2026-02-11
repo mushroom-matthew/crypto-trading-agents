@@ -41,6 +41,10 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [25-trade-volume-deficit.md](25-trade-volume-deficit.md): Address systemic under-trading (0.43 entries/day). Dead trigger detection, fire rate guidance, drought telemetry.
 - [26-risk-telemetry-accuracy.md](26-risk-telemetry-accuracy.md): Fix phantom `risk=50` in judge snapshot that wastes feedback slots on non-issues.
 - [27-stance-diversity.md](27-stance-diversity.md): LLM never uses defensive/wait stance despite judge recommending it. Add defensive examples, structured stance hints.
+- [28-judge-action-contract.md](28-judge-action-contract.md): Define structured judge actions, TTLs, and action events; wire recommended_action routing.
+- [29-judge-structured-multipliers.md](29-judge-structured-multipliers.md): Replace free-text sizing parsing with structured multipliers and clamps.
+- [30-judge-immediate-application.md](30-judge-immediate-application.md): Apply intraday judge constraints to active engines without waiting for replans.
+- [31-judge-stance-enforcement.md](31-judge-stance-enforcement.md): Deterministic enforcement of recommended stance (defensive/wait).
 
 Learning-risk runbooks (09-12) are all complete — implemented together on branch `main`. Tag propagation, learning book settings, experiment specs, and no-learn zones/kill switches are all landed.
 
@@ -88,6 +92,12 @@ Runbooks 21-27 address issues discovered in backtest ebf53879. Recommended sub-o
 16. **23**: Hold rule calibration (12 blocks, makes normal exits dead code)
 17. **25**: Trade volume deficit (meta-fix — depends on 21-23 landing first)
 18. **27**: Stance diversity (prompt enrichment, lowest urgency)
+
+### Phase 4B — Judge actionability (from backtest 7c860ae1 analysis)
+1. **28**: Judge action contract (structured actions, TTLs, action events)
+2. **29**: Structured multipliers with clamps (emergency fix for sizing)
+3. **30**: Immediate intraday application (close feedback/action gap)
+4. **31**: Stance enforcement (defensive/wait gating)
 
 ### Phase 5 — Infrastructure expansion
 19. **07**: AWS deploy / CI/CD
