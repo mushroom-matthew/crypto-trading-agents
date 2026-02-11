@@ -93,7 +93,8 @@ JSON:
     "vetoes": ["text - behaviors to stop immediately"],
     "boost": ["text - working well, continue doing"],
     "regime_correction": "<text or null - if market regime doesn't match strategy>",
-    "sizing_adjustments": {{"SYMBOL": "<instruction>"}}
+    "sizing_adjustments": {{"SYMBOL": "<instruction>"}},
+    "recommended_stance": "active" | "defensive" | "wait" | null
   }}
 }}
 

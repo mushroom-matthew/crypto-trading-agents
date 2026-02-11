@@ -340,3 +340,46 @@ def test_plan_service_enforces_judge_trigger_budget(tmp_path):
         run.run_id, _llm_input()
     )
     assert plan.max_triggers_per_symbol_per_day == 4
+
+
+def test_plan_service_enforces_defensive_stance(tmp_path, monkeypatch):
+    monkeypatch.setenv("JUDGE_DEFENSIVE_MAX_TRADES_PER_DAY", "4")
+    monkeypatch.setenv("JUDGE_DEFENSIVE_MAX_TRIGGERS_PER_SYMBOL", "3")
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7)
+    )
+    run.latest_judge_feedback = JudgeFeedback(
+        strategist_constraints=DisplayConstraints(recommended_stance="defensive")
+    )
+    registry.update_strategy_run(run)
+    plan = _base_plan()
+    plan.max_trades_per_day = 10
+    plan.max_triggers_per_symbol_per_day = 10
+    stub = StubPlanProvider(plan)
+    service = StrategistPlanService(plan_provider=stub, registry=registry)
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.stance == "defensive"
+    assert result.max_trades_per_day == 4
+    assert result.max_triggers_per_symbol_per_day == 3
+
+
+def test_plan_service_enforces_wait_stance(tmp_path):
+    registry = StrategyRunRegistry(tmp_path / "runs")
+    run = registry.create_strategy_run(
+        StrategyRunConfig(symbols=["BTC-USD"], timeframes=["1h"], history_window_days=7)
+    )
+    run.latest_judge_feedback = JudgeFeedback(
+        strategist_constraints=DisplayConstraints(recommended_stance="wait")
+    )
+    registry.update_strategy_run(run)
+    plan = _base_plan()
+    plan.max_trades_per_day = 8
+    plan.max_triggers_per_symbol_per_day = 8
+    stub = StubPlanProvider(plan)
+    service = StrategistPlanService(plan_provider=stub, registry=registry)
+    result = service.generate_plan_for_run(run.run_id, _llm_input())
+    assert result.stance == "wait"
+    assert result.max_trades_per_day == 0
+    assert result.max_triggers_per_symbol_per_day == 0
+    assert (result.min_trades_per_day or 0) == 0

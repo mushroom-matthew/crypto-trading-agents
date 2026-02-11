@@ -40,6 +40,8 @@ class StrategistPlanService:
         self.min_trade_hint_cap = int(os.environ.get("STRATEGIST_PLAN_MIN_TRADE_CAP", "3"))
         self.strict_fixed_caps = os.environ.get("STRATEGIST_STRICT_FIXED_CAPS", "false").lower() == "true"
         self.legacy_cap_floor = os.environ.get("STRATEGIST_PLAN_LEGACY_DERIVED_CAP_FLOOR", "false").lower() == "true"
+        self.defensive_max_trades = int(os.environ.get("JUDGE_DEFENSIVE_MAX_TRADES_PER_DAY", "4"))
+        self.defensive_max_triggers = int(os.environ.get("JUDGE_DEFENSIVE_MAX_TRIGGERS_PER_SYMBOL", "4"))
         try:
             self.min_cap_floor = int(os.environ.get("STRATEGIST_PLAN_DERIVED_CAP_MIN_FLOOR", "8"))
         except ValueError:
@@ -133,9 +135,14 @@ class StrategistPlanService:
         effective_judge_feedback = run.latest_judge_feedback
         if run.latest_judge_action and run.latest_judge_action.status == "applied":
             if run.latest_judge_action.evals_remaining > 0:
+                strategist_constraints = run.latest_judge_action.strategist_constraints
+                if run.latest_judge_action.stance_override and strategist_constraints.recommended_stance is None:
+                    strategist_constraints = strategist_constraints.model_copy(
+                        update={"recommended_stance": run.latest_judge_action.stance_override}
+                    )
                 effective_judge_feedback = JudgeFeedback(
                     constraints=run.latest_judge_action.constraints,
-                    strategist_constraints=run.latest_judge_action.strategist_constraints,
+                    strategist_constraints=strategist_constraints,
                 )
         if effective_judge_feedback:
             plan = self._apply_strategist_constraints(
@@ -157,6 +164,12 @@ class StrategistPlanService:
         plan = self._enforce_derived_trade_cap(plan)
         judge_constraints = effective_judge_feedback.constraints if effective_judge_feedback else None
         plan = self._resolve_final_caps(plan, judge_constraints)
+        stance = (
+            effective_judge_feedback.strategist_constraints.recommended_stance
+            if effective_judge_feedback
+            else None
+        )
+        plan = self._enforce_recommended_stance(plan, stance)
         run.current_plan_id = plan.plan_id
         self.registry.update_strategy_run(run)
         cache_path = self.plan_provider._cache_path(run_id, plan_date, llm_input)
@@ -362,6 +375,37 @@ class StrategistPlanService:
             plan.min_trades_per_day = max(plan.min_trades_per_day or 0, 1)
             cap = self.min_trade_hint_cap or self.default_max_trades
             plan.max_trades_per_day = min(plan.max_trades_per_day or self.default_max_trades, cap)
+        return plan
+
+    def _enforce_recommended_stance(
+        self,
+        plan: StrategyPlan,
+        stance: str | None,
+    ) -> StrategyPlan:
+        if not stance:
+            return plan
+        plan = plan.model_copy(deep=True)
+        if stance == "defensive":
+            plan.stance = "defensive"
+            plan.max_trades_per_day = (
+                self.defensive_max_trades
+                if plan.max_trades_per_day is None
+                else min(plan.max_trades_per_day, self.defensive_max_trades)
+            )
+            plan.max_triggers_per_symbol_per_day = (
+                self.defensive_max_triggers
+                if plan.max_triggers_per_symbol_per_day is None
+                else min(plan.max_triggers_per_symbol_per_day, self.defensive_max_triggers)
+            )
+        elif stance == "wait":
+            plan.stance = "wait"
+            plan.max_trades_per_day = 0
+            plan.max_triggers_per_symbol_per_day = 0
+            plan.min_trades_per_day = 0
+        elif stance == "active":
+            plan.stance = "active"
+        object.__setattr__(plan, "_resolved_trade_cap", plan.max_trades_per_day)
+        object.__setattr__(plan, "_resolved_trigger_cap", plan.max_triggers_per_symbol_per_day)
         return plan
 
 

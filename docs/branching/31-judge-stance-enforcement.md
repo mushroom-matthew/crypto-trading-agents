@@ -14,6 +14,10 @@ Enforce `recommended_stance` deterministically so the strategist cannot ignore d
 - Enforce stance at plan generation time with deterministic caps or overrides.
 - Add audit telemetry when a plan conflicts with recommended stance.
 
+## Config Notes
+- `JUDGE_DEFENSIVE_MAX_TRADES_PER_DAY` (default 4)
+- `JUDGE_DEFENSIVE_MAX_TRIGGERS_PER_SYMBOL` (default 4)
+
 ## Out of Scope / Deferred
 - Prompt redesign or stylistic changes.
 - Policy engine changes beyond stance gating.
