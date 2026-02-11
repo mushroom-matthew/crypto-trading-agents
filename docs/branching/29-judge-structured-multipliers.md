@@ -26,6 +26,9 @@ Replace fragile text parsing for judge sizing instructions with structured multi
 - `services/risk_adjustment_service.py`
 - `backtesting/llm_strategist_runner.py`
 
+## Frontend Impact
+- None expected beyond existing judge feedback display (structured multipliers are backend-only).
+
 ## Implementation Steps
 
 ### Step 1: Extend judge JSON contract

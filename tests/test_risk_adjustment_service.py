@@ -51,6 +51,34 @@ def test_multiplier_parser_handles_cap():
     assert multiplier_from_instruction("Allow full allocation for grade A setups.") == pytest.approx(1.0)
 
 
+def test_structured_multiplier_overrides_instruction():
+    run = _run()
+    feedback = JudgeFeedback(
+        constraints={"symbol_risk_multipliers": {"BTC-USD": 0.8}},
+        strategist_constraints=DisplayConstraints(
+            sizing_adjustments={"BTC-USD": "Cut risk by 50% until two winning days post drawdown."}
+        ),
+    )
+    apply_judge_risk_feedback(run, feedback, winning_day=False)
+    state = run.risk_adjustments["BTC-USD"]
+    assert state.multiplier == pytest.approx(0.8)
+    assert feedback.constraints.symbol_risk_multipliers["BTC-USD"] == pytest.approx(0.8)
+
+
+def test_multiplier_clamped(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("JUDGE_RISK_MULTIPLIER_MIN", "0.25")
+    monkeypatch.setenv("JUDGE_RISK_MULTIPLIER_MAX", "3.0")
+
+    run = _run()
+    feedback = JudgeFeedback(
+        constraints={"symbol_risk_multipliers": {"BTC-USD": 0.01}},
+        strategist_constraints=DisplayConstraints(),
+    )
+    apply_judge_risk_feedback(run, feedback, winning_day=False)
+    assert run.risk_adjustments["BTC-USD"].multiplier == pytest.approx(0.25)
+    assert feedback.constraints.symbol_risk_multipliers["BTC-USD"] == pytest.approx(0.25)
+
+
 def test_build_risk_profile_maps_adjustments():
     run = _run()
     run.risk_adjustments = {

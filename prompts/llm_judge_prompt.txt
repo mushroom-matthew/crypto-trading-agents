@@ -83,6 +83,7 @@ JSON:
   "constraints": {{
     "max_trades_per_day": <integer or null>,
     "max_triggers_per_symbol_per_day": <integer or null>,
+    "symbol_risk_multipliers": {{"SYMBOL": <float multiplier>}},
     "risk_mode": "normal" | "conservative" | "emergency",
     "disabled_trigger_ids": ["trigger_id"],
     "disabled_categories": ["trend_continuation", "reversal", "volatility_breakout", "mean_reversion", "emergency_exit", "other"]
@@ -110,6 +111,7 @@ Rules:
 - Use null for unknown numeric limits.
 - disabled_trigger_ids should name concrete trigger IDs that are underperforming; leave empty if none.
 - disabled_categories must use the provided category names.
+- When recommending sizing changes, prefer structured `symbol_risk_multipliers` and use `sizing_adjustments` only for human-readable notes.
 - Base risk_mode on drawdown/volatility evidence AND whether risk parameters are being violated.
 - Score should reflect how well the execution follows the configured strategy, not just P&L.
 - If no trades happened but triggers should have fired, note this as a must_fix issue.

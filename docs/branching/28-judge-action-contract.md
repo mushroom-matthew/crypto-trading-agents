@@ -34,6 +34,10 @@ Judge output is not treated as an action contract. There is no structured, persi
 - `ui/src/components/EventTimeline.tsx`
 - `ui/src/components/AgentInspector.tsx`
 
+## Frontend Impact
+- New event types (`judge_action_applied`, `judge_action_skipped`) should be surfaced in the Event Timeline.
+- Agent Inspector may need to display action status, TTL, and applied constraints.
+
 ## Implementation Steps
 
 ### Step 1: Define Judge Action schema

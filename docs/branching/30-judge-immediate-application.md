@@ -27,6 +27,10 @@ Intraday judge feedback is recorded but does not update the active engine state 
 - `services/risk_adjustment_service.py`
 - `agents/judge_agent_client.py`
 
+## Frontend Impact
+- Event Timeline should show immediate-application events (`judge_action_applied` with `scope=intraday`).
+- Signal Diagnostics may need to reflect newly disabled triggers within the same evaluation window.
+
 ## Implementation Steps
 
 ### Step 1: Introduce an “apply intraday feedback” helper

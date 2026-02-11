@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from typing import Dict, Iterable, Optional
 
 from agents.strategies.risk_engine import RiskProfile
 from schemas.judge_feedback import JudgeFeedback
 from schemas.strategy_run import RiskAdjustmentState, RiskLimitSettings, StrategyRun
+
+logger = logging.getLogger(__name__)
 
 
 _CUT_PATTERN = re.compile(r"cut\s+risk\s+by\s+(?P<pct>\d+(?:\.\d+)?)%")
@@ -20,6 +24,55 @@ _NUM_WORDS = {
     "four": 4,
     "five": 5,
 }
+
+
+_DEFAULT_MIN_MULTIPLIER = 0.25
+_DEFAULT_MAX_MULTIPLIER = 3.0
+
+
+def _load_multiplier_bounds() -> tuple[float, float]:
+    """Load clamp bounds for judge risk multipliers from env."""
+
+    def _read(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning("Invalid %s=%r, using default %.2f", name, raw, default)
+            return default
+
+    min_mult = _read("JUDGE_RISK_MULTIPLIER_MIN", _DEFAULT_MIN_MULTIPLIER)
+    max_mult = _read("JUDGE_RISK_MULTIPLIER_MAX", _DEFAULT_MAX_MULTIPLIER)
+    if min_mult <= 0 or max_mult <= 0 or min_mult > max_mult:
+        logger.warning(
+            "Invalid risk multiplier bounds (min=%s max=%s); using defaults %.2f..%.2f",
+            min_mult,
+            max_mult,
+            _DEFAULT_MIN_MULTIPLIER,
+            _DEFAULT_MAX_MULTIPLIER,
+        )
+        return _DEFAULT_MIN_MULTIPLIER, _DEFAULT_MAX_MULTIPLIER
+    return min_mult, max_mult
+
+
+def _clamp_multiplier(value: float, symbol: str, source: str) -> float:
+    """Clamp multipliers to a safe range and log when clamping occurs."""
+
+    min_mult, max_mult = _load_multiplier_bounds()
+    clamped = min(max(value, min_mult), max_mult)
+    if clamped != value:
+        logger.warning(
+            "Clamped judge risk multiplier for %s (%s): %.4f -> %.4f (min=%.2f max=%.2f)",
+            symbol,
+            source,
+            value,
+            clamped,
+            min_mult,
+            max_mult,
+        )
+    return clamped
 
 
 def _parse_multiplier(text: str) -> Optional[float]:
@@ -88,20 +141,33 @@ def apply_judge_risk_feedback(
                 adjustments[symbol] = state
 
     instructions = feedback.strategist_constraints.sizing_adjustments or {}
-    for symbol, instruction in instructions.items():
-        multiplier = _parse_multiplier(instruction)
+    structured = feedback.constraints.symbol_risk_multipliers or {}
+    all_symbols = set(structured) | set(instructions)
+    for symbol in sorted(all_symbols):
+        instruction = instructions.get(symbol)
+        multiplier = None
+        source = "instruction"
+        if symbol in structured:
+            multiplier = structured.get(symbol)
+            source = "structured"
+        elif instruction:
+            multiplier = _parse_multiplier(instruction)
+
         if multiplier is None:
             continue
-        wins_req = _parse_win_requirement(instruction)
+
+        multiplier = _clamp_multiplier(multiplier, symbol, source)
+        wins_req = _parse_win_requirement(instruction) if instruction else None
         if multiplier >= 0.999:
             if symbol in adjustments:
                 adjustments.pop(symbol, None)
                 changed = True
+            feedback.constraints.symbol_risk_multipliers[symbol] = 1.0
             continue
         existing = adjustments.get(symbol)
         if existing and existing.multiplier == multiplier and existing.restore_after_wins == wins_req:
             if existing.instruction != instruction:
-                existing.instruction = instruction
+                existing.instruction = instruction or existing.instruction
                 adjustments[symbol] = existing
                 changed = True
             feedback.constraints.symbol_risk_multipliers[symbol] = multiplier
@@ -110,7 +176,7 @@ def apply_judge_risk_feedback(
             multiplier=multiplier,
             restore_after_wins=wins_req,
             wins_progress=0,
-            instruction=instruction,
+            instruction=instruction or ("Structured multiplier from judge" if source == "structured" else None),
         )
         feedback.constraints.symbol_risk_multipliers[symbol] = multiplier
         changed = True

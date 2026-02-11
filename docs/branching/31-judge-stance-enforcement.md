@@ -25,6 +25,10 @@ Enforce `recommended_stance` deterministically so the strategist cannot ignore d
 - `backtesting/llm_strategist_runner.py`
 - `agents/strategies/plan_provider.py`
 
+## Frontend Impact
+- Event Timeline should surface stance overrides (e.g., `stance_override=defensive`).
+- Agent Inspector should display the enforced stance and trigger caps.
+
 ## Implementation Steps
 
 ### Step 1: Add recommended_stance to judge JSON
