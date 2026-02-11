@@ -2424,6 +2424,7 @@ class LLMStrategistBacktester:
                         if machine_constraints:
                             parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
                             self._apply_judge_constraints(parsed, current_plan)
+                            self._apply_intraday_engine_updates()
                     else:
                         judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
                         if judge_constraints:
@@ -2433,6 +2434,7 @@ class LLMStrategistBacktester:
                         if machine_constraints:
                             parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
                             self._apply_judge_constraints(parsed, current_plan)
+                            self._apply_intraday_engine_updates()
                     daily_reports.append(summary)
             if self.current_day_key != day_key:
                 self.current_day_key = day_key
@@ -2512,6 +2514,7 @@ class LLMStrategistBacktester:
                     self.active_judge_action.evals_remaining = 0
                     self._persist_judge_action(run_id, self.active_judge_action)
                     self.active_judge_action = None
+                self._apply_intraday_engine_updates()
                 self.bars_since_last_trade = 0
                 self.last_judge_intervention_time = None
 
@@ -2787,21 +2790,7 @@ class LLMStrategistBacktester:
                     current_plan_payload = current_plan.model_dump()
                     current_compiled_payload = compiled_plan.model_dump()
                     # Apply risk_mode scaling from judge constraints
-                    effective_risk_profile = self.risk_profile
-                    if self.active_judge_constraints and self.active_judge_constraints.risk_mode != "normal":
-                        risk_mode = self.active_judge_constraints.risk_mode
-                        # Emergency: 50% reduction, Conservative: 25% reduction
-                        scale_factor = 0.5 if risk_mode == "emergency" else 0.75
-                        effective_risk_profile = RiskProfile(
-                            global_multiplier=self.risk_profile.global_multiplier * scale_factor,
-                            symbol_multipliers=self.risk_profile.symbol_multipliers.copy(),
-                            archetype_multipliers=self.risk_profile.archetype_multipliers.copy(),
-                            archetype_hour_multipliers=self.risk_profile.archetype_hour_multipliers.copy(),
-                        )
-                        logger.info(
-                            "Judge risk_mode=%s: scaling risk profile by %.0f%%",
-                            risk_mode, scale_factor * 100
-                        )
+                    effective_risk_profile = self._effective_risk_profile()
                     risk_engine = RiskEngine(
                         current_plan.risk_constraints,
                         {rule.symbol: rule for rule in current_plan.sizing_rules},
@@ -3130,6 +3119,7 @@ class LLMStrategistBacktester:
                     if machine_constraints:
                         parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
                         self._apply_judge_constraints(parsed, current_plan)
+                        self._apply_intraday_engine_updates()
                 else:
                     judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
                     if judge_constraints:
@@ -3139,6 +3129,7 @@ class LLMStrategistBacktester:
                     if machine_constraints:
                         parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
                         self._apply_judge_constraints(parsed, current_plan)
+                        self._apply_intraday_engine_updates()
                 daily_reports.append(summary)
 
         # Collect samples from final trigger engine
@@ -5029,6 +5020,7 @@ class LLMStrategistBacktester:
             self.active_judge_constraints = None
             self.judge_constraints = {}
             self.last_judge_intervention_time = None
+        self._apply_intraday_engine_updates()
         self._persist_judge_action(run_id, action)
 
     def _apply_judge_action(
@@ -5068,6 +5060,7 @@ class LLMStrategistBacktester:
         self.judge_constraints = action.strategist_constraints.model_dump()
         if action.stance_override and not self.judge_constraints.get("recommended_stance"):
             self.judge_constraints["recommended_stance"] = action.stance_override
+        self._apply_intraday_engine_updates()
 
         self._persist_judge_action(run_id, action)
         self._emit_event(
@@ -5136,6 +5129,7 @@ class LLMStrategistBacktester:
                 self.active_judge_constraints = self.active_judge_constraints.model_copy(
                     update={"disabled_trigger_ids": []}
                 )
+                self._apply_intraday_engine_updates()
                 self.consecutive_stale_skips = 0
             else:
                 self._add_event("stale_snapshot_skip", {
@@ -5466,6 +5460,37 @@ class LLMStrategistBacktester:
         if constraints.disabled_trigger_ids or constraints.disabled_categories:
             self.last_judge_intervention_time = datetime.now(timezone.utc)
         return constraints
+
+    def _effective_risk_profile(self) -> RiskProfile:
+        """Apply judge risk_mode scaling to the current risk profile."""
+        effective = self.risk_profile
+        if self.active_judge_constraints and self.active_judge_constraints.risk_mode != "normal":
+            risk_mode = self.active_judge_constraints.risk_mode
+            scale_factor = 0.5 if risk_mode == "emergency" else 0.75
+            effective = RiskProfile(
+                global_multiplier=self.risk_profile.global_multiplier * scale_factor,
+                symbol_multipliers=self.risk_profile.symbol_multipliers.copy(),
+                archetype_multipliers=self.risk_profile.archetype_multipliers.copy(),
+                archetype_hour_multipliers=self.risk_profile.archetype_hour_multipliers.copy(),
+            )
+            logger.info(
+                "Judge risk_mode=%s: scaling risk profile by %.0f%%",
+                risk_mode, scale_factor * 100
+            )
+        return effective
+
+    def _apply_intraday_engine_updates(self) -> None:
+        """Apply judge constraints and risk profile to the active engines."""
+        if self.current_trigger_engine is not None:
+            self.current_trigger_engine.judge_constraints = self.active_judge_constraints
+        risk_engine = None
+        if self.current_trigger_engine is not None:
+            risk_engine = self.current_trigger_engine.risk_engine
+        if risk_engine is None:
+            risk_engine = self.latest_risk_engine
+        if risk_engine is not None:
+            risk_engine.risk_profile = self._effective_risk_profile()
+            self.latest_risk_engine = risk_engine
 
     def _on_trade_executed(self, ts: datetime) -> None:
         """Called after a trade is executed to update judge tracking."""
