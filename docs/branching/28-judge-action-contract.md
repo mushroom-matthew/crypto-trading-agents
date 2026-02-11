@@ -17,6 +17,9 @@ Judge output is not treated as an action contract. There is no structured, persi
 - Wire `JudgeAttribution.recommended_action` into evaluation routing (replan vs hold vs policy_adjust).
 - Ensure judge constraints persist across evaluations until TTL expiry or explicit reset.
 
+## Config Notes
+- `JUDGE_ACTION_TTL_EVALS`: number of judge evaluations to retain an action before expiry (default: 3).
+
 ## Out of Scope / Deferred
 - Policy engine math changes (Phase 1 policy integration).
 - Model integration or p_hat sourcing.

@@ -628,6 +628,7 @@ class JudgeFeedbackService:
             # Shim path: transport returns deterministic response
             raw = self.transport(payload_json)
             feedback = JudgeFeedback.model_validate_json(raw)
+            feedback = self._ensure_attribution(feedback, heuristics, trade_metrics, summary)
             self.last_generation_info = {"source": "transport", "heuristics": heuristics.to_dict()}
             return feedback
 
@@ -826,6 +827,7 @@ Your final score can differ from the heuristic score if you have good reasons.""
             feedback = JudgeFeedback.model_validate_json(json_block)
             # Preserve notes from LLM
             feedback.notes = notes_text
+            feedback = self._ensure_attribution(feedback, heuristics, trade_metrics, summary)
 
             self.last_generation_info = {
                 "source": "llm",
@@ -867,6 +869,7 @@ Your final score can differ from the heuristic score if you have good reasons.""
             boost=suggested.get("boost", []),
             regime_correction=suggested.get("regime_correction"),
             sizing_adjustments=suggested.get("sizing_adjustments", {}),
+            recommended_stance=suggested.get("recommended_stance"),
         )
 
         # Compute attribution from heuristics and metrics
@@ -881,6 +884,21 @@ Your final score can differ from the heuristic score if you have good reasons.""
             strategist_constraints=strategist_constraints,
             attribution=attribution,
         )
+
+    def _ensure_attribution(
+        self,
+        feedback: JudgeFeedback,
+        heuristics: HeuristicAnalysis,
+        trade_metrics: TradeMetrics | None,
+        summary: Dict[str, Any] | None,
+    ) -> JudgeFeedback:
+        if feedback.attribution is None:
+            feedback.attribution = self.compute_attribution(heuristics, trade_metrics, summary)
+        if feedback.strategist_constraints and feedback.strategist_constraints.recommended_stance is None:
+            recommended = heuristics.suggested_strategist_constraints.get("recommended_stance")
+            if recommended:
+                feedback.strategist_constraints.recommended_stance = recommended
+        return feedback
 
     @staticmethod
     @lru_cache(1)

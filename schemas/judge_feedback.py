@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
@@ -13,6 +14,8 @@ from .llm_strategist import SerializableModel
 AttributionLayer = Literal["plan", "trigger", "policy", "execution", "safety"]
 AttributionConfidence = Literal["low", "medium", "high"]
 RecommendedAction = Literal["hold", "policy_adjust", "replan", "investigate_execution", "stand_down"]
+JudgeActionStatus = Literal["pending", "applied", "skipped", "expired"]
+JudgeActionScope = Literal["intraday", "daily", "manual"]
 
 
 class AttributionEvidence(SerializableModel):
@@ -165,6 +168,29 @@ class JudgeFeedback(SerializableModel):
         default=None,
         description="Attribution analysis when evaluation determines outcome causes",
     )
+
+
+class JudgeAction(SerializableModel):
+    """Structured judge action derived from feedback and enforced deterministically."""
+
+    action_id: str
+    source_eval_id: Optional[str] = Field(
+        default=None,
+        description="Identifier for the evaluation window (day key, plan id, etc.).",
+    )
+    recommended_action: RecommendedAction = Field(
+        description="Action to take based on attribution and constraints.",
+    )
+    constraints: JudgeConstraints = Field(default_factory=JudgeConstraints)
+    strategist_constraints: DisplayConstraints = Field(default_factory=DisplayConstraints)
+    stance_override: Optional[Literal["active", "defensive", "wait"]] = None
+    ttl_evals: int = Field(default=1, ge=1, description="Number of judge evaluations to retain this action.")
+    evals_remaining: int = Field(default=1, ge=0, description="Remaining evaluations before expiry.")
+    status: JudgeActionStatus = Field(default="pending")
+    reason: Optional[str] = Field(default=None, description="Reason for applying/skipping the action.")
+    scope: Optional[JudgeActionScope] = Field(default=None, description="Intraday or daily action scope.")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    applied_at: Optional[datetime] = None
 
 
 def apply_trigger_floor(

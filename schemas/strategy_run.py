@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import Field
 
-from .judge_feedback import JudgeFeedback
+from .judge_feedback import JudgeFeedback, JudgeAction
 from .learning_gate import LearningGateThresholds, LearningKillSwitchConfig
 from .llm_strategist import RiskConstraint, SerializableModel
 
@@ -173,6 +173,7 @@ class StrategyRun(SerializableModel):
     compiled_plan_id: str | None = None
     plan_active: bool = False
     latest_judge_feedback: JudgeFeedback | None = None
+    latest_judge_action: JudgeAction | None = None
     risk_adjustments: Dict[str, RiskAdjustmentState] = Field(default_factory=dict)
     is_locked: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

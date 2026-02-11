@@ -46,6 +46,8 @@ async def _broadcast_to_websocket(event: Event) -> None:
         "intent",
         "plan_generated",
         "plan_judged",
+        "judge_action_applied",
+        "judge_action_skipped",
     }
 
     market_event_types = {

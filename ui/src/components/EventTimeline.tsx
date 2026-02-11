@@ -35,6 +35,16 @@ const EVENT_CONFIG: Record<
     color: 'text-purple-500',
     label: 'Plan Judged',
   },
+  judge_action_applied: {
+    icon: CheckCircle,
+    color: 'text-emerald-500',
+    label: 'Judge Action Applied',
+  },
+  judge_action_skipped: {
+    icon: XCircle,
+    color: 'text-rose-500',
+    label: 'Judge Action Skipped',
+  },
   order_submitted: {
     icon: Send,
     color: 'text-indigo-500',
@@ -271,6 +281,23 @@ function renderEventSummary(event: AgentEvent): React.ReactNode {
             <> - {payload.recommendations[0]}</>
           )}
           {!payload.recommendations?.length && payload.notes && <> - {payload.notes}</>}
+        </span>
+      );
+
+    case 'judge_action_applied':
+      return (
+        <span>
+          Action: {payload.recommended_action || 'N/A'}
+          {payload.reason && <> · {payload.reason}</>}
+          {payload.stance_override && <> · stance={payload.stance_override}</>}
+        </span>
+      );
+
+    case 'judge_action_skipped':
+      return (
+        <span className="text-gray-600 dark:text-gray-300">
+          Skipped: {payload.recommended_action || 'N/A'}
+          {payload.reason && <> · {payload.reason}</>}
         </span>
       );
 

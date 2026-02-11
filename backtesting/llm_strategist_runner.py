@@ -40,7 +40,7 @@ from backtesting.dataset import load_ohlcv
 from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_transport
 from services.judge_feedback_service import JudgeFeedbackService
 from backtesting.reports import write_run_summary
-from schemas.judge_feedback import JudgeFeedback, JudgeConstraints, apply_trigger_floor
+from schemas.judge_feedback import JudgeFeedback, JudgeConstraints, JudgeAction, apply_trigger_floor
 from schemas.llm_strategist import (
     AssetState,
     IndicatorSnapshot,
@@ -612,6 +612,7 @@ class LLMStrategistBacktester:
         self.memory_history: List[Dict[str, Any]] = []
         self.judge_constraints: Dict[str, Any] = {}
         self.active_judge_constraints: JudgeConstraints | None = None  # Machine-readable constraints
+        self.active_judge_action: JudgeAction | None = None
         self.limit_enforcement_by_day: Dict[str, Dict[str, Any]] = defaultdict(_new_limit_entry)
         self.plan_limits_by_day: Dict[str, Dict[str, Any]] = {}
         self.current_run_id: str | None = None
@@ -702,6 +703,7 @@ class LLMStrategistBacktester:
         self.judge_check_after_trades = max(1, judge_check_after_trades)
         self.replan_on_day_boundary = bool(replan_on_day_boundary)
         self.use_judge_shim = use_judge_shim
+        self.judge_action_ttl_evals = max(1, int(os.environ.get("JUDGE_ACTION_TTL_EVALS", "3")))
         if not self.use_judge_shim:
             api_key = os.environ.get("OPENAI_API_KEY", "").strip().lower()
             if not api_key or api_key in {"test", "dummy"}:
@@ -2413,14 +2415,24 @@ class LLMStrategistBacktester:
                 if summary:
                     self.latest_daily_summary = summary
                     self.memory_history.append(summary)
-                    judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
-                    if judge_constraints:
-                        self.judge_constraints = judge_constraints
-                    # Extract machine-readable constraints for trigger enforcement
-                    machine_constraints = summary.get("judge_feedback", {}).get("constraints")
-                    if machine_constraints:
-                        parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
-                        self._apply_judge_constraints(parsed, current_plan)
+                    judge_action = summary.get("judge_action") or {}
+                    if judge_action:
+                        judge_constraints = judge_action.get("strategist_constraints")
+                        if judge_constraints:
+                            self.judge_constraints = judge_constraints
+                        machine_constraints = judge_action.get("constraints")
+                        if machine_constraints:
+                            parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                            self._apply_judge_constraints(parsed, current_plan)
+                    else:
+                        judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
+                        if judge_constraints:
+                            self.judge_constraints = judge_constraints
+                        # Extract machine-readable constraints for trigger enforcement
+                        machine_constraints = summary.get("judge_feedback", {}).get("constraints")
+                        if machine_constraints:
+                            parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                            self._apply_judge_constraints(parsed, current_plan)
                     daily_reports.append(summary)
             if self.current_day_key != day_key:
                 self.current_day_key = day_key
@@ -2495,6 +2507,11 @@ class LLMStrategistBacktester:
                 self.active_judge_constraints = self.active_judge_constraints.model_copy(
                     update={"disabled_trigger_ids": [], "disabled_categories": []}
                 )
+                if self.active_judge_action:
+                    self.active_judge_action.status = "expired"
+                    self.active_judge_action.evals_remaining = 0
+                    self._persist_judge_action(run_id, self.active_judge_action)
+                    self.active_judge_action = None
                 self.bars_since_last_trade = 0
                 self.last_judge_intervention_time = None
 
@@ -2510,15 +2527,6 @@ class LLMStrategistBacktester:
                 )
                 if judge_result.get("should_replan"):
                     judge_triggered_replan = True
-                    # Apply judge feedback immediately
-                    judge_constraints = judge_result.get("feedback", {}).get("strategist_constraints")
-                    if judge_constraints:
-                        self.judge_constraints = judge_constraints
-                    # Extract machine-readable constraints for trigger enforcement
-                    machine_constraints = judge_result.get("feedback", {}).get("constraints")
-                    if machine_constraints:
-                        parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
-                        self._apply_judge_constraints(parsed, current_plan)
                     logger.info(
                         "Judge triggered replan at %s: %s",
                         ts.isoformat(), judge_result.get("replan_reason")
@@ -3113,14 +3121,24 @@ class LLMStrategistBacktester:
             if summary:
                 self.latest_daily_summary = summary
                 self.memory_history.append(summary)
-                judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
-                if judge_constraints:
-                    self.judge_constraints = judge_constraints
-                # Extract machine-readable constraints for trigger enforcement
-                machine_constraints = summary.get("judge_feedback", {}).get("constraints")
-                if machine_constraints:
-                    parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
-                    self._apply_judge_constraints(parsed, current_plan)
+                judge_action = summary.get("judge_action") or {}
+                if judge_action:
+                    judge_constraints = judge_action.get("strategist_constraints")
+                    if judge_constraints:
+                        self.judge_constraints = judge_constraints
+                    machine_constraints = judge_action.get("constraints")
+                    if machine_constraints:
+                        parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                        self._apply_judge_constraints(parsed, current_plan)
+                else:
+                    judge_constraints = summary.get("judge_feedback", {}).get("strategist_constraints")
+                    if judge_constraints:
+                        self.judge_constraints = judge_constraints
+                    # Extract machine-readable constraints for trigger enforcement
+                    machine_constraints = summary.get("judge_feedback", {}).get("constraints")
+                    if machine_constraints:
+                        parsed = JudgeConstraints(**machine_constraints) if isinstance(machine_constraints, dict) else machine_constraints
+                        self._apply_judge_constraints(parsed, current_plan)
                 daily_reports.append(summary)
 
         # Collect samples from final trigger engine
@@ -3970,8 +3988,10 @@ class LLMStrategistBacktester:
             if self.intraday_judge_history:
                 last_feedback = self.intraday_judge_history[-1].get("feedback", {}) or {}
                 summary["judge_feedback"] = last_feedback
+                summary["judge_action"] = self.intraday_judge_history[-1].get("judge_action") or {}
             else:
                 summary["judge_feedback"] = {}
+                summary["judge_action"] = {}
             if self.use_judge_shim:
                 summary["judge_feedback"] = self._judge_feedback(summary)
             # Directive 7: canonical judge snapshot for learning logs
@@ -4000,6 +4020,14 @@ class LLMStrategistBacktester:
             self._emit_plan_judged_event(run_id, day_key, raw_feedback)
             feedback_obj = JudgeFeedback.model_validate(raw_feedback)
             run = self._apply_feedback_adjustments(run_id, feedback_obj, equity_return_pct > 0)
+            action = self._build_judge_action(
+                feedback_obj,
+                source_eval_id=day_key,
+                scope="daily",
+            )
+            event_ts = datetime.fromisoformat(f"{day_key}T23:59:59+00:00")
+            action = self._apply_judge_action(action, None, run_id=run_id, event_ts=event_ts)
+            summary["judge_action"] = action.model_dump()
             summary["risk_adjustments"] = list(snapshot_adjustments(run.risk_adjustments or {}))
         (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))
         self.flattened_days.discard(day_key)
@@ -4911,6 +4939,156 @@ class LLMStrategistBacktester:
             "disabled_categories": list(constraints.disabled_categories or []),
         }
 
+    @staticmethod
+    def _feedback_has_actionable_constraints(feedback: JudgeFeedback) -> bool:
+        constraints = feedback.constraints
+        if constraints.max_trades_per_day is not None:
+            return True
+        if constraints.min_trades_per_day is not None:
+            return True
+        if constraints.max_triggers_per_symbol_per_day is not None:
+            return True
+        if constraints.symbol_risk_multipliers:
+            return True
+        if constraints.disabled_trigger_ids:
+            return True
+        if constraints.disabled_categories:
+            return True
+        if constraints.risk_mode != "normal":
+            return True
+        if feedback.strategist_constraints and feedback.strategist_constraints.recommended_stance:
+            return True
+        return False
+
+    def _build_judge_action(
+        self,
+        feedback: JudgeFeedback,
+        *,
+        source_eval_id: str,
+        scope: str,
+        force_replan_reason: str | None = None,
+    ) -> JudgeAction:
+        recommended_action = (
+            feedback.attribution.recommended_action
+            if feedback.attribution and feedback.attribution.recommended_action
+            else "hold"
+        )
+        reason_parts: List[str] = []
+        if force_replan_reason and recommended_action != "replan":
+            recommended_action = "replan"
+            reason_parts.append(f"auto_replan:{force_replan_reason}")
+
+        actionable = self._feedback_has_actionable_constraints(feedback)
+        if recommended_action == "hold" and actionable:
+            recommended_action = "policy_adjust"
+            reason_parts.append("constraints_present")
+
+        stance_override = feedback.strategist_constraints.recommended_stance
+        constraints = feedback.constraints
+        if recommended_action == "stand_down":
+            if stance_override is None:
+                stance_override = "wait"
+            if constraints.max_trades_per_day is None:
+                constraints = constraints.model_copy(update={"max_trades_per_day": 0})
+
+        status = "applied" if recommended_action in {"replan", "policy_adjust", "stand_down"} else "skipped"
+        if recommended_action == "investigate_execution":
+            reason_parts.append("manual_followup")
+
+        reason = "; ".join(reason_parts) if reason_parts else None
+        return JudgeAction(
+            action_id=str(uuid4()),
+            source_eval_id=source_eval_id,
+            recommended_action=recommended_action,  # type: ignore[arg-type]
+            constraints=constraints,
+            strategist_constraints=feedback.strategist_constraints,
+            stance_override=stance_override,
+            ttl_evals=self.judge_action_ttl_evals,
+            evals_remaining=self.judge_action_ttl_evals,
+            status=status,  # type: ignore[arg-type]
+            reason=reason,
+            scope=scope,  # type: ignore[arg-type]
+        )
+
+    def _persist_judge_action(self, run_id: str, action: JudgeAction) -> None:
+        try:
+            run = self.run_registry.get_strategy_run(run_id)
+            run.latest_judge_action = action
+            self.run_registry.update_strategy_run(run)
+        except Exception as exc:
+            logger.debug("Failed to persist judge action: %s", exc)
+
+    def _decrement_active_judge_action(self, run_id: str) -> None:
+        action = self.active_judge_action
+        if not action or action.status != "applied":
+            return
+        action.evals_remaining = max(0, action.evals_remaining - 1)
+        if action.evals_remaining <= 0:
+            action.status = "expired"
+            self.active_judge_action = action
+            self.active_judge_constraints = None
+            self.judge_constraints = {}
+            self.last_judge_intervention_time = None
+        self._persist_judge_action(run_id, action)
+
+    def _apply_judge_action(
+        self,
+        action: JudgeAction,
+        current_plan: "StrategyPlan | None",
+        *,
+        run_id: str,
+        event_ts: datetime | None = None,
+    ) -> JudgeAction:
+        if action.status != "applied":
+            self._persist_judge_action(run_id, action)
+            self._emit_event(
+                "judge_action_skipped",
+                {
+                    "action_id": action.action_id,
+                    "source_eval_id": action.source_eval_id,
+                    "recommended_action": action.recommended_action,
+                    "reason": action.reason,
+                    "scope": action.scope,
+                },
+                run_id=run_id,
+                correlation_id=action.action_id,
+                event_ts=event_ts,
+            )
+            self._decrement_active_judge_action(run_id)
+            return action
+
+        constraints = action.constraints
+        if current_plan and current_plan.triggers:
+            constraints = apply_trigger_floor(constraints, current_plan.triggers)
+        action.constraints = constraints
+        action.applied_at = event_ts or datetime.now(timezone.utc)
+        self.active_judge_action = action
+        self._apply_judge_constraints(constraints, current_plan)
+
+        self.judge_constraints = action.strategist_constraints.model_dump()
+        if action.stance_override and not self.judge_constraints.get("recommended_stance"):
+            self.judge_constraints["recommended_stance"] = action.stance_override
+
+        self._persist_judge_action(run_id, action)
+        self._emit_event(
+            "judge_action_applied",
+            {
+                "action_id": action.action_id,
+                "source_eval_id": action.source_eval_id,
+                "recommended_action": action.recommended_action,
+                "reason": action.reason,
+                "scope": action.scope,
+                "ttl_evals": action.ttl_evals,
+                "evals_remaining": action.evals_remaining,
+                "stance_override": action.stance_override,
+                "constraints": self._serialize_judge_constraints(action.constraints),
+            },
+            run_id=run_id,
+            correlation_id=action.action_id,
+            event_ts=event_ts,
+        )
+        return action
+
     def _run_intraday_judge(
         self,
         ts: datetime,
@@ -4941,12 +5119,16 @@ class LLMStrategistBacktester:
                 self.consecutive_stale_skips >= self.stale_reenable_threshold
                 and self.active_judge_constraints is not None
                 and self.active_judge_constraints.disabled_trigger_ids
+                and (self.active_judge_action is None or self.active_judge_action.evals_remaining <= 0)
             )
             if force_reenable:
                 logger.info(
                     "Stale snapshot re-enablement at %s: %d consecutive stale evals, clearing disabled_trigger_ids",
                     ts.isoformat(), self.consecutive_stale_skips,
                 )
+                if self.active_judge_action and self.active_judge_action.evals_remaining <= 0:
+                    self.active_judge_action.status = "expired"
+                    self._persist_judge_action(run_id, self.active_judge_action)
                 self._add_event("stale_snapshot_reenable", {
                     "consecutive_stale_skips": self.consecutive_stale_skips,
                     "cleared_trigger_ids": list(self.active_judge_constraints.disabled_trigger_ids),
@@ -5151,6 +5333,37 @@ class LLMStrategistBacktester:
                     replan_reason = f"No trades in {hours_elapsed:.1f}h despite {len(current_plan.triggers)} triggers"
 
         shim_replan_suppressed = False
+
+        feedback_obj: JudgeFeedback | None = None
+        try:
+            feedback_obj = JudgeFeedback.model_validate(feedback)
+            self._apply_feedback_adjustments(
+                run_id,
+                feedback_obj,
+                snapshot.get("return_pct", 0.0) > 0,
+                advance_day=False,
+            )
+        except (KeyError, Exception) as exc:
+            logger.warning("Failed to apply judge adjustments intraday: %s", exc)
+            try:
+                run = self.run_registry.get_strategy_run(run_id)
+                run.latest_judge_feedback = JudgeFeedback.model_validate(feedback)
+                self.run_registry.update_strategy_run(run)
+            except (KeyError, Exception) as inner_exc:
+                logger.warning("Failed to persist judge feedback to run: %s", inner_exc)
+
+        action: JudgeAction | None = None
+        if feedback_obj:
+            action = self._build_judge_action(
+                feedback_obj,
+                source_eval_id=day_key,
+                scope="intraday",
+                force_replan_reason=replan_reason if should_replan else None,
+            )
+            action = self._apply_judge_action(action, current_plan, run_id=run_id, event_ts=ts)
+            should_replan = action.recommended_action == "replan"
+            replan_reason = (action.reason or replan_reason) if should_replan else None
+
         if self.use_judge_shim and should_replan:
             shim_replan_suppressed = True
             should_replan = False
@@ -5184,29 +5397,13 @@ class LLMStrategistBacktester:
             "replan_reason": replan_reason,
             "trigger_reason": trigger_reason,
             "feedback": feedback,
+            "judge_action": action.model_dump() if action else None,
+            "judge_recommended_action": action.recommended_action if action else None,
             "snapshot": snapshot,
             "summary_compact": compact_summary,
             "canonical_snapshot": canonical_snapshot,
             "next_judge_time": self.next_judge_time.isoformat(),
         }
-
-        # Persist judge feedback and apply risk adjustments (intraday, no day-advance).
-        try:
-            feedback_obj = JudgeFeedback.model_validate(feedback)
-            self._apply_feedback_adjustments(
-                run_id,
-                feedback_obj,
-                snapshot.get("return_pct", 0.0) > 0,
-                advance_day=False,
-            )
-        except (KeyError, Exception) as exc:
-            logger.warning("Failed to apply judge adjustments intraday: %s", exc)
-            try:
-                run = self.run_registry.get_strategy_run(run_id)
-                run.latest_judge_feedback = JudgeFeedback.model_validate(feedback)
-                self.run_registry.update_strategy_run(run)
-            except (KeyError, Exception) as inner_exc:
-                logger.warning("Failed to persist judge feedback to run: %s", inner_exc)
 
         # Log the evaluation
         self.intraday_judge_history.append(result)
@@ -5231,6 +5428,8 @@ class LLMStrategistBacktester:
                 "trigger_attempts": summary.get("trigger_attempts"),
                 "should_replan": should_replan,
                 "replan_reason": replan_reason,
+                "judge_recommended_action": action.recommended_action if action else None,
+                "judge_action_id": action.action_id if action else None,
                 "shim_replan_suppressed": shim_replan_suppressed,
                 "trigger_reason": trigger_reason,
                 "scope": "intraday",

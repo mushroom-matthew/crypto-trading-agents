@@ -34,6 +34,10 @@ def _determine_constraints(run, judge_payload: Any | None) -> JudgeConstraints:
     if judge_payload:
         feedback = JudgeFeedback.model_validate(judge_payload)
         return feedback.constraints
+    if getattr(run, "latest_judge_action", None):
+        action = run.latest_judge_action
+        if action and action.status == "applied" and action.evals_remaining > 0:
+            return action.constraints
     if run.latest_judge_feedback:
         return run.latest_judge_feedback.constraints
     return JudgeFeedback().constraints

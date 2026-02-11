@@ -130,20 +130,32 @@ class StrategistPlanService:
         if any(trigger.category is None for trigger in plan.triggers):
             if "other" not in plan.allowed_trigger_categories:
                 plan.allowed_trigger_categories.append("other")
-        if run.latest_judge_feedback:
-            plan = self._apply_strategist_constraints(plan, run.latest_judge_feedback.strategist_constraints)
-        plan.max_trades_per_day = self._resolve_max_trades(plan.max_trades_per_day, run.latest_judge_feedback)
-        constraint_min = run.latest_judge_feedback.constraints.min_trades_per_day if run.latest_judge_feedback else None
+        effective_judge_feedback = run.latest_judge_feedback
+        if run.latest_judge_action and run.latest_judge_action.status == "applied":
+            if run.latest_judge_action.evals_remaining > 0:
+                effective_judge_feedback = JudgeFeedback(
+                    constraints=run.latest_judge_action.constraints,
+                    strategist_constraints=run.latest_judge_action.strategist_constraints,
+                )
+        if effective_judge_feedback:
+            plan = self._apply_strategist_constraints(
+                plan,
+                effective_judge_feedback.strategist_constraints,
+            )
+        plan.max_trades_per_day = self._resolve_max_trades(plan.max_trades_per_day, effective_judge_feedback)
+        constraint_min = (
+            effective_judge_feedback.constraints.min_trades_per_day if effective_judge_feedback else None
+        )
         if constraint_min is not None:
             plan.min_trades_per_day = max(plan.min_trades_per_day or 0, constraint_min)
         if not self.strict_fixed_caps:
             plan.max_triggers_per_symbol_per_day = self._resolve_symbol_trigger_cap(
                 plan.max_triggers_per_symbol_per_day,
-                run.latest_judge_feedback,
+                effective_judge_feedback,
             )
         plan.trigger_budgets = self._sanitize_trigger_budgets(plan.trigger_budgets)
         plan = self._enforce_derived_trade_cap(plan)
-        judge_constraints = run.latest_judge_feedback.constraints if run.latest_judge_feedback else None
+        judge_constraints = effective_judge_feedback.constraints if effective_judge_feedback else None
         plan = self._resolve_final_caps(plan, judge_constraints)
         run.current_plan_id = plan.plan_id
         self.registry.update_strategy_run(run)

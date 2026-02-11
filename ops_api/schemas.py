@@ -12,6 +12,8 @@ EventType = Literal[
     "intent",
     "plan_generated",
     "plan_judged",
+    "judge_action_applied",
+    "judge_action_skipped",
     "trigger_fired",
     "trade_blocked",
     "order_submitted",

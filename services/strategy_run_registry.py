@@ -47,7 +47,7 @@ class StrategyRunRegistry:
     def update_strategy_run(self, run: StrategyRun) -> StrategyRun:
         stored = self.get_strategy_run(run.run_id)
         if stored.is_locked:
-            comparable_fields = ("current_plan_id", "latest_judge_feedback", "config")
+            comparable_fields = ("current_plan_id", "latest_judge_feedback", "latest_judge_action", "config")
             for field in comparable_fields:
                 if getattr(run, field) != getattr(stored, field):
                     raise ValueError(f"StrategyRun {run.run_id} is locked and cannot be modified")
