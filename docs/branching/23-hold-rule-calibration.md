@@ -73,18 +73,27 @@ uv run pytest tests/test_trigger_engine.py -k hold_suppress -vv
 ```
 
 ## Test Evidence
-*(to be filled after implementation)*
+```
+tests/test_trigger_compiler.py::test_flags_degenerate_hold_rule PASSED
+tests/test_trigger_compiler.py::test_allows_compound_hold_rule PASSED
+tests/test_trigger_engine.py::test_hold_suppression_counter PASSED
+tests/test_trigger_engine.py::test_hold_suppression_warns_at_12 PASSED
+```
+All 4 hold rule tests pass. `detect_degenerate_hold_rules()` flags single-condition `rsi_14 > 45` and allows multi-condition compound rules. Trigger engine tracks `_hold_suppression_counts` per trigger, warns at 12 consecutive suppressions.
+
+Prompt verification: `strategy_plan_schema.txt` contains "HOLD RULE CALIBRATION" section with good vs bad examples.
 
 ## Acceptance Criteria
-- [ ] Prompt guides LLM toward narrow, specific hold rules with examples
-- [ ] Compile-time validator flags degenerate hold rules (RSI < 50, single-condition)
-- [ ] Consecutive hold suppression count tracked in trigger analytics
-- [ ] Backtest shows hold rule binding <20% of exit evaluations (down from ~40%)
+- [x] Prompt guides LLM toward narrow, specific hold rules with examples
+- [x] Compile-time validator flags degenerate hold rules (RSI < 50, single-condition)
+- [x] Consecutive hold suppression count tracked in trigger analytics
+- [ ] Backtest shows hold rule binding <20% of exit evaluations (down from ~40%) — *requires validation backtest*
 
 ## Change Log
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-10 | Runbook created from backtest ebf53879 analysis | Claude |
+| 2026-02-11 | Implemented: hold rule guidance in schema prompt, detect_degenerate_hold_rules() in trigger_compiler.py, consecutive suppression counter + warning in trigger_engine.py | Claude |
 
 ## Git Workflow
 ```bash

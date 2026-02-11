@@ -7,7 +7,15 @@ from schemas.llm_strategist import PositionSizingRule, RiskConstraint, StrategyP
 from schemas.strategy_run import StrategyRunConfig
 from services.strategy_run_registry import StrategyRunRegistry
 from tools import strategy_run_tools
-from trading_core.trigger_compiler import TriggerCompilationError, compile_plan
+from trading_core.trigger_compiler import (
+    AtrTautologyWarning,
+    TriggerCompilationError,
+    compile_plan,
+    detect_atr_tautologies,
+    detect_plan_atr_tautologies,
+    warn_cross_category_exits,
+    detect_degenerate_hold_rules,
+)
 
 from datetime import datetime, timedelta, timezone
 
@@ -105,3 +113,135 @@ def test_between_allows_identifiers(tmp_path):
         compiled.triggers[0].entry.normalized
         == "((close) >= (donchian_lower_short) and (close) <= (donchian_upper_short))"
     )
+
+
+# =============================================================================
+# Runbook 21 — ATR Tautology Detection
+# =============================================================================
+
+
+def test_detects_atr_tautology_1d_vs_4h():
+    """tf_1d_atr > tf_4h_atr is always true — should be detected."""
+    warnings = detect_atr_tautologies(
+        "tf_1d_atr > tf_4h_atr",
+        trigger_id="btc_emergency",
+        rule_type="entry",
+    )
+    assert len(warnings) == 1
+    assert isinstance(warnings[0], AtrTautologyWarning)
+    assert "always true" in str(warnings[0])
+
+
+def test_detects_atr_tautology_4h_vs_1h():
+    """tf_4h_atr > tf_1h_atr is always true."""
+    warnings = detect_atr_tautologies("tf_4h_atr > tf_1h_atr")
+    assert len(warnings) == 1
+
+
+def test_detects_atr_tautology_with_atr_14_suffix():
+    """tf_1d_atr_14 > tf_4h_atr_14 should also be detected."""
+    warnings = detect_atr_tautologies("tf_1d_atr_14 > tf_4h_atr_14")
+    assert len(warnings) == 1
+
+
+def test_allows_atr_ratio_comparison():
+    """tf_1d_atr > 2.5 * tf_4h_atr uses a ratio — NOT a tautology."""
+    warnings = detect_atr_tautologies("tf_1d_atr > 2.5 * tf_4h_atr")
+    assert len(warnings) == 0
+
+
+def test_allows_same_timeframe_atr():
+    """atr_14 > sma_medium * 0.03 is not a cross-timeframe comparison."""
+    warnings = detect_atr_tautologies("atr_14 > sma_medium * 0.03")
+    assert len(warnings) == 0
+
+
+def test_no_tautology_lower_gt_higher():
+    """tf_1h_atr > tf_4h_atr — lower > higher is NOT always true (it's usually false)."""
+    warnings = detect_atr_tautologies("tf_1h_atr > tf_4h_atr")
+    assert len(warnings) == 0
+
+
+def test_detects_atr_tautology_lt_operator():
+    """tf_4h_atr < tf_1d_atr is always true (reversed comparison)."""
+    warnings = detect_atr_tautologies("tf_4h_atr < tf_1d_atr")
+    assert len(warnings) == 1
+
+
+# =============================================================================
+# Runbook 22 — Cross-Category Exit Warning
+# =============================================================================
+
+
+def test_warns_cross_category_entries_same_symbol():
+    """If a symbol has entries in multiple categories, warn."""
+    triggers = [
+        TriggerCondition(
+            id="btc_trend",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="close < sma_short",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_reversal",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="rsi_14 < 30",
+            exit_rule="rsi_14 > 70",
+            category="reversal",
+        ),
+    ]
+    warnings = warn_cross_category_exits(triggers)
+    assert len(warnings) >= 1
+    assert "BTC-USD" in warnings[0]
+
+
+def test_no_warning_single_category():
+    """Single category per symbol should produce no warnings."""
+    triggers = [
+        TriggerCondition(
+            id="btc_trend_1",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="close < sma_short",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_trend_2",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="4h",
+            entry_rule="close > sma_long",
+            exit_rule="close < sma_medium",
+            category="trend_continuation",
+        ),
+    ]
+    warnings = warn_cross_category_exits(triggers)
+    assert len(warnings) == 0
+
+
+# =============================================================================
+# Runbook 23 — Degenerate Hold Rule Detection
+# =============================================================================
+
+
+def test_flags_degenerate_hold_rule():
+    """Single-condition hold rule with rsi_14 > 45 should be flagged."""
+    warnings = detect_degenerate_hold_rules("rsi_14 > 45", trigger_id="btc_hold")
+    assert len(warnings) >= 1
+    assert "degenerate" in warnings[0].lower() or "single" in warnings[0].lower()
+
+
+def test_allows_compound_hold_rule():
+    """Multi-condition hold rule should not be flagged."""
+    warnings = detect_degenerate_hold_rules(
+        "rsi_14 > 60 and close > sma_medium and atr_14 < 500",
+        trigger_id="btc_hold",
+    )
+    assert len(warnings) == 0

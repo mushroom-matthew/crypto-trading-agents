@@ -111,6 +111,7 @@ class DisplayConstraints(SerializableModel):
     boost: List[str] = Field(default_factory=list)
     regime_correction: Optional[str] = None
     sizing_adjustments: Dict[str, str] = Field(default_factory=dict)
+    recommended_stance: Optional[Literal["active", "defensive", "wait"]] = None
 
 
 class JudgeConstraints(SerializableModel):

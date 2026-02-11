@@ -106,18 +106,26 @@ uv run pytest tests/test_llm_strategist_runner.py -k trades_per_day -vv
 ```
 
 ## Test Evidence
-*(to be filled after implementation)*
+```
+tests/test_trigger_engine.py::test_per_trigger_fire_rate PASSED
+```
+Per-trigger fire rate tracking works: `_trigger_eval_counts` and `_trigger_fire_counts` correctly track evaluations and fires per trigger ID.
+
+Dead trigger detection implemented in `llm_strategist_runner.py` snapshot builder — triggers with 0 fires after 48+ evaluations are surfaced as `dead_triggers` list. `trades_per_day` metric added to compact judge summary.
+
+Prompt verification: `strategy_plan_schema.txt` contains "TRIGGER FIRE RATE CALIBRATION" section with threshold examples. `llm_strategist_simple.txt` Rule 9 documents fire rate targets.
 
 ## Acceptance Criteria
-- [ ] Prompt includes fire rate guidance with concrete threshold examples
-- [ ] Dead triggers (0 fires after 48+ evaluations) detected and reported to judge
-- [ ] `trades_per_day` and `days_without_trades` in judge snapshot
-- [ ] Backtest shows improved trade frequency (target: >1 entry/day average)
+- [x] Prompt includes fire rate guidance with concrete threshold examples
+- [x] Dead triggers (0 fires after 48+ evaluations) detected and reported to judge
+- [x] `trades_per_day` and `days_without_trades` in judge snapshot
+- [ ] Backtest shows improved trade frequency (target: >1 entry/day average) — *requires validation backtest*
 
 ## Change Log
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-10 | Runbook created from backtest ebf53879 analysis | Claude |
+| 2026-02-11 | Implemented: fire rate guidance in schema + simple prompt, per-trigger eval/fire counting in trigger_engine.py, dead trigger detection + trades_per_day in judge snapshot | Claude |
 
 ## Git Workflow
 ```bash

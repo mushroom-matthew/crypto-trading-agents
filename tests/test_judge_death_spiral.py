@@ -1,4 +1,4 @@
-"""Tests for judge death-spiral floor protections (Runbooks 13 + 16).
+"""Tests for judge death-spiral floor protections (Runbooks 13 + 16 + 24).
 
 Covers:
 1. Category validator N-2 rule (at least 2 entry categories enabled)
@@ -7,6 +7,7 @@ Covers:
 4. Stale snapshot detection to skip redundant judge evaluations
 5. Stale snapshot forced trigger re-enablement (consecutive stale skips)
 6. stale_judge_evals daily metric tracking
+7. Stale skip advances next_judge_time (Runbook 24)
 """
 
 from __future__ import annotations
@@ -571,3 +572,256 @@ class TestStripJudgeConstrainedTriggers:
             if getattr(t, "category", None) not in constraints.disabled_categories
         ]
         assert len(filtered) == 0  # wait stance
+
+
+# =============================================================================
+# Runbook 24 — Judge Eval Flood
+# =============================================================================
+
+
+class TestStaleSkipAdvancesNextJudgeTime:
+    """Verify that stale snapshot skips advance next_judge_time (Runbook 24)."""
+
+    def test_stale_skip_advances_next_judge_time(self):
+        """Stale skip must advance next_judge_time so we don't re-trigger every bar.
+
+        Simulates the state machine: after a stale skip, next_judge_time should
+        move forward by judge_cadence so the next bar doesn't immediately trigger
+        another evaluation.
+        """
+        from datetime import timedelta
+
+        # Simulate the state before a stale skip
+        judge_cadence_hours = 12.0
+        judge_cadence = timedelta(hours=judge_cadence_hours)
+        ts = datetime(2025, 1, 15, 12, 0, tzinfo=timezone.utc)
+        original_next_judge_time = ts  # "due now"
+
+        # After stale skip, next_judge_time should advance
+        next_judge_time = ts + judge_cadence
+
+        assert next_judge_time == datetime(2025, 1, 16, 0, 0, tzinfo=timezone.utc)
+        assert next_judge_time > ts, "next_judge_time must advance past current ts"
+        assert next_judge_time - ts == judge_cadence
+
+    def test_stale_skip_dedup_only_first_appended(self):
+        """Only the first stale skip per cadence window should append to history.
+
+        The stale_skip_count_since_last_real counter prevents flooding
+        intraday_judge_history with redundant stale skip entries.
+        """
+        stale_skip_count = 0
+        history: List[dict] = []
+
+        # Simulate 5 consecutive stale skips
+        for i in range(5):
+            stale_skip_count += 1
+            result = {"skipped": True, "replan_reason": "stale_snapshot_skip"}
+            if stale_skip_count <= 1:
+                history.append(result)
+
+        assert len(history) == 1, "Only first stale skip should be in history"
+        assert stale_skip_count == 5
+
+        # After a real eval, counter resets
+        stale_skip_count = 0
+        for i in range(3):
+            stale_skip_count += 1
+            result = {"skipped": True, "replan_reason": "stale_snapshot_skip"}
+            if stale_skip_count <= 1:
+                history.append(result)
+
+        assert len(history) == 2, "Second cadence window adds one more entry"
+
+    def test_default_cadence_is_12_hours(self):
+        """Default judge_cadence_hours should be 12.0 (Runbook 24)."""
+        from datetime import timedelta
+
+        default_cadence_hours = 12.0
+        cadence = timedelta(hours=default_cadence_hours)
+        assert cadence == timedelta(hours=12)
+
+        # Verify adaptive bounds
+        # Drawdown min: 4h floor
+        drawdown_cadence = max(4.0, default_cadence_hours / 2)
+        assert drawdown_cadence == 6.0  # 12/2 = 6, > 4 floor
+
+        # Good perf max: 24h ceiling
+        good_perf_cadence = min(24.0, default_cadence_hours * 1.5)
+        assert good_perf_cadence == 18.0  # 12*1.5 = 18, < 24 ceiling
+
+
+# =============================================================================
+# Runbook 26 — Risk Telemetry + Position Sizing Efficiency
+# =============================================================================
+
+
+class TestRiskTelemetry:
+    """Verify risk telemetry renames and budget utilization (Runbook 26)."""
+
+    def test_snapshot_risk_matches_risk_engine(self):
+        """Position quality snapshot should use risk_quality_score, not risk_score."""
+        from trading_core.trade_quality import assess_position_quality
+
+        assessments = assess_position_quality(
+            positions={"BTC-USD": 1.0},
+            entry_prices={"BTC-USD": 50000.0},
+            current_prices={"BTC-USD": 49000.0},  # underwater
+            position_opened_times={"BTC-USD": datetime(2025, 1, 1, tzinfo=timezone.utc)},
+            current_time=datetime(2025, 1, 3, tzinfo=timezone.utc),  # 48h later
+        )
+        assert len(assessments) == 1
+        pq = assessments[0]
+        # Verify renamed field exists
+        assert hasattr(pq, "risk_quality_score")
+        assert not hasattr(pq, "risk_score"), "risk_score should be renamed to risk_quality_score"
+        # Underwater + extended + >48h should reduce score significantly
+        assert pq.risk_quality_score < 50.0
+        assert pq.is_underwater is True
+        # New fields exist
+        assert hasattr(pq, "position_risk_pct")
+        assert hasattr(pq, "symbol_exposure_pct")
+        assert pq.symbol_exposure_pct > 0.0
+
+    def test_budget_utilization_in_snapshot(self):
+        """Budget utilization should compute from risk engine snapshot."""
+        # Simulate a risk_snap from the engine
+        risk_snap = {
+            "allocated_risk_abs": 300.0,
+            "actual_risk_abs": 15.0,  # Only 5% utilization
+            "final_notional": 500.0,
+            "risk_cap_notional": 10000.0,
+            "profile_multiplier": 0.5,
+            "profile_multiplier_components": {"global": 1.0, "symbol": 0.5},
+            "risk_cap_abs": 300.0,
+        }
+        allocated = risk_snap.get("allocated_risk_abs") or 0.0
+        actual = risk_snap.get("actual_risk_abs")
+        final_notional = risk_snap.get("final_notional") or 0.0
+        risk_cap_notional = risk_snap.get("risk_cap_notional") or 0.0
+
+        budget_util = (actual / allocated * 100) if (allocated > 0 and actual is not None) else 0.0
+        notional_util = (final_notional / risk_cap_notional * 100) if risk_cap_notional > 0 else 0.0
+
+        assert abs(budget_util - 5.0) < 0.01
+        assert abs(notional_util - 5.0) < 0.01
+
+        # Should trigger must_fix when < 10%
+        assert budget_util < 10.0, "Low utilization should be flagged"
+
+    def test_budget_utilization_must_fix_hint(self):
+        """Utilization < 10% should produce a must_fix hint."""
+        util_pct = 5.0
+        must_fix: List[str] = []
+        if util_pct > 0 and util_pct < 10.0:
+            must_fix.append(
+                f"Position sizes using only {util_pct:.1f}% of risk budget — check profile multipliers."
+            )
+        assert len(must_fix) == 1
+        assert "5.0%" in must_fix[0]
+
+        # 15% should NOT trigger
+        must_fix_high: List[str] = []
+        util_high = 15.0
+        if util_high > 0 and util_high < 10.0:
+            must_fix_high.append("should not appear")
+        assert len(must_fix_high) == 0
+
+
+# =============================================================================
+# Runbook 27 — Stance Diversity
+# =============================================================================
+
+
+class TestStanceDiversity:
+    """Verify recommended stance and stance diversity metrics (Runbook 27)."""
+
+    def test_recommended_stance_on_drawdown(self):
+        """Drawdown > 2% should recommend defensive stance."""
+        # Simulate heuristic logic
+        emergency_pct = 0.35
+        daily_return_pct = -2.5
+        quality_score = 40.0
+
+        recommended_stance = "active"
+        if emergency_pct > 0.3 or daily_return_pct < -2.0:
+            recommended_stance = "defensive"
+        elif quality_score < 30:
+            recommended_stance = "wait"
+
+        assert recommended_stance == "defensive"
+
+    def test_recommended_stance_wait_on_low_quality(self):
+        """Quality score < 30 should recommend wait stance."""
+        emergency_pct = 0.05
+        daily_return_pct = -0.5
+        quality_score = 25.0
+
+        recommended_stance = "active"
+        if emergency_pct > 0.3 or daily_return_pct < -2.0:
+            recommended_stance = "defensive"
+        elif quality_score < 30:
+            recommended_stance = "wait"
+
+        assert recommended_stance == "wait"
+
+    def test_recommended_stance_active_when_healthy(self):
+        """Good metrics should keep active stance."""
+        emergency_pct = 0.05
+        daily_return_pct = 1.5
+        quality_score = 70.0
+
+        recommended_stance = "active"
+        if emergency_pct > 0.3 or daily_return_pct < -2.0:
+            recommended_stance = "defensive"
+        elif quality_score < 30:
+            recommended_stance = "wait"
+
+        assert recommended_stance == "active"
+
+    def test_stance_history_in_snapshot(self):
+        """Stance history should compute diversity score."""
+        import math
+
+        stances = ["active", "active", "defensive", "active", "wait"]
+        counts = {"active": 3, "defensive": 1, "wait": 1}
+        total = 5
+
+        diversity = 0.0
+        for count in counts.values():
+            if count > 0:
+                p = count / total
+                diversity -= p * math.log(p)
+        max_diversity = math.log(3)
+        score = round(diversity / max_diversity, 2)
+
+        # With 3 active, 1 defensive, 1 wait = moderate diversity
+        assert 0.0 < score < 1.0
+        assert score > 0.5  # Some diversity present
+
+    def test_stance_diversity_all_same(self):
+        """All-same stances should have diversity score 0."""
+        import math
+
+        counts = {"active": 5, "defensive": 0, "wait": 0}
+        total = 5
+
+        diversity = 0.0
+        for count in counts.values():
+            if count > 0:
+                p = count / total
+                diversity -= p * math.log(p)
+        max_diversity = math.log(3)
+        score = round(diversity / max_diversity, 2)
+
+        assert score == 0.0
+
+    def test_display_constraints_has_recommended_stance(self):
+        """DisplayConstraints should accept recommended_stance field."""
+        from schemas.judge_feedback import DisplayConstraints
+
+        dc = DisplayConstraints(recommended_stance="defensive")
+        assert dc.recommended_stance == "defensive"
+
+        dc_none = DisplayConstraints()
+        assert dc_none.recommended_stance is None

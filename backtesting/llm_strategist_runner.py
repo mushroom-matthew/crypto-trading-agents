@@ -483,7 +483,7 @@ class LLMStrategistBacktester:
         indicator_debug_mode: str | None = None,
         indicator_debug_keys: Sequence[str] | None = None,
         # Adaptive judge workflow parameters
-        judge_cadence_hours: float = 4.0,  # Minimum hours between judge evaluations
+        judge_cadence_hours: float = 12.0,  # Minimum hours between judge evaluations
         judge_replan_threshold: float = 40.0,  # Score below which to trigger immediate replan
         adaptive_replanning: bool = True,  # Enable judge-driven replanning
         judge_check_after_trades: int = 3,  # Check judge after this many trades
@@ -726,6 +726,7 @@ class LLMStrategistBacktester:
         self.consecutive_stale_skips: int = 0
         self.stale_judge_evals_by_day: Dict[str, int] = defaultdict(int)
         self.stale_reenable_threshold: int = 2  # force re-enable after N consecutive stale skips
+        self.stale_skip_count_since_last_real: int = 0  # dedup stale skips in judge history
 
         if self.flatten_policy == "daily_close":
             self.flatten_positions_daily = True
@@ -1183,6 +1184,10 @@ class LLMStrategistBacktester:
         context["strategy_memory"] = build_strategy_memory(self.memory_history)
         if self.judge_constraints:
             context["strategist_constraints"] = self.judge_constraints
+            # Wire recommended stance into prompt (Runbook 27)
+            rec_stance = self.judge_constraints.get("recommended_stance")
+            if rec_stance:
+                context["judge_recommended_stance"] = rec_stance
         if self.active_risk_adjustments:
             context["risk_adjustments"] = list(snapshot_adjustments(self.active_risk_adjustments))
         context["risk_limits"] = self.active_risk_limits.to_risk_params()
@@ -4780,6 +4785,26 @@ class LLMStrategistBacktester:
         }
 
     def _compact_judge_summary(self, summary: Dict[str, Any]) -> Dict[str, Any]:
+        trade_metrics = summary.get("trade_metrics") or {}
+        # Stance history from last 5 plans (Runbook 27)
+        recent_stances = [e.get("stance") for e in self.stance_events[-5:] if e.get("stance")]
+        stance_counts = {"active": 0, "defensive": 0, "wait": 0}
+        for s in recent_stances:
+            if s in stance_counts:
+                stance_counts[s] += 1
+        total_stances = sum(stance_counts.values())
+        if total_stances > 0:
+            # Shannon diversity: -sum(p * log(p)) normalized to [0,1]
+            import math
+            diversity = 0.0
+            for count in stance_counts.values():
+                if count > 0:
+                    p = count / total_stances
+                    diversity -= p * math.log(p)
+            max_diversity = math.log(3)  # max entropy for 3 stances
+            stance_diversity_score = round(diversity / max_diversity, 2) if max_diversity > 0 else 0.0
+        else:
+            stance_diversity_score = 0.0
         compact: Dict[str, Any] = {
             "return_pct": summary.get("return_pct"),
             "trade_count": summary.get("trade_count"),
@@ -4789,6 +4814,9 @@ class LLMStrategistBacktester:
             "losing_trades": summary.get("losing_trades"),
             "positions_end": summary.get("positions_end"),
             "fills_since_last_judge_count": len(summary.get("fills_since_last_judge") or []),
+            "emergency_exit_pct": trade_metrics.get("emergency_exit_pct", 0.0),
+            "stance_history_last_5": recent_stances,
+            "stance_diversity_score": stance_diversity_score,
         }
         indicator_context = summary.get("indicator_context")
         if indicator_context:
@@ -4833,6 +4861,12 @@ class LLMStrategistBacktester:
                 blocked_reasons.update(reason_counts)
                 top_triggers.append((trigger_id, attempted, executed, blocked))
             top_triggers.sort(key=lambda item: item[1], reverse=True)
+            # Dead trigger detection (Runbook 25): triggers with 0 fires after 48+ evals
+            dead_triggers = [
+                trigger_id
+                for trigger_id, attempted, executed, blocked in top_triggers
+                if attempted >= 48 and executed == 0
+            ]
             compact["trigger_attempts_summary"] = {
                 "total_attempted": total_attempted,
                 "total_executed": total_executed,
@@ -4847,7 +4881,20 @@ class LLMStrategistBacktester:
                     }
                     for trigger_id, attempted, executed, blocked in top_triggers[:5]
                 ],
+                "dead_triggers": dead_triggers,
             }
+        # Trades per day and drought metrics (Runbook 25)
+        trade_count = summary.get("trade_count") or 0
+        if hasattr(self, "backtest_start_ts") and self.backtest_start_ts:
+            if hasattr(self, "current_day_index"):
+                days_elapsed = max(1, self.current_day_index)
+            else:
+                days_elapsed = 1
+            compact["trades_per_day"] = round(trade_count / days_elapsed, 2) if days_elapsed > 0 else 0.0
+        # Budget utilization passthrough
+        budget_util = summary.get("budget_utilization")
+        if budget_util:
+            compact["budget_utilization"] = budget_util
         return compact
 
     @staticmethod
@@ -4915,6 +4962,9 @@ class LLMStrategistBacktester:
                     "consecutive_stale_skips": self.consecutive_stale_skips,
                 })
             logger.debug("Stale snapshot, skipping judge evaluation at %s", ts.isoformat())
+            # Advance next_judge_time so we don't re-trigger every bar
+            self.next_judge_time = ts + self.judge_cadence
+            self.stale_skip_count_since_last_real += 1
             result = {
                 "timestamp": ts.isoformat(),
                 "score": None,
@@ -4926,7 +4976,9 @@ class LLMStrategistBacktester:
                 "next_judge_time": (self.next_judge_time.isoformat() if self.next_judge_time else None),
                 "skipped": True,
             }
-            self.intraday_judge_history.append(result)
+            # Only append the first stale skip per cadence window to avoid flooding history
+            if self.stale_skip_count_since_last_real <= 1:
+                self.intraday_judge_history.append(result)
             self._add_event("intraday_judge", {
                 "score": None,
                 "should_replan": False,
@@ -4980,7 +5032,9 @@ class LLMStrategistBacktester:
                     "symbol": pq.symbol,
                     "unrealized_pnl_pct": pq.unrealized_pnl_pct,
                     "hold_hours": pq.hold_duration_hours,
-                    "risk_score": pq.risk_score,
+                    "risk_quality_score": pq.risk_quality_score,
+                    "position_risk_pct": pq.position_risk_pct,
+                    "symbol_exposure_pct": pq.symbol_exposure_pct,
                     "is_underwater": pq.is_underwater,
                 }
                 for pq in position_quality
@@ -5026,6 +5080,23 @@ class LLMStrategistBacktester:
                 "risk_budget_usage_by_symbol": risk_budget.get("symbol_usage_pct", {}),
                 "risk_budget_blocks_by_symbol": risk_budget.get("blocks_by_symbol", {}),
             }
+            # Budget utilization telemetry from risk engine (Runbook 26)
+            risk_engine = getattr(self, "latest_risk_engine", None)
+            risk_snap = getattr(risk_engine, "last_risk_snapshot", None) if risk_engine else None
+            if risk_snap:
+                allocated = risk_snap.get("allocated_risk_abs") or 0.0
+                actual = risk_snap.get("actual_risk_abs")
+                final_notional = risk_snap.get("final_notional") or 0.0
+                risk_cap_notional = risk_snap.get("risk_cap_notional") or 0.0
+                budget_util = (actual / allocated * 100) if (allocated > 0 and actual is not None) else 0.0
+                notional_util = (final_notional / risk_cap_notional * 100) if risk_cap_notional > 0 else 0.0
+                summary["budget_utilization"] = {
+                    "budget_utilization_pct": round(budget_util, 2),
+                    "avg_notional_vs_cap_pct": round(notional_util, 2),
+                    "profile_multiplier": risk_snap.get("profile_multiplier"),
+                    "profile_multiplier_components": risk_snap.get("profile_multiplier_components"),
+                    "binding_cap": risk_snap.get("risk_cap_abs"),
+                }
 
         compact_summary = self._compact_judge_summary(summary)
 
@@ -5089,14 +5160,15 @@ class LLMStrategistBacktester:
         self.last_judge_time = ts
         self.next_judge_time = ts + self.judge_cadence
         self.trades_since_last_judge = 0
+        self.stale_skip_count_since_last_real = 0
 
         # Adjust cadence based on conditions
         if snapshot["return_pct"] < -1.0:
-            # Drawdown: check more frequently
-            self.next_judge_time = ts + timedelta(hours=max(1.0, self.judge_cadence_hours / 2))
+            # Drawdown: check more frequently (min 4h floor)
+            self.next_judge_time = ts + timedelta(hours=max(4.0, self.judge_cadence_hours / 2))
         elif score > 70 and snapshot["return_pct"] > 0.5:
-            # Good performance: can check less frequently
-            self.next_judge_time = ts + timedelta(hours=min(8.0, self.judge_cadence_hours * 1.5))
+            # Good performance: can check less frequently (max 24h ceiling)
+            self.next_judge_time = ts + timedelta(hours=min(24.0, self.judge_cadence_hours * 1.5))
 
         canonical_snapshot = {
             "summary_compact": compact_summary,

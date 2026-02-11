@@ -345,7 +345,9 @@ class PositionQuality:
     hold_duration_hours: float
     is_underwater: bool = False
     is_extended: bool = False  # Held too long without profit
-    risk_score: float = 50.0  # 0-100, lower is riskier
+    risk_quality_score: float = 50.0  # 0-100 quality heuristic, lower is riskier
+    position_risk_pct: float = 0.0  # actual risk at stop / equity * 100
+    symbol_exposure_pct: float = 0.0  # position value / equity * 100
 
 
 def assess_position_quality(
@@ -379,15 +381,23 @@ def assess_position_quality(
         is_underwater = unrealized < 0
         is_extended = hold_hours > 24 and unrealized_pct < 1.0  # Held >24h without 1% gain
 
-        # Risk score: lower for underwater/extended positions
-        risk_score = 50.0
+        # Risk quality score: lower for underwater/extended positions
+        risk_quality_score = 50.0
         if is_underwater:
-            risk_score -= min(30, abs(unrealized_pct) * 3)  # -3 points per % underwater
+            risk_quality_score -= min(30, abs(unrealized_pct) * 3)  # -3 points per % underwater
         if is_extended:
-            risk_score -= 10
+            risk_quality_score -= 10
         if hold_hours > 48:
-            risk_score -= 10
-        risk_score = max(0.0, min(100.0, risk_score))
+            risk_quality_score -= 10
+        risk_quality_score = max(0.0, min(100.0, risk_quality_score))
+
+        # Compute real risk metrics
+        position_value = abs(qty * current) if current > 0 else 0.0
+        equity = sum(
+            abs(positions.get(s, 0.0)) * current_prices.get(s, 0.0)
+            for s in positions
+        ) + position_value  # rough equity proxy
+        symbol_exposure_pct = (position_value / equity * 100) if equity > 0 else 0.0
 
         assessments.append(
             PositionQuality(
@@ -399,7 +409,8 @@ def assess_position_quality(
                 hold_duration_hours=hold_hours,
                 is_underwater=is_underwater,
                 is_extended=is_extended,
-                risk_score=risk_score,
+                risk_quality_score=risk_quality_score,
+                symbol_exposure_pct=symbol_exposure_pct,
             )
         )
 
@@ -422,7 +433,7 @@ def format_position_quality_for_judge(assessments: List[PositionQuality]) -> str
 
         lines.append(
             f"  - {pq.symbol}: {pq.unrealized_pnl_pct:+.2f}% (${pq.unrealized_pnl:+.2f}), "
-            f"held {pq.hold_duration_hours:.1f}h, risk={pq.risk_score:.0f}{status_str}"
+            f"held {pq.hold_duration_hours:.1f}h, risk_quality={pq.risk_quality_score:.0f} exposure={pq.symbol_exposure_pct:.1f}%{status_str}"
         )
 
     return "\n".join(lines)

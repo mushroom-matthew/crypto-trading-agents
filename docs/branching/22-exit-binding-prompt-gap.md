@@ -74,18 +74,25 @@ uv run pytest tests/test_trigger_compiler.py -k cross_category -vv
 ```
 
 ## Test Evidence
-*(to be filled after implementation)*
+```
+tests/test_trigger_compiler.py::test_warns_cross_category_entries_same_symbol PASSED
+tests/test_trigger_compiler.py::test_no_warning_single_category PASSED
+```
+Both cross-category exit tests pass. `warn_cross_category_exits()` correctly warns when BTC-USD has entries in both `trend_continuation` and `reversal` categories, and produces no warning when all entries share the same category.
+
+Prompt verification: `strategy_plan_schema.txt` contains "EXIT BINDING RULE" section with correct/incorrect plan examples. `llm_strategist_simple.txt` Rule 8 documents exit binding constraint.
 
 ## Acceptance Criteria
-- [ ] `strategy_plan_schema.txt` explains exit binding rule with examples
-- [ ] Compile-time warning emitted for cross-category entry triggers on same symbol
-- [ ] Backtest shows 0 `exit_binding_mismatch` blocks
-- [ ] LLM plans correctly pair entry/exit within same category
+- [x] `strategy_plan_schema.txt` explains exit binding rule with examples
+- [x] Compile-time warning emitted for cross-category entry triggers on same symbol
+- [ ] Backtest shows 0 `exit_binding_mismatch` blocks — *requires validation backtest*
+- [ ] LLM plans correctly pair entry/exit within same category — *requires validation backtest*
 
 ## Change Log
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-10 | Runbook created from backtest ebf53879 analysis | Claude |
+| 2026-02-11 | Implemented: exit binding documentation in schema + simple prompt, warn_cross_category_exits() in trigger_compiler.py | Claude |
 
 ## Git Workflow
 ```bash

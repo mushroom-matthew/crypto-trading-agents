@@ -159,6 +159,12 @@ class TriggerEngine:
         self.debug_sample_rate = max(0.0, min(1.0, debug_sample_rate))
         self.debug_max_samples = debug_max_samples
         self.evaluation_samples: List[TriggerEvaluationSample] = []
+        # Hold rule suppression tracking (Runbook 23)
+        self._hold_suppression_counts: dict[str, int] = {}  # trigger_id -> consecutive suppression count
+        self.hold_suppression_warnings: List[str] = []  # warnings emitted for sustained suppression
+        # Per-trigger fire rate tracking (Runbook 25)
+        self._trigger_eval_counts: dict[str, int] = {}  # trigger_id -> total evaluations
+        self._trigger_fire_counts: dict[str, int] = {}  # trigger_id -> total fires
 
     def _sort_triggers_by_confidence(self, triggers: Iterable[TriggerCondition]) -> List[TriggerCondition]:
         """Sort triggers by confidence grade (A first, then B, then C, then None)."""
@@ -591,6 +597,9 @@ class TriggerEngine:
             if trigger.symbol != bar.symbol or trigger.timeframe != bar.timeframe:
                 continue
 
+            # Per-trigger evaluation counting (Runbook 25)
+            self._trigger_eval_counts[trigger.id] = self._trigger_eval_counts.get(trigger.id, 0) + 1
+
             # Enforce judge constraints: skip disabled triggers
             if self.judge_constraints:
                 if trigger.id in self.judge_constraints.disabled_trigger_ids:
@@ -686,15 +695,27 @@ class TriggerEngine:
                         hold_active = self.evaluator.evaluate(trigger.hold_rule, context)
                         if hold_active:
                             # Hold rule active - suppress exit to maintain position
-                            detail = f"Hold rule active ('{trigger.hold_rule}'), suppressing exit"
+                            count = self._hold_suppression_counts.get(trigger.id, 0) + 1
+                            self._hold_suppression_counts[trigger.id] = count
+                            detail = f"Hold rule active ('{trigger.hold_rule}'), suppressing exit (consecutive: {count})"
                             self._record_block(block_entries, trigger, "HOLD_RULE", detail, bar)
+                            if count >= 12 and count % 12 == 0:
+                                warn = (
+                                    f"Trigger '{trigger.id}' hold rule has suppressed {count} consecutive exits — "
+                                    f"rule may be degenerate: '{trigger.hold_rule}'"
+                                )
+                                self.hold_suppression_warnings.append(warn)
+                                logger.warning(warn)
                             continue
+                        else:
+                            # Hold rule inactive — reset consecutive counter
+                            self._hold_suppression_counts[trigger.id] = 0
                     except MissingIndicatorError:
                         # If hold rule can't evaluate due to missing indicator, allow exit
-                        pass
+                        self._hold_suppression_counts[trigger.id] = 0
                     except RuleSyntaxError:
                         # If hold rule has syntax error, allow exit
-                        pass
+                        self._hold_suppression_counts[trigger.id] = 0
 
                 # Check minimum hold period before allowing exit
                 if self._is_within_hold_period(trigger.symbol):
@@ -830,6 +851,16 @@ class TriggerEngine:
         # If both exit and entry orders exist for same symbol, only keep the exit.
         # This prevents whipsawing (entering then immediately exiting).
         orders = self._deduplicate_orders(orders, bar.symbol, block_entries)
+
+        # Track per-trigger fire counts from final orders (Runbook 25)
+        for order in orders:
+            # Extract base trigger_id from order reason (strip _exit/_flat suffix)
+            tid = order.reason
+            for suffix in ("_exit", "_flat"):
+                if tid.endswith(suffix):
+                    tid = tid[: -len(suffix)]
+                    break
+            self._trigger_fire_counts[tid] = self._trigger_fire_counts.get(tid, 0) + 1
 
         return orders, block_entries
 

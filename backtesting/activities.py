@@ -220,7 +220,7 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
     # Adaptive judge workflow parameters
     # In adaptive mode, judge evaluates at judge_cadence_hours interval
     # Each judge eval can trigger a strategy update (replan) if score is below threshold
-    judge_cadence_hours = float(config.get("judge_cadence_hours", 4.0))
+    judge_cadence_hours = float(config.get("judge_cadence_hours", 12.0))
     # Number of judge evaluations per day
     judge_evals_per_day = int(24 / max(1, judge_cadence_hours))
     # LLM budget = 1 (initial plan) + possible replans (one per judge eval in worst case)

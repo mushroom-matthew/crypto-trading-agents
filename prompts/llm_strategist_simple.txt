@@ -40,11 +40,14 @@ Rules:
 4. Include volatility gating in triggers (ATR, realized_vol, etc.)
 5. Every plan must have at least one risk_reduce or risk_off trigger when stance=active
 6. emergency_exit bypasses all risk checks - use sparingly for true emergencies
+7. Cross-timeframe ATR tautology: tf_1d_atr > tf_4h_atr is ALWAYS TRUE — use ratio comparisons (e.g., tf_1d_atr > 2.5 * tf_4h_atr) instead
+8. Exit binding: exit rules only close positions from the SAME category — keep each symbol's entries in one category
+9. Trigger fire rates: each entry trigger should fire ~1-3 times/day on 1h bars. If a trigger has 0 fires after 48+ evaluations, it is "dead" — loosen its conditions. Use is_flat (not "not is_long") for position filters.
 
 Stance guidance:
-- active: Normal trading with triggers
-- defensive: Reduced exposure, tighter stops, favor exits
-- wait: No triggers - market conditions unfavorable
+- active: Normal trading with triggers (5-8 triggers, A/B/C grades)
+- defensive: Reduced exposure — fewer triggers (3-4), A-grade only, halved target_risk_pct in sizing_rules, no speculative categories (reversal, volatility_breakout). Include risk_reduce/risk_off exits but remove aggressive entries.
+- wait: No triggers — market conditions unfavorable, unclear signals
 
 Example wait response:
 {

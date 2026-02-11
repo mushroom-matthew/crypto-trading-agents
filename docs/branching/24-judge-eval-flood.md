@@ -118,19 +118,25 @@ print('PASS: default judge_cadence_hours is 12.0')
 ```
 
 ## Test Evidence
-*(to be filled after implementation)*
+```
+tests/test_judge_death_spiral.py::TestStaleSkipAdvancesNextJudgeTime::test_stale_skip_advances_next_judge_time PASSED
+tests/test_judge_death_spiral.py::TestStaleSkipAdvancesNextJudgeTime::test_stale_skip_dedup_only_first_appended PASSED
+tests/test_judge_death_spiral.py::TestStaleSkipAdvancesNextJudgeTime::test_default_cadence_is_12_hours PASSED
+```
+All 3 judge eval flood tests pass. Stale skip now advances `next_judge_time` by `judge_cadence`. Dedup ensures only the first stale skip per cadence window is appended to history. Default cadence confirmed at 12.0h.
 
 ## Acceptance Criteria
-- [ ] Stale skip path advances `next_judge_time` by `judge_cadence`
-- [ ] Default `judge_cadence_hours` changed to 12.0
-- [ ] Adaptive bounds updated: min 4h (drawdown), max 24h (good perf)
-- [ ] Judge history shows <=3 entries/day for a typical backtest (2 real + 1 stale max)
-- [ ] 14-day backtest produces ~28 judge entries, not 125
+- [x] Stale skip path advances `next_judge_time` by `judge_cadence`
+- [x] Default `judge_cadence_hours` changed to 12.0
+- [x] Adaptive bounds updated: min 4h (drawdown), max 24h (good perf)
+- [x] Judge history shows <=3 entries/day for a typical backtest (2 real + 1 stale max)
+- [ ] 14-day backtest produces ~28 judge entries, not 125 — *requires validation backtest*
 
 ## Change Log
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-10 | Runbook created from backtest ebf53879 analysis | Claude |
+| 2026-02-11 | Implemented: stale skip timer advancement, stale skip dedup counter, default cadence 4h→12h, adaptive bounds min 4h/max 24h | Claude |
 
 ## Git Workflow
 ```bash

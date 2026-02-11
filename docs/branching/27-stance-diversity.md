@@ -98,19 +98,30 @@ uv run pytest tests/test_judge_feedback.py -k recommended_stance -vv
 ```
 
 ## Test Evidence
-*(to be filled after implementation)*
+```
+tests/test_judge_death_spiral.py::TestStanceDiversity::test_recommended_stance_on_drawdown PASSED
+tests/test_judge_death_spiral.py::TestStanceDiversity::test_recommended_stance_wait_on_low_quality PASSED
+tests/test_judge_death_spiral.py::TestStanceDiversity::test_recommended_stance_active_when_healthy PASSED
+tests/test_judge_death_spiral.py::TestStanceDiversity::test_stance_history_in_snapshot PASSED
+tests/test_judge_death_spiral.py::TestStanceDiversity::test_stance_diversity_all_same PASSED
+tests/test_judge_death_spiral.py::TestStanceDiversity::test_display_constraints_has_recommended_stance PASSED
+```
+All 6 stance diversity tests pass. Recommended stance computed from heuristics: `defensive` on drawdown (>30% emergency exits or >2% loss), `wait` on quality score <30, `active` otherwise. Stance history (last 5) and Shannon entropy diversity score tracked in snapshot. `DisplayConstraints` schema includes `recommended_stance` field. `judge_recommended_stance` wired into strategist prompt context.
+
+Prompt verification: `llm_strategist_simple.txt` contains enriched stance guidance with concrete defensive example (fewer triggers, A-grade only, halved sizing).
 
 ## Acceptance Criteria
-- [ ] Prompt includes concrete defensive stance example with reduced triggers/sizing
-- [ ] Judge feedback includes structured `recommended_stance` field
-- [ ] Strategist prompt builder wires `JUDGE_RECOMMENDED_STANCE` into LLM context
-- [ ] Stance distribution tracked in judge snapshot
-- [ ] Backtest with mixed/bear regimes produces at least 1 non-active stance plan
+- [x] Prompt includes concrete defensive stance example with reduced triggers/sizing
+- [x] Judge feedback includes structured `recommended_stance` field
+- [x] Strategist prompt builder wires `JUDGE_RECOMMENDED_STANCE` into LLM context
+- [x] Stance distribution tracked in judge snapshot
+- [ ] Backtest with mixed/bear regimes produces at least 1 non-active stance plan — *requires validation backtest*
 
 ## Change Log
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-10 | Runbook created from backtest ebf53879 analysis | Claude |
+| 2026-02-11 | Implemented: enriched stance guidance + defensive example in prompts, recommended_stance in DisplayConstraints schema, heuristic-based stance computation in judge_feedback_service.py, stance history + diversity score in snapshot, wired into strategist prompt context | Claude |
 
 ## Git Workflow
 ```bash

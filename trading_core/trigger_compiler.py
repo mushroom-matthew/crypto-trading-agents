@@ -44,8 +44,32 @@ class IdentifierMismatchWarning:
         return f"Trigger '{self.trigger_id}' {self.rule_type}_rule references unknown identifiers: {identifiers}"
 
 
+class AtrTautologyWarning:
+    """Warning about cross-timeframe ATR comparisons that are always true.
+
+    Comparing ATR across timeframes without a ratio multiplier is a tautology
+    because higher-timeframe ATR is ALWAYS larger than lower-timeframe ATR
+    (e.g., tf_1d_atr > tf_4h_atr is always true).
+    """
+
+    def __init__(self, trigger_id: str, expr: str, rule_type: str, detail: str):
+        self.trigger_id = trigger_id
+        self.expr = expr
+        self.rule_type = rule_type
+        self.detail = detail
+
+    def __str__(self) -> str:
+        return (
+            f"Trigger '{self.trigger_id}' {self.rule_type}_rule has ATR tautology: "
+            f"{self.detail} — use ratio comparisons like '> 2.5 * tf_4h_atr' instead"
+        )
+
+
 # Pattern to extract timeframe prefixes like tf_4h_, tf_1h_, tf_15m_
 _TIMEFRAME_PREFIX_PATTERN = re.compile(r"tf_(\d+[mhd])_")
+
+# Pattern for cross-timeframe ATR identifiers: tf_<timeframe>_atr or tf_<timeframe>_atr_14
+_TF_ATR_PATTERN = re.compile(r"tf_(\d+[mhd])_atr(?:_14)?$")
 
 
 def extract_referenced_timeframes(expr: str) -> Set[str]:
@@ -271,6 +295,167 @@ def validate_min_hold_vs_exits(
             f"({smallest_exit_hours:.2f}h); exits will be mechanically forced "
             f"at the hold floor, preventing exit signal quality assessment"
         )
+    return warnings
+
+
+def detect_degenerate_hold_rules(
+    hold_rule: str,
+    trigger_id: str = "",
+) -> List[str]:
+    """Detect hold rules that are too permissive and suppress all normal exits.
+
+    Degenerate hold rules include:
+    - Single-condition rules (no ``and``): easy to be always true
+    - ``rsi_14 > X`` where X < 50: RSI is above 50 most of the time in trending markets
+
+    Returns:
+        List of warning strings (empty when OK).
+    """
+    if not hold_rule:
+        return []
+    warnings: List[str] = []
+    normalized = hold_rule.strip()
+
+    # Check for single-condition rules (no 'and' operator)
+    if " and " not in normalized.lower():
+        warnings.append(
+            f"Trigger '{trigger_id}': single-condition hold rule '{normalized}' "
+            f"is likely too permissive — use compound conditions "
+            f"(e.g., 'rsi_14 > 60 and close > sma_medium and atr_14 < atr_14_prev')"
+        )
+
+    # Check for RSI > X where X < 50
+    rsi_match = re.search(r"rsi_14\s*>\s*(\d+(?:\.\d+)?)", normalized)
+    if rsi_match:
+        threshold = float(rsi_match.group(1))
+        if threshold < 50:
+            warnings.append(
+                f"Trigger '{trigger_id}': hold rule uses rsi_14 > {threshold} "
+                f"(below 50 is almost always true in trending markets — use > 60 or higher)"
+            )
+
+    return warnings
+
+
+def warn_cross_category_exits(triggers: Iterable[TriggerCondition]) -> List[str]:
+    """Warn if a symbol has entry triggers in multiple categories.
+
+    Exit rules only close positions from the SAME category. If a symbol has
+    entries in category A and category B, exits in A will NOT close positions
+    opened by B. This is a common source of "stuck" positions.
+
+    Returns:
+        List of warning strings (empty when OK).
+    """
+    from collections import defaultdict
+
+    symbol_categories: dict[str, set[str]] = defaultdict(set)
+    for trigger in triggers:
+        if trigger.direction in ("long", "short") and trigger.entry_rule:
+            symbol_categories[trigger.symbol].add(trigger.category)
+
+    warnings: List[str] = []
+    for symbol, categories in symbol_categories.items():
+        if len(categories) > 1:
+            cats = ", ".join(sorted(categories))
+            warnings.append(
+                f"{symbol} has entry triggers in multiple categories ({cats}). "
+                f"Exit rules only close positions from the SAME category — "
+                f"positions opened by one category cannot be closed by another."
+            )
+    return warnings
+
+
+def _timeframe_to_minutes(tf: str) -> int:
+    """Convert timeframe string to minutes for comparison."""
+    match = re.match(r"(\d+)([mhd])", tf)
+    if not match:
+        return 0
+    val, unit = int(match.group(1)), match.group(2)
+    if unit == "m":
+        return val
+    elif unit == "h":
+        return val * 60
+    elif unit == "d":
+        return val * 1440
+    return 0
+
+
+def detect_atr_tautologies(
+    expr: str,
+    trigger_id: str = "",
+    rule_type: str = "entry",
+) -> List[AtrTautologyWarning]:
+    """Detect cross-timeframe ATR comparisons that are always true.
+
+    A comparison like ``tf_1d_atr > tf_4h_atr`` is always true because
+    higher-timeframe ATR aggregates more price movement. The LLM should
+    use ratio comparisons instead (e.g., ``tf_1d_atr > 2.5 * tf_4h_atr``).
+
+    Returns:
+        List of AtrTautologyWarning for any tautological comparisons found.
+    """
+    if not expr:
+        return []
+    warnings: List[AtrTautologyWarning] = []
+    try:
+        normalized = _normalize_expression(expr)
+        tree = ast.parse(normalized, mode="eval")
+    except SyntaxError:
+        return []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        # Check each comparison pair: left op[i] comparator[i]
+        operands = [node.left] + list(node.comparators)
+        for i, op in enumerate(node.ops):
+            left_node = operands[i]
+            right_node = operands[i + 1]
+            # Only check > and >= (and reversed < / <=)
+            if isinstance(op, (ast.Gt, ast.GtE)):
+                larger, smaller = left_node, right_node
+            elif isinstance(op, (ast.Lt, ast.LtE)):
+                larger, smaller = right_node, left_node
+            else:
+                continue
+
+            # Both sides must be simple Name nodes (no multiplication = no ratio)
+            if not (isinstance(larger, ast.Name) and isinstance(smaller, ast.Name)):
+                continue
+
+            larger_match = _TF_ATR_PATTERN.match(larger.id)
+            smaller_match = _TF_ATR_PATTERN.match(smaller.id)
+            if not (larger_match and smaller_match):
+                continue
+
+            larger_tf = larger_match.group(1)
+            smaller_tf = smaller_match.group(1)
+            larger_minutes = _timeframe_to_minutes(larger_tf)
+            smaller_minutes = _timeframe_to_minutes(smaller_tf)
+
+            if larger_minutes > smaller_minutes:
+                warnings.append(AtrTautologyWarning(
+                    trigger_id=trigger_id,
+                    expr=expr,
+                    rule_type=rule_type,
+                    detail=f"tf_{larger_tf}_atr > tf_{smaller_tf}_atr is always true",
+                ))
+
+    return warnings
+
+
+def detect_plan_atr_tautologies(plan: StrategyPlan) -> List[AtrTautologyWarning]:
+    """Check all triggers in a plan for ATR tautologies."""
+    warnings: List[AtrTautologyWarning] = []
+    for trigger in plan.triggers:
+        for rule_type, rule_expr in [
+            ("entry", trigger.entry_rule),
+            ("exit", trigger.exit_rule),
+            ("hold", getattr(trigger, "hold_rule", None)),
+        ]:
+            if rule_expr:
+                warnings.extend(detect_atr_tautologies(rule_expr, trigger.id, rule_type))
     return warnings
 
 

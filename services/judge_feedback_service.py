@@ -403,6 +403,29 @@ class JudgeFeedbackService:
                         "sizing_adjustments", {}
                     )[symbol] = "Cut risk by 25% until per-symbol risk share normalizes."
 
+        # Budget utilization check (Runbook 26)
+        budget_util = summary.get("budget_utilization") or {}
+        util_pct = budget_util.get("budget_utilization_pct", 0.0)
+        if util_pct > 0 and util_pct < 10.0:
+            profile_mult = budget_util.get("profile_multiplier", "N/A")
+            analysis.suggested_strategist_constraints.setdefault("must_fix", []).append(
+                f"Position sizes using only {util_pct:.1f}% of risk budget — check profile multipliers (current: {profile_mult})."
+            )
+            analysis.observations.append(
+                f"Severe risk budget underutilization ({util_pct:.1f}%). Positions are tiny relative to allocated risk."
+            )
+
+        # Compute recommended stance (Runbook 27)
+        recommended_stance = "active"
+        if trade_metrics:
+            if emergency_pct > 0.3 or return_pct < -2.0:
+                recommended_stance = "defensive"
+            elif quality_score < 30:
+                recommended_stance = "wait"
+            elif emergency_pct > 0.15 or return_pct < -1.0:
+                recommended_stance = "defensive"
+        analysis.suggested_strategist_constraints["recommended_stance"] = recommended_stance
+
         return analysis
 
     def compute_attribution(
@@ -716,11 +739,12 @@ class JudgeFeedbackService:
             position_lines = []
             for entry in position_quality[:10]:
                 position_lines.append(
-                    "- {symbol}: pnl={pnl:+.2f}% hold={hold:.1f}h risk={risk:.0f} underwater={underwater}".format(
+                    "- {symbol}: pnl={pnl:+.2f}% hold={hold:.1f}h risk_quality={quality:.0f} exposure={exposure:.1f}% underwater={underwater}".format(
                         symbol=entry.get("symbol"),
                         pnl=float(entry.get("unrealized_pnl_pct", 0.0)),
                         hold=float(entry.get("hold_hours", 0.0)),
-                        risk=float(entry.get("risk_score", 0.0)),
+                        quality=float(entry.get("risk_quality_score", entry.get("risk_score", 0.0))),
+                        exposure=float(entry.get("symbol_exposure_pct", 0.0)),
                         underwater=bool(entry.get("is_underwater")),
                     )
                 )

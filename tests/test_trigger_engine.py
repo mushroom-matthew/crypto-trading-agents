@@ -1399,3 +1399,128 @@ def test_risk_off_respects_hold_rule():
     assert not orders
     # Block should be recorded
     assert any(b["reason"] == "HOLD_RULE" for b in blocks)
+
+
+# =============================================================================
+# Runbook 23 — Hold Rule Suppression Counter
+# =============================================================================
+
+
+def test_hold_suppression_counter():
+    """Hold rule suppression should track consecutive count per trigger."""
+    trigger = TriggerCondition(
+        id="btc_trend",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",  # Would fire
+        hold_rule="True",  # Always holds - suppresses every bar
+        category="trend_continuation",
+        confidence_grade="B",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    # Run 5 bars with hold rule always suppressing
+    for _ in range(5):
+        orders, blocks = engine.on_bar(bar, _indicator(), portfolio)
+        assert not orders
+
+    # Check suppression counter
+    assert engine._hold_suppression_counts.get("btc_trend", 0) == 5
+
+    # No warning yet (threshold is 12)
+    assert len(engine.hold_suppression_warnings) == 0
+
+
+def test_hold_suppression_warns_at_12():
+    """Hold suppression should emit warning after 12 consecutive blocks."""
+    trigger = TriggerCondition(
+        id="btc_hold_degenerate",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="false",
+        exit_rule="True",
+        hold_rule="True",  # Always suppresses
+        category="trend_continuation",
+        confidence_grade="B",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+
+    for _ in range(12):
+        engine.on_bar(bar, _indicator(), portfolio)
+
+    assert engine._hold_suppression_counts["btc_hold_degenerate"] == 12
+    assert len(engine.hold_suppression_warnings) == 1
+    assert "degenerate" in engine.hold_suppression_warnings[0]
+
+
+# =============================================================================
+# Runbook 25 — Per-Trigger Fire Rate Tracking
+# =============================================================================
+
+
+def test_per_trigger_fire_rate():
+    """Trigger engine should track eval and fire counts per trigger."""
+    trigger = TriggerCondition(
+        id="btc_entry",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="close > 0",  # Always fires
+        exit_rule="close < 0",  # Never fires
+        category="trend_continuation",
+        confidence_grade="B",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_hold_bars=0, trade_cooldown_bars=0)
+
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio()
+
+    orders, _ = engine.on_bar(bar, _indicator(), portfolio)
+
+    # Should have been evaluated at least once
+    assert engine._trigger_eval_counts.get("btc_entry", 0) >= 1
+    # If the entry fired, fire count should be > 0
+    if orders:
+        assert engine._trigger_fire_counts.get("btc_entry", 0) >= 1

@@ -68,18 +68,24 @@ uv run pytest tests/test_llm_strategist_runner.py -k snapshot_risk -vv
 ```
 
 ## Test Evidence
-*(to be filled after implementation)*
+```
+tests/test_judge_death_spiral.py::TestRiskTelemetry::test_snapshot_risk_renamed PASSED
+tests/test_judge_death_spiral.py::TestRiskTelemetry::test_budget_utilization_in_snapshot PASSED
+tests/test_judge_death_spiral.py::TestRiskTelemetry::test_must_fix_on_low_budget_utilization PASSED
+```
+All 3 risk telemetry tests pass. `risk_score` renamed to `risk_quality_score` throughout. `position_risk_pct` and `symbol_exposure_pct` added as separate labeled fields. Judge formatting updated from `risk={risk:.0f}` to `risk_quality={quality:.0f} exposure={exposure:.1f}%`. Budget utilization <10% triggers `must_fix` hint.
 
 ## Acceptance Criteria
-- [ ] Snapshot `position_risk_pct` uses `actual_risk_at_stop / equity * 100`
-- [ ] Snapshot separately reports `symbol_exposure_pct` for gross exposure
-- [ ] Judge feedback no longer flags phantom risk violations
-- [ ] Judge `must_fix` slots used for real issues, not telemetry artifacts
+- [x] Snapshot `position_risk_pct` uses `actual_risk_at_stop / equity * 100`
+- [x] Snapshot separately reports `symbol_exposure_pct` for gross exposure
+- [x] Judge feedback no longer flags phantom risk violations (metric renamed/labeled)
+- [x] Judge `must_fix` slots used for real issues, not telemetry artifacts (budget utilization hint)
 
 ## Change Log
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-10 | Runbook created from backtest ebf53879 analysis | Claude |
+| 2026-02-11 | Implemented: risk_score→risk_quality_score rename, position_risk_pct + symbol_exposure_pct fields, judge formatting with clear labels, budget utilization telemetry + must_fix hint | Claude |
 
 ## Git Workflow
 ```bash

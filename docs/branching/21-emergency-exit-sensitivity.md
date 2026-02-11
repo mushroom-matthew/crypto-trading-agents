@@ -65,21 +65,33 @@ print('PASS: prompt contains ATR tautology warning')
 ```
 
 ## Test Evidence
-*(to be filled after implementation)*
+```
+tests/test_trigger_compiler.py::test_detects_atr_tautology_1d_vs_4h PASSED
+tests/test_trigger_compiler.py::test_detects_atr_tautology_4h_vs_1h PASSED
+tests/test_trigger_compiler.py::test_detects_atr_tautology_with_atr_14_suffix PASSED
+tests/test_trigger_compiler.py::test_allows_atr_ratio_comparison PASSED
+tests/test_trigger_compiler.py::test_allows_same_timeframe_atr PASSED
+tests/test_trigger_compiler.py::test_no_tautology_lower_gt_higher PASSED
+tests/test_trigger_compiler.py::test_detects_atr_tautology_lt_operator PASSED
+```
+All 7 ATR tautology tests pass. `detect_atr_tautologies()` correctly identifies `tf_1d_atr > tf_4h_atr` (always true), allows ratio comparisons like `> 2.5 * tf_4h_atr`, and ignores same-timeframe or lower>higher comparisons.
+
+Prompt verification: `strategy_plan_schema.txt` contains "ALWAYS TRUE" warning and ratio comparison guidance. `llm_strategist_simple.txt` Rule 7 warns about ATR tautologies.
 
 ## Human Verification Evidence
-*(to be filled after implementation)*
+Verified `prompts/strategy_plan_schema.txt` contains cross-timeframe ATR tautology warning with correct/incorrect examples. `trigger_compiler.py` `detect_atr_tautologies()` uses AST parsing to find Compare nodes matching `_TF_ATR_PATTERN`. Emergency exit pct surfaced in compact judge summary.
 
 ## Acceptance Criteria
-- [ ] Prompt explicitly warns about cross-timeframe ATR tautologies
-- [ ] Compile-time validator flags `tf_Xh_atr > tf_Yh_atr` where X > Y
-- [ ] Emergency exit ratio tracked in trigger analytics
-- [ ] Backtest shows emergency exits <30% of total exits (down from 80%)
+- [x] Prompt explicitly warns about cross-timeframe ATR tautologies
+- [x] Compile-time validator flags `tf_Xh_atr > tf_Yh_atr` where X > Y
+- [x] Emergency exit ratio tracked in trigger analytics
+- [ ] Backtest shows emergency exits <30% of total exits (down from 80%) — *requires validation backtest*
 
 ## Change Log
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-10 | Runbook created from backtest ebf53879 analysis | Claude |
+| 2026-02-11 | Implemented: ATR tautology detection in trigger_compiler.py, prompt guardrails in schema + simple prompt, emergency_exit_pct in judge snapshot | Claude |
 
 ## Git Workflow
 ```bash
