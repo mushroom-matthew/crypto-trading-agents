@@ -764,6 +764,9 @@ def enforce_exit_binding(triggers: List[TriggerCondition]) -> List[ExitBindingCo
     for trigger in triggers:
         if not trigger.exit_rule:
             continue
+        # Emergency exits bypass all constraints — never relabel or strip them
+        if trigger.category == "emergency_exit":
+            continue
         entry_cats = symbol_entry_categories.get(trigger.symbol, set())
         if trigger.category in entry_cats:
             continue  # Already matches an entry category — no fix needed
@@ -875,6 +878,21 @@ def enforce_plan_quality(
     """
     result = PlanEnforcementResult()
 
+    # Run identifier autocorrect FIRST so exit binding sees accurate entry rules
+    result.identifier_corrections = autocorrect_identifiers(plan, available_timeframes)
+    for ic in result.identifier_corrections:
+        if ic.action == "autocorrect":
+            logger.warning(
+                "Trigger '%s' %s_rule: autocorrected '%s' → '%s'",
+                ic.trigger_id, ic.rule_type, ic.identifier, ic.replacement,
+            )
+        else:
+            logger.warning(
+                "Trigger '%s' %s_rule: stripped — unknown identifier '%s'",
+                ic.trigger_id, ic.rule_type, ic.identifier,
+            )
+
+    # Exit binding runs AFTER identifiers so it sees accurate entry rules
     result.exit_binding_corrections = enforce_exit_binding(plan.triggers)
     for c in result.exit_binding_corrections:
         if c.corrected_category:
@@ -894,19 +912,6 @@ def enforce_plan_quality(
             "Trigger '%s': degenerate hold rule stripped — %s",
             h.trigger_id, h.reason,
         )
-
-    result.identifier_corrections = autocorrect_identifiers(plan, available_timeframes)
-    for ic in result.identifier_corrections:
-        if ic.action == "autocorrect":
-            logger.warning(
-                "Trigger '%s' %s_rule: autocorrected '%s' → '%s'",
-                ic.trigger_id, ic.rule_type, ic.identifier, ic.replacement,
-            )
-        else:
-            logger.warning(
-                "Trigger '%s' %s_rule: stripped — unknown identifier '%s'",
-                ic.trigger_id, ic.rule_type, ic.identifier,
-            )
 
     if result.total_corrections:
         logger.info(

@@ -290,6 +290,34 @@ def test_enforce_exit_binding_relabels_mismatch():
     assert triggers[1].category == "trend_continuation"
 
 
+def test_enforce_exit_binding_skips_emergency_exit():
+    """Emergency exit triggers are never relabeled or stripped."""
+    triggers = [
+        TriggerCondition(
+            id="btc_entry",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_emergency",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="atr_14 > 1000",
+            category="emergency_exit",
+        ),
+    ]
+    corrections = enforce_exit_binding(triggers)
+    assert len(corrections) == 0
+    assert triggers[1].category == "emergency_exit"
+    assert triggers[1].exit_rule == "atr_14 > 1000"
+
+
 def test_enforce_exit_binding_no_change_when_matching():
     """Matching exit category is left untouched."""
     triggers = [

@@ -5071,6 +5071,7 @@ class LLMStrategistBacktester:
         if (
             existing is None
             or existing.status != "applied"
+            or not action.source_eval_id  # Don't dedup when eval ID is missing
             or existing.source_eval_id != action.source_eval_id
         ):
             return None

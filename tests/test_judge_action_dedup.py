@@ -142,3 +142,18 @@ def test_no_dedup_when_active_action_expired():
 
     assert superseded is None
     assert len(runner.events) == 0
+
+
+def test_no_dedup_when_source_eval_id_is_none():
+    """Both actions with None source_eval_id should NOT trigger dedup."""
+    runner = FakeRunner()
+
+    action1 = _make_action(action_id="a1", source_eval_id=None)
+    runner.active_judge_action = action1
+
+    action2 = _make_action(action_id="a2", source_eval_id=None)
+    superseded = runner._dedup_judge_action(action2, run_id="run1")
+
+    assert superseded is None
+    assert runner.active_judge_action.action_id == "a1"
+    assert len(runner.events) == 0
