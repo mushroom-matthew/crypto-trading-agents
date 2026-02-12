@@ -505,3 +505,52 @@ def test_enforce_plan_quality_full_pipeline():
     assert result.total_corrections >= 2  # At least exit binding + hold rule
     assert len(result.exit_binding_corrections) >= 1
     assert len(result.hold_rules_stripped) >= 1
+
+
+def test_emergency_exit_survives_enforce_plan_quality():
+    """Emergency exit triggers with unknown identifiers must NOT have their exit_rule stripped."""
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    triggers = [
+        TriggerCondition(
+            id="btc_entry",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_emergency",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="some_custom_signal > 100",  # Unknown identifier
+            category="emergency_exit",
+        ),
+    ]
+    plan = StrategyPlan(
+        plan_id="plan_test",
+        run_id="run_test",
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=triggers,
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=1.0,
+            max_symbol_exposure_pct=25.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=5,
+    )
+    result = enforce_plan_quality(plan, {"1h"})
+    # Emergency exit must keep its exit_rule intact
+    assert triggers[1].exit_rule == "some_custom_signal > 100"
+    # No strip corrections for the emergency exit
+    emergency_strips = [c for c in result.identifier_corrections
+                        if c.trigger_id == "btc_emergency" and c.action == "strip"]
+    assert len(emergency_strips) == 0

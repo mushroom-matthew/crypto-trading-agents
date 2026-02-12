@@ -822,6 +822,8 @@ def autocorrect_identifiers(
     typo_keys = set(KNOWN_TYPOS.keys())
 
     for trigger in plan.triggers:
+        # Emergency exits are safety-critical — autocorrect typos but never strip rules
+        is_emergency = trigger.category == "emergency_exit"
         for rule_type, attr in (("entry", "entry_rule"), ("exit", "exit_rule"), ("hold", "hold_rule")):
             expr = getattr(trigger, attr, None)
             if not expr:
@@ -850,8 +852,9 @@ def autocorrect_identifiers(
                 if name not in allowed and name.lower() not in {"true", "false", "none"}
             }
 
-            if unknown:
+            if unknown and not is_emergency:
                 # Strip the entire rule — can't safely evaluate with unknown identifiers
+                # (emergency exits are never stripped — safety critical)
                 for ident in sorted(unknown):
                     corrections.append(IdentifierCorrection(
                         trigger_id=trigger.id,
@@ -861,6 +864,11 @@ def autocorrect_identifiers(
                         replacement=None,
                     ))
                 fixed_expr = ""
+            elif unknown and is_emergency:
+                logger.warning(
+                    "Emergency exit '%s' %s_rule has unknown identifiers %s — keeping rule intact",
+                    trigger.id, rule_type, sorted(unknown),
+                )
 
             if fixed_expr != expr:
                 setattr(trigger, attr, fixed_expr)
