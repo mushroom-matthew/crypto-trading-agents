@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import logging
 import re
+from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Set, Tuple
 
 from data_loader.utils import timeframe_to_seconds
@@ -675,3 +677,244 @@ def validate_plan(plan: StrategyPlan) -> List[str]:
     except TriggerCompilationError as exc:
         errors.append(str(exc))
     return errors
+
+
+# =============================================================================
+# Runbook 32-34 — Compile-Time Enforcement
+# =============================================================================
+
+
+@dataclass
+class ExitBindingCorrection:
+    """Record of an exit trigger whose category was auto-relabeled."""
+    trigger_id: str
+    symbol: str
+    original_category: str
+    corrected_category: str | None  # None if exit_rule was stripped instead
+
+
+@dataclass
+class HoldRuleStripped:
+    """Record of a degenerate hold rule that was stripped."""
+    trigger_id: str
+    original_rule: str
+    reason: str
+
+
+@dataclass
+class IdentifierCorrection:
+    """Record of an identifier autocorrect or rule strip."""
+    trigger_id: str
+    rule_type: str  # 'entry', 'exit', 'hold'
+    action: str  # 'autocorrect' or 'strip'
+    identifier: str
+    replacement: str | None  # None if stripped
+
+
+@dataclass
+class PlanEnforcementResult:
+    """Summary of all corrections applied by enforce_plan_quality."""
+    exit_binding_corrections: List[ExitBindingCorrection] = field(default_factory=list)
+    hold_rules_stripped: List[HoldRuleStripped] = field(default_factory=list)
+    identifier_corrections: List[IdentifierCorrection] = field(default_factory=list)
+
+    @property
+    def total_corrections(self) -> int:
+        return (
+            len(self.exit_binding_corrections)
+            + len(self.hold_rules_stripped)
+            + len(self.identifier_corrections)
+        )
+
+
+# Common typos mapping to correct identifiers
+KNOWN_TYPOS: dict[str, str] = {
+    "realization_vol_short": "realized_vol_short",
+    "realization_vol_medium": "realized_vol_medium",
+    "realised_vol_short": "realized_vol_short",
+    "realised_vol_medium": "realized_vol_medium",
+    "bollinger_mid": "bollinger_middle",
+    "boll_upper": "bollinger_upper",
+    "boll_lower": "bollinger_lower",
+    "sma_fast": "sma_short",
+    "sma_slow": "sma_long",
+    "ema_fast_period": "ema_short",
+    "ema_slow": "ema_long",
+    "donchian_upper": "donchian_upper_short",
+    "donchian_lower": "donchian_lower_short",
+    "roc_fast": "roc_short",
+    "roc_slow": "roc_medium",
+}
+
+
+def enforce_exit_binding(triggers: List[TriggerCondition]) -> List[ExitBindingCorrection]:
+    """Fix exit triggers whose category doesn't match any entry category for that symbol.
+
+    If exactly one entry category exists for the symbol: relabel exit trigger's category.
+    If zero or multiple entry categories: strip the exit_rule from the trigger.
+    """
+    corrections: List[ExitBindingCorrection] = []
+
+    # Build map of symbol -> set of categories that have entry rules
+    symbol_entry_categories: dict[str, set[str]] = defaultdict(set)
+    for trigger in triggers:
+        if trigger.direction in ("long", "short") and trigger.entry_rule:
+            symbol_entry_categories[trigger.symbol].add(trigger.category)
+
+    for trigger in triggers:
+        if not trigger.exit_rule:
+            continue
+        entry_cats = symbol_entry_categories.get(trigger.symbol, set())
+        if trigger.category in entry_cats:
+            continue  # Already matches an entry category — no fix needed
+
+        if len(entry_cats) == 1:
+            # Exactly one entry category — relabel to match
+            correct_cat = next(iter(entry_cats))
+            corrections.append(ExitBindingCorrection(
+                trigger_id=trigger.id,
+                symbol=trigger.symbol,
+                original_category=trigger.category,
+                corrected_category=correct_cat,
+            ))
+            trigger.category = correct_cat
+        elif len(entry_cats) == 0 or len(entry_cats) > 1:
+            # Zero or multiple entry categories — strip exit to avoid confusion
+            corrections.append(ExitBindingCorrection(
+                trigger_id=trigger.id,
+                symbol=trigger.symbol,
+                original_category=trigger.category,
+                corrected_category=None,
+            ))
+            trigger.exit_rule = ""
+
+    return corrections
+
+
+def strip_degenerate_hold_rules(triggers: List[TriggerCondition]) -> List[HoldRuleStripped]:
+    """Strip hold rules flagged as degenerate by detect_degenerate_hold_rules."""
+    stripped: List[HoldRuleStripped] = []
+    for trigger in triggers:
+        if not trigger.hold_rule:
+            continue
+        warnings = detect_degenerate_hold_rules(trigger.hold_rule, trigger_id=trigger.id)
+        if warnings:
+            stripped.append(HoldRuleStripped(
+                trigger_id=trigger.id,
+                original_rule=trigger.hold_rule,
+                reason=warnings[0],
+            ))
+            trigger.hold_rule = None
+    return stripped
+
+
+def autocorrect_identifiers(
+    plan: StrategyPlan,
+    available_timeframes: Set[str],
+) -> List[IdentifierCorrection]:
+    """Fix known typos in trigger expressions and strip rules with unresolvable identifiers."""
+    corrections: List[IdentifierCorrection] = []
+    allowed = build_allowed_identifiers(available_timeframes)
+    # Extend allowed with known-typo replacements so we can detect them
+    typo_keys = set(KNOWN_TYPOS.keys())
+
+    for trigger in plan.triggers:
+        for rule_type, attr in (("entry", "entry_rule"), ("exit", "exit_rule"), ("hold", "hold_rule")):
+            expr = getattr(trigger, attr, None)
+            if not expr:
+                continue
+
+            identifiers = _collect_identifiers(expr)
+            fixed_expr = expr
+
+            # Pass 1: autocorrect known typos
+            for ident in identifiers:
+                if ident in typo_keys:
+                    replacement = KNOWN_TYPOS[ident]
+                    fixed_expr = re.sub(rf"\b{re.escape(ident)}\b", replacement, fixed_expr)
+                    corrections.append(IdentifierCorrection(
+                        trigger_id=trigger.id,
+                        rule_type=rule_type,
+                        action="autocorrect",
+                        identifier=ident,
+                        replacement=replacement,
+                    ))
+
+            # Pass 2: check for remaining unknown identifiers after autocorrect
+            post_fix_ids = _collect_identifiers(fixed_expr)
+            unknown = {
+                name for name in post_fix_ids
+                if name not in allowed and name.lower() not in {"true", "false", "none"}
+            }
+
+            if unknown:
+                # Strip the entire rule — can't safely evaluate with unknown identifiers
+                for ident in sorted(unknown):
+                    corrections.append(IdentifierCorrection(
+                        trigger_id=trigger.id,
+                        rule_type=rule_type,
+                        action="strip",
+                        identifier=ident,
+                        replacement=None,
+                    ))
+                fixed_expr = ""
+
+            if fixed_expr != expr:
+                setattr(trigger, attr, fixed_expr)
+
+    return corrections
+
+
+def enforce_plan_quality(
+    plan: StrategyPlan,
+    available_timeframes: Set[str],
+) -> PlanEnforcementResult:
+    """Run all compile-time enforcement checks before compile_plan.
+
+    Mutates triggers in-place and returns a summary of corrections.
+    """
+    result = PlanEnforcementResult()
+
+    result.exit_binding_corrections = enforce_exit_binding(plan.triggers)
+    for c in result.exit_binding_corrections:
+        if c.corrected_category:
+            logger.warning(
+                "Trigger '%s' (%s): exit category relabeled from '%s' to '%s' to match entry",
+                c.trigger_id, c.symbol, c.original_category, c.corrected_category,
+            )
+        else:
+            logger.warning(
+                "Trigger '%s' (%s): exit_rule stripped — category '%s' has no matching entry",
+                c.trigger_id, c.symbol, c.original_category,
+            )
+
+    result.hold_rules_stripped = strip_degenerate_hold_rules(plan.triggers)
+    for h in result.hold_rules_stripped:
+        logger.warning(
+            "Trigger '%s': degenerate hold rule stripped — %s",
+            h.trigger_id, h.reason,
+        )
+
+    result.identifier_corrections = autocorrect_identifiers(plan, available_timeframes)
+    for ic in result.identifier_corrections:
+        if ic.action == "autocorrect":
+            logger.warning(
+                "Trigger '%s' %s_rule: autocorrected '%s' → '%s'",
+                ic.trigger_id, ic.rule_type, ic.identifier, ic.replacement,
+            )
+        else:
+            logger.warning(
+                "Trigger '%s' %s_rule: stripped — unknown identifier '%s'",
+                ic.trigger_id, ic.rule_type, ic.identifier,
+            )
+
+    if result.total_corrections:
+        logger.info(
+            "Plan enforcement: %d corrections applied (%d exit-binding, %d hold-rule, %d identifier)",
+            result.total_corrections,
+            len(result.exit_binding_corrections),
+            len(result.hold_rules_stripped),
+            len(result.identifier_corrections),
+        )
+
+    return result

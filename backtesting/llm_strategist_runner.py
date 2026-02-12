@@ -60,6 +60,7 @@ from ops_api.schemas import Event
 from tools import execution_tools
 from trading_core.trigger_compiler import (
     compile_plan,
+    enforce_plan_quality,
     validate_min_hold_vs_exits,
     validate_plan_identifiers,
     validate_plan_timeframes,
@@ -1675,6 +1676,12 @@ class LLMStrategistBacktester:
             "emergency_exit_veto_min_hold",
             "emergency_exit_missing_exit_rule",
             "emergency_exit_executed",
+            # Runbook 35: previously mis-classified as "risk"
+            "exit_binding_mismatch",
+            "HOLD_RULE",
+            "archetype_load",
+            "priority_skip",
+            "learning_gate_closed",
         }
         plan_id = (plan_payload or {}).get("plan_id")
 
@@ -1749,6 +1756,7 @@ class LLMStrategistBacktester:
                 return BlockReason.OTHER.value
             if raw in reason_map or raw in custom_reasons:
                 return raw
+            # Unknown reasons are typically risk parameter names from the engine
             return BlockReason.RISK.value
 
         def _record_block_entry(data: Dict[str, Any], source: str) -> None:
@@ -2762,10 +2770,21 @@ class LLMStrategistBacktester:
                         for rule in current_plan.sizing_rules
                     }
                     derived_cap = getattr(current_plan, "_derived_trade_cap", None)
+
+                    # Runbooks 32-34: enforce plan quality before compilation
+                    available_tfs = set(self.timeframes)
+                    enforcement = enforce_plan_quality(current_plan, available_tfs)
+                    if enforcement.total_corrections:
+                        self._add_event("plan_enforcement", {
+                            "plan_id": current_plan.plan_id,
+                            "exit_binding_corrections": len(enforcement.exit_binding_corrections),
+                            "hold_rules_stripped": len(enforcement.hold_rules_stripped),
+                            "identifier_corrections": len(enforcement.identifier_corrections),
+                        })
+
                     compiled_plan = compile_plan(current_plan)
 
                     # Validate that triggers don't reference unavailable timeframes
-                    available_tfs = set(self.timeframes)
                     tf_warnings, blocked_trigger_ids = validate_plan_timeframes(current_plan, available_tfs)
                     if blocked_trigger_ids:
                         logger.warning(
@@ -3894,6 +3913,8 @@ class LLMStrategistBacktester:
             "blocked_by_risk_budget": blocked_risk_budget,
             "blocked_by_trigger_load": blocked_trigger_load,
             "blocked_by_archetype_load": blocked_archetype_load,
+            "blocked_by_exit_binding": skipped_counts.get("exit_binding_mismatch", 0),
+            "blocked_by_hold_rule": skipped_counts.get("HOLD_RULE", 0),
             "blocked_by_min_hold": blocked_min_hold,
             "blocked_by_min_flat": blocked_min_flat,
             "min_hold_binding_pct": (
@@ -5032,6 +5053,48 @@ class LLMStrategistBacktester:
         self._apply_intraday_engine_updates()
         self._persist_judge_action(run_id, action)
 
+    def _dedup_judge_action(
+        self,
+        action: JudgeAction,
+        *,
+        run_id: str,
+        event_ts: datetime | None = None,
+    ) -> JudgeAction | None:
+        """De-duplicate judge actions from the same eval window.
+
+        If the active action shares the same source_eval_id, supersede it with
+        the new action (last-write-wins) and emit a tracking event.
+
+        Returns the superseded action, or None if no dedup occurred.
+        """
+        existing = self.active_judge_action
+        if (
+            existing is None
+            or existing.status != "applied"
+            or existing.source_eval_id != action.source_eval_id
+        ):
+            return None
+
+        # Same eval window — supersede the old action
+        existing.status = "expired"
+        existing.evals_remaining = 0
+        self._persist_judge_action(run_id, existing)
+        self._emit_event(
+            "judge_action_superseded",
+            {
+                "superseded_action_id": existing.action_id,
+                "new_action_id": action.action_id,
+                "source_eval_id": action.source_eval_id,
+                "superseded_recommended": existing.recommended_action,
+                "new_recommended": action.recommended_action,
+            },
+            run_id=run_id,
+            correlation_id=action.action_id,
+            event_ts=event_ts,
+        )
+        self.active_judge_action = None
+        return existing
+
     def _apply_judge_action(
         self,
         action: JudgeAction,
@@ -5040,6 +5103,9 @@ class LLMStrategistBacktester:
         run_id: str,
         event_ts: datetime | None = None,
     ) -> JudgeAction:
+        # Runbook 36: de-dup actions from same eval window
+        self._dedup_judge_action(action, run_id=run_id, event_ts=event_ts)
+
         if action.status != "applied":
             self._persist_judge_action(run_id, action)
             self._emit_event(
