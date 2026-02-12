@@ -5104,9 +5104,6 @@ class LLMStrategistBacktester:
         run_id: str,
         event_ts: datetime | None = None,
     ) -> JudgeAction:
-        # Runbook 36: de-dup actions from same eval window
-        self._dedup_judge_action(action, run_id=run_id, event_ts=event_ts)
-
         if action.status != "applied":
             self._persist_judge_action(run_id, action)
             self._emit_event(
@@ -5124,6 +5121,9 @@ class LLMStrategistBacktester:
             )
             self._decrement_active_judge_action(run_id)
             return action
+
+        # Runbook 36: de-dup actions from same eval window (only for applied actions)
+        self._dedup_judge_action(action, run_id=run_id, event_ts=event_ts)
 
         constraints = action.constraints
         if current_plan and current_plan.triggers:
