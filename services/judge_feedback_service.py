@@ -522,6 +522,8 @@ class JudgeFeedbackService:
             events=[],  # TODO: Add event IDs when available
             notes=" | ".join(heuristics.red_flags[:3]) if heuristics.red_flags else None,
         )
+        if not evidence.metrics and not evidence.notes:
+            evidence.metrics = [f"score: {heuristics.final_score:.1f}"]
 
         return JudgeAttribution(
             primary_attribution=primary,

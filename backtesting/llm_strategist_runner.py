@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from decimal import Decimal
 import inspect
 import json
 import logging
@@ -74,6 +75,14 @@ from trading_core.trade_quality import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
 
 
 def _new_limit_entry() -> Dict[str, Any]:
@@ -4018,9 +4027,9 @@ class LLMStrategistBacktester:
             )
             event_ts = datetime.fromisoformat(f"{day_key}T23:59:59+00:00")
             action = self._apply_judge_action(action, None, run_id=run_id, event_ts=event_ts)
-            summary["judge_action"] = action.model_dump()
+            summary["judge_action"] = action.model_dump(mode="json")
             summary["risk_adjustments"] = list(snapshot_adjustments(run.risk_adjustments or {}))
-        (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2))
+        (daily_dir / f"{day_key}.json").write_text(json.dumps(summary, indent=2, default=_json_default))
         self.flattened_days.discard(day_key)
         return summary
 
@@ -5391,7 +5400,7 @@ class LLMStrategistBacktester:
             "replan_reason": replan_reason,
             "trigger_reason": trigger_reason,
             "feedback": feedback,
-            "judge_action": action.model_dump() if action else None,
+            "judge_action": action.model_dump(mode="json") if action else None,
             "judge_recommended_action": action.recommended_action if action else None,
             "snapshot": snapshot,
             "summary_compact": compact_summary,

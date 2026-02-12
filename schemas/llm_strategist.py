@@ -204,6 +204,7 @@ class PositionSizingRule(SerializableModel):
     target_risk_pct: float | None = Field(default=None, ge=0.0)
     vol_target_annual: float | None = Field(default=None, ge=0.0)
     notional: float | None = Field(default=None, ge=0.0)
+    rationale: str | None = None
 
 
 class RegimeAlert(SerializableModel):
