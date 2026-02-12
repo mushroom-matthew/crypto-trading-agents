@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["status", "summary", "tests_run", "files_changed"],
+  "properties": {
+    "status": { "type": "string", "enum": ["all_passing", "partially_fixed", "still_failing", "error"] },
+    "summary": { "type": "string", "description": "Brief description of what was wrong and what was fixed" },
+    "tests_run": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "integer" },
+        "passed": { "type": "integer" },
+        "failed": { "type": "integer" },
+        "errors": { "type": "integer" }
+      },
+      "required": ["total", "passed", "failed"]
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "change_type": { "type": "string", "enum": ["source_fix", "test_fix", "fixture_fix"] },
+          "description": { "type": "string" }
+        },
+        "required": ["path", "change_type", "description"]
+      }
+    },
+    "root_cause": { "type": "string", "description": "Root cause category: stale_test, source_bug, fixture_issue, environment_issue" },
+    "remaining_failures": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Test names that are still failing, if any"
+    }
+  }
+}

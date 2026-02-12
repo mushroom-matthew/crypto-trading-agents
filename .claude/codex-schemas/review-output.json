@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["findings", "verdict"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "severity", "file_path", "line_range", "description", "suggestion"],
+        "properties": {
+          "title": { "type": "string", "description": "Short title of the issue" },
+          "severity": { "type": "string", "enum": ["critical", "warning", "info"] },
+          "file_path": { "type": "string", "description": "Absolute path to the affected file" },
+          "line_range": {
+            "type": "object",
+            "properties": {
+              "start": { "type": "integer" },
+              "end": { "type": "integer" }
+            },
+            "required": ["start", "end"]
+          },
+          "description": { "type": "string", "description": "What the issue is and why it matters" },
+          "suggestion": { "type": "string", "description": "Specific code or approach to fix it" },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "performance", "maintainability", "domain_logic"]
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "required": ["overall", "confidence", "summary"],
+      "properties": {
+        "overall": { "type": "string", "enum": ["approve", "request_changes", "needs_discussion"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "summary": { "type": "string", "description": "1-2 sentence overall assessment" }
+      }
+    }
+  }
+}

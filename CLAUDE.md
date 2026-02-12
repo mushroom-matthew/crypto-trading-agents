@@ -307,6 +307,30 @@ Critical variables (see `.env.example` for full list):
 - Mock external services (Coinbase, OpenAI) in workflow tests
 - Verify deterministic replay behavior for Temporal workflows
 
+**Common Test Pitfalls:**
+- Always run `uv run pytest -k <test_name> -vv` before committing to catch failures early
+- Pydantic models use `extra="forbid"` (SerializableModel base) -- ALL required fields must be present in test fixtures
+- Tests instantiate workflow classes directly as plain Python objects (no Temporal runtime needed)
+- Mock OpenAI with `SimpleNamespace` stubs, not heavy mock libraries: `SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: SimpleNamespace(output_text='...')))`
+- No top-level conftest.py -- each test file is self-contained with inline helpers
+- When editing schemas, grep for ALL downstream consumers and test fixtures before changing field names
+- Stub plan provider available: `tests/helpers/stub_plan_provider.py` (AlwaysLongPlanProvider, no LLM calls)
+
+**Domain Invariants (Business Logic):**
+- Judge evaluations trigger strategy updates -- LLM budget calculations must account for BOTH judge_evals AND strategy_replans
+- Emergency exits (`category="emergency_exit"`) MUST bypass all other constraints (budget caps, category restrictions, stand-down state) but still write to the ledger
+- Profit scraping happens AFTER fill, not during order placement
+- `risk_used=0` is a valid value (falsy-zero bug) -- always use `is not None` checks, never truthiness
+- Daily risk budget resets at midnight UTC; max_daily_loss is separate from risk_budget (loss = realized P&L, budget = exposure)
+- StrategyRun is the central entity linking plans, judge feedback, and config -- changes cascade through it
+- Judge actions have TTL (in evals) and expire automatically -- don't assume they persist indefinitely
+
+**Code Editing Conventions:**
+- When using the Edit tool, include 3+ lines of surrounding context in old_string for uniqueness
+- For repeated patterns (e.g., multiple similar dict entries, function signatures), include the entire block
+- Prefer targeted edits over large rewrites -- smaller old_string = higher success rate
+- Before changing any Pydantic schema field: `grep -r "field_name"` across the entire codebase, update all consumers in the same commit
+
 **Logging:**
 - Use `agents.logging_utils.setup_logging()` for structured output
 - LLM calls must be wrapped in Langfuse spans
@@ -426,6 +450,51 @@ app.include_router(backtests.router)
   - Ops API at port 8081 (operator interface)
   - Temporal UI at port 8088
   - NEVER mix MCP tools into Ops API or vice versa
+
+## Memory Protocol
+
+This project uses an observational memory system stored in the Claude Code auto-memory directory.
+
+**At the END of each session:**
+1. Update `memory/session-log.md` with what was accomplished, what's in progress, and blockers
+2. Update `memory/debugging-patterns.md` if a new recurring bug pattern was discovered
+3. Update `memory/MEMORY.md` "Active Work" section with current branch and state
+
+**At the START of each session:**
+1. Read `memory/session-log.md` for the most recent entry
+2. Read any topic file relevant to the current task (architecture.md, test-patterns.md, domain-rules.md)
+
+**Memory files:**
+- `memory/MEMORY.md` -- Index and critical rules (loaded into every session's system prompt)
+- `memory/architecture.md` -- Key file locations and data model relationships
+- `memory/debugging-patterns.md` -- Recurring bugs and their fixes
+- `memory/test-patterns.md` -- Test setup conventions and common fixtures
+- `memory/domain-rules.md` -- Business logic invariants
+- `memory/session-log.md` -- Brief log of what each session accomplished
+
+## Codex CLI Integration
+
+This project uses a hybrid Claude + Codex workflow. Claude handles planning, orchestration, and domain logic. Codex handles token-heavy tasks via headless execution.
+
+**Codex CLI** (v0.98.0): `codex exec` runs headless with structured output. The project is trusted in `~/.codex/config.toml` (model: gpt-5.2-codex).
+
+**When to delegate to Codex:**
+- Code review before commits: `/review` (uses `codex exec review`)
+- Test running and fixing: `/codex-test` (uses `codex exec --full-auto`)
+- Large output analysis (backtest results, logs): `/codex-analyze` (uses `codex exec --output-schema`)
+
+**When to keep in Claude:**
+- Planning and architecture decisions
+- Domain logic reasoning (trading rules, risk invariants)
+- Session continuity and memory management
+- Multi-step orchestration across files
+
+**Rules for Codex invocation:**
+- Always use `codex exec` (never interactive `codex`) -- Claude's bash environment is non-terminal
+- Always suppress stderr: `2>/dev/null` (avoids thinking token noise in Claude's context)
+- Use `-o /tmp/codex-<task>.txt` or `-o /tmp/codex-<task>.json` to capture output reliably
+- Structured output schemas live in `.claude/codex-schemas/`
+- Always review Codex's file changes (`git diff`) before accepting them
 
 ## Repository Reference
 
