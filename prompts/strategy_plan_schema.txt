@@ -72,6 +72,7 @@ IMPORTANT - Hold Rule Calibration:
 - BAD hold rule: single condition only (e.g., "close > sma_short") — too easy to be always true
 - GOOD hold rule: "rsi_14 > 60 and close > sma_medium and atr_14 < 500" — multiple conditions, harder to be always true
 - If you use hold_rule, ensure it can actually become False within normal market conditions.
+- NOTE: Degenerate hold rules (single-condition or low-threshold RSI) will be AUTO-STRIPPED at compile time. Write quality hold rules or omit them entirely.
 
 IMPORTANT - Trigger Fire Rate Calibration:
 - Each entry trigger should fire approximately 1-3 times per day on 1h bars.

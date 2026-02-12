@@ -9,10 +9,18 @@ from services.strategy_run_registry import StrategyRunRegistry
 from tools import strategy_run_tools
 from trading_core.trigger_compiler import (
     AtrTautologyWarning,
+    ExitBindingCorrection,
+    HoldRuleStripped,
+    IdentifierCorrection,
+    PlanEnforcementResult,
     TriggerCompilationError,
+    autocorrect_identifiers,
     compile_plan,
     detect_atr_tautologies,
     detect_plan_atr_tautologies,
+    enforce_exit_binding,
+    enforce_plan_quality,
+    strip_degenerate_hold_rules,
     warn_cross_category_exits,
     detect_degenerate_hold_rules,
 )
@@ -245,3 +253,304 @@ def test_allows_compound_hold_rule():
         trigger_id="btc_hold",
     )
     assert len(warnings) == 0
+
+
+# =============================================================================
+# Runbook 32 — Exit Binding Enforcement
+# =============================================================================
+
+
+def test_enforce_exit_binding_relabels_mismatch():
+    """Exit trigger in wrong category gets relabeled to match the only entry category."""
+    triggers = [
+        TriggerCondition(
+            id="btc_entry",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_exit",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="rsi_14 > 70",
+            category="reversal",  # Wrong — should be trend_continuation
+        ),
+    ]
+    corrections = enforce_exit_binding(triggers)
+    assert len(corrections) == 1
+    assert corrections[0].trigger_id == "btc_exit"
+    assert corrections[0].original_category == "reversal"
+    assert corrections[0].corrected_category == "trend_continuation"
+    assert triggers[1].category == "trend_continuation"
+
+
+def test_enforce_exit_binding_skips_emergency_exit():
+    """Emergency exit triggers are never relabeled or stripped."""
+    triggers = [
+        TriggerCondition(
+            id="btc_entry",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_emergency",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="atr_14 > 1000",
+            category="emergency_exit",
+        ),
+    ]
+    corrections = enforce_exit_binding(triggers)
+    assert len(corrections) == 0
+    assert triggers[1].category == "emergency_exit"
+    assert triggers[1].exit_rule == "atr_14 > 1000"
+
+
+def test_enforce_exit_binding_no_change_when_matching():
+    """Matching exit category is left untouched."""
+    triggers = [
+        TriggerCondition(
+            id="btc_entry",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="close < sma_short",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_exit",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="rsi_14 > 70",
+            category="trend_continuation",
+        ),
+    ]
+    corrections = enforce_exit_binding(triggers)
+    assert len(corrections) == 0
+    assert triggers[1].category == "trend_continuation"
+
+
+# =============================================================================
+# Runbook 33 — Degenerate Hold Rule Stripping (Enforcement)
+# =============================================================================
+
+
+def test_strip_degenerate_hold_rule():
+    """Single-condition hold rule gets stripped to None."""
+    triggers = [
+        TriggerCondition(
+            id="btc_long",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="close < sma_short",
+            category="trend_continuation",
+            hold_rule="rsi_14 > 45",  # Degenerate
+        ),
+    ]
+    stripped = strip_degenerate_hold_rules(triggers)
+    assert len(stripped) == 1
+    assert stripped[0].trigger_id == "btc_long"
+    assert stripped[0].original_rule == "rsi_14 > 45"
+    assert triggers[0].hold_rule is None
+
+
+def test_preserve_compound_hold_rule():
+    """Compound hold rule is preserved."""
+    triggers = [
+        TriggerCondition(
+            id="btc_long",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="close < sma_short",
+            category="trend_continuation",
+            hold_rule="rsi_14 > 60 and close > sma_medium and atr_14 < 500",
+        ),
+    ]
+    stripped = strip_degenerate_hold_rules(triggers)
+    assert len(stripped) == 0
+    assert triggers[0].hold_rule == "rsi_14 > 60 and close > sma_medium and atr_14 < 500"
+
+
+# =============================================================================
+# Runbook 34 — Identifier Autocorrect
+# =============================================================================
+
+
+def _plan_with_rule(entry_rule: str, run_id: str = "run_test") -> StrategyPlan:
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trigger = TriggerCondition(
+        id="btc_long",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule=entry_rule,
+        exit_rule="close < 0",
+        category="trend_continuation",
+    )
+    return StrategyPlan(
+        plan_id="plan_test",
+        run_id=run_id,
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[trigger],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=1.0,
+            max_symbol_exposure_pct=25.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=5,
+    )
+
+
+def test_autocorrect_known_typo():
+    """realization_vol_short → realized_vol_short via KNOWN_TYPOS."""
+    plan = _plan_with_rule("realization_vol_short > 0.02")
+    corrections = autocorrect_identifiers(plan, {"1h"})
+    autocorrects = [c for c in corrections if c.action == "autocorrect"]
+    assert len(autocorrects) == 1
+    assert autocorrects[0].identifier == "realization_vol_short"
+    assert autocorrects[0].replacement == "realized_vol_short"
+    assert "realized_vol_short" in plan.triggers[0].entry_rule
+
+
+def test_reject_unknown_identifier():
+    """Trigger with unresolvable identifier gets rule stripped."""
+    plan = _plan_with_rule("totally_fake_indicator > 100")
+    corrections = autocorrect_identifiers(plan, {"1h"})
+    strips = [c for c in corrections if c.action == "strip"]
+    assert len(strips) >= 1
+    assert strips[0].identifier == "totally_fake_indicator"
+    assert not plan.triggers[0].entry_rule  # Rule was stripped
+
+
+def test_valid_expression_passthrough():
+    """Valid expressions are left unchanged."""
+    plan = _plan_with_rule("close > sma_short and rsi_14 < 70")
+    corrections = autocorrect_identifiers(plan, {"1h"})
+    assert len(corrections) == 0
+    assert plan.triggers[0].entry_rule == "close > sma_short and rsi_14 < 70"
+
+
+# =============================================================================
+# Runbook 32-34 — Orchestrator (enforce_plan_quality)
+# =============================================================================
+
+
+def test_enforce_plan_quality_full_pipeline():
+    """enforce_plan_quality runs all checks and returns combined result."""
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    triggers = [
+        TriggerCondition(
+            id="btc_entry",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_exit",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="rsi_14 > 70",
+            category="reversal",  # Exit binding mismatch
+            hold_rule="rsi_14 > 45",  # Degenerate hold
+        ),
+    ]
+    plan = StrategyPlan(
+        plan_id="plan_test",
+        run_id="run_test",
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=triggers,
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=1.0,
+            max_symbol_exposure_pct=25.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=5,
+    )
+    result = enforce_plan_quality(plan, {"1h"})
+    assert isinstance(result, PlanEnforcementResult)
+    assert result.total_corrections >= 2  # At least exit binding + hold rule
+    assert len(result.exit_binding_corrections) >= 1
+    assert len(result.hold_rules_stripped) >= 1
+
+
+def test_emergency_exit_survives_enforce_plan_quality():
+    """Emergency exit triggers with unknown identifiers must NOT have their exit_rule stripped."""
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    triggers = [
+        TriggerCondition(
+            id="btc_entry",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_emergency",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="some_custom_signal > 100",  # Unknown identifier
+            category="emergency_exit",
+        ),
+    ]
+    plan = StrategyPlan(
+        plan_id="plan_test",
+        run_id="run_test",
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=triggers,
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=1.0,
+            max_symbol_exposure_pct=25.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="BTC-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=5,
+    )
+    result = enforce_plan_quality(plan, {"1h"})
+    # Emergency exit must keep its exit_rule intact
+    assert triggers[1].exit_rule == "some_custom_signal > 100"
+    # No strip corrections for the emergency exit
+    emergency_strips = [c for c in result.identifier_corrections
+                        if c.trigger_id == "btc_emergency" and c.action == "strip"]
+    assert len(emergency_strips) == 0
