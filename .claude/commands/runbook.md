@@ -23,7 +23,7 @@ Follow this exact sequence — do NOT skip or reorder steps:
 ## Phase 4: Document
 13. Fill the Human Verification Evidence section
 14. Fill the Change Log entries with actual file paths and descriptions
-15. Update `memory/session-log.md` with what was accomplished
+15. Update `session-log.md` in your auto-memory directory with what was accomplished
 
 ## Phase 5: Commit
 16. Stage specific files (not `git add .`)

@@ -117,6 +117,12 @@ function AggressiveSettingsPanelInner<T extends AggressiveSettings>({ config, on
     debouncedOnChange({ ...config, max_daily_loss_pct: next });
   }, [config, debouncedOnChange]);
 
+  const handleDailyRiskBudgetChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = parseOptionalNumber(e.target.value);
+    if (next === undefined) return;
+    debouncedOnChange({ ...config, max_daily_risk_budget_pct: next });
+  }, [config, debouncedOnChange]);
+
   const handleMinPriceMoveChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const next = parseOptionalNumber(e.target.value);
     if (next === undefined) return;
@@ -280,6 +286,24 @@ function AggressiveSettingsPanelInner<T extends AggressiveSettings>({ config, on
                   disabled={disabled}
                 />
                 <p className="text-xs text-gray-500 mt-1">Stop trading limit (default: 3%)</p>
+              </div>
+
+              {/* Daily Risk Budget */}
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Daily Risk Budget %
+                </label>
+                <input
+                  type="number"
+                  value={numberOrFallback(config.max_daily_risk_budget_pct, 10)}
+                  onChange={handleDailyRiskBudgetChange}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                  min={1}
+                  max={50}
+                  step={0.5}
+                  disabled={disabled}
+                />
+                <p className="text-xs text-gray-500 mt-1">Cumulative risk cap per day (default: 10%)</p>
               </div>
             </div>
           </div>

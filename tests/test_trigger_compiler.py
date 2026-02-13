@@ -554,3 +554,104 @@ def test_emergency_exit_survives_enforce_plan_quality():
     emergency_strips = [c for c in result.identifier_corrections
                         if c.trigger_id == "btc_emergency" and c.action == "strip"]
     assert len(emergency_strips) == 0
+
+
+# =============================================================================
+# Exit Binding Exempt — Multi-Category Symbols
+# =============================================================================
+
+
+def test_enforce_exit_binding_exempts_multi_category_match():
+    """Symbol with 2 entry cats, exit matches one → exit_binding_exempt=True, exit_rule preserved."""
+    triggers = [
+        TriggerCondition(
+            id="btc_trend",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="close < sma_short",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_mean_rev",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="rsi_14 < 30",
+            exit_rule="rsi_14 > 70",
+            category="mean_reversion",
+        ),
+        TriggerCondition(
+            id="btc_exit_trend",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="close < sma_medium",
+            category="trend_continuation",  # Matches one of the two entry cats
+        ),
+    ]
+    corrections = enforce_exit_binding(triggers)
+    # No corrections — the exit matches an entry category
+    assert len(corrections) == 0
+    # Exit rule preserved (not stripped)
+    assert triggers[2].exit_rule == "close < sma_medium"
+    # Exempt flag set so runtime binding check passes regardless of which category opened the position
+    assert triggers[2].exit_binding_exempt is True
+
+
+def test_enforce_exit_binding_strips_multi_category_no_match():
+    """Symbol with 2 entry cats, exit matches NONE → exit_rule stripped."""
+    triggers = [
+        TriggerCondition(
+            id="btc_trend",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="close > sma_medium",
+            exit_rule="close < sma_short",
+            category="trend_continuation",
+        ),
+        TriggerCondition(
+            id="btc_mean_rev",
+            symbol="BTC-USD",
+            direction="long",
+            timeframe="1h",
+            entry_rule="rsi_14 < 30",
+            exit_rule="rsi_14 > 70",
+            category="mean_reversion",
+        ),
+        TriggerCondition(
+            id="btc_exit_other",
+            symbol="BTC-USD",
+            direction="exit",
+            timeframe="1h",
+            entry_rule="",
+            exit_rule="atr_14 > 500",
+            category="other",  # Matches neither entry category
+        ),
+    ]
+    corrections = enforce_exit_binding(triggers)
+    assert len(corrections) == 1
+    assert corrections[0].trigger_id == "btc_exit_other"
+    assert corrections[0].corrected_category is None  # stripped, not relabeled
+    # Exit rule stripped
+    assert triggers[2].exit_rule == ""
+    # Exempt flag NOT set
+    assert triggers[2].exit_binding_exempt is False
+
+
+def test_exit_binding_exempt_reset_on_external_input():
+    """exit_binding_exempt=True in external input is reset to False by validator."""
+    trigger = TriggerCondition(
+        id="btc_exit",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="",
+        exit_rule="close < sma_short",
+        category="trend_continuation",
+        exit_binding_exempt=True,  # Externally supplied — should be reset
+    )
+    assert trigger.exit_binding_exempt is False

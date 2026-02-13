@@ -71,7 +71,7 @@ Ask the user if they want to:
 - **Implement recommendations**: Claude takes the top recommendations and creates a plan
 - **Run another backtest**: With adjusted parameters based on findings
 - **Deep dive**: Pick a specific finding and investigate further
-- **Save to memory**: Record key learnings in `memory/debugging-patterns.md` or `memory/session-log.md`
+- **Save to memory**: Record key learnings in `debugging-patterns.md` or `session-log.md` in your auto-memory directory
 
 ## Notes
 - Uses `--sandbox read-only` since analysis doesn't need to write files

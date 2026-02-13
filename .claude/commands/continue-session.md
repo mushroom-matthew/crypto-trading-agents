@@ -1,7 +1,9 @@
 Continue work from a previous session. Context: $ARGUMENTS
 
+**Note:** All `memory/` paths below refer to the auto-memory directory (shown in your system prompt as your persistent auto memory directory), NOT the repo root.
+
 ## Step 1: Recover State
-1. Read `memory/session-log.md` for the most recent entry
+1. Read `session-log.md` from your auto-memory directory for the most recent entry
 2. Run `git log --oneline -10` to see recent commits
 3. Run `git status` to check for uncommitted work in progress
 4. Run `git diff --stat` to see any staged/unstaged changes
@@ -23,4 +25,4 @@ Continue work from a previous session. Context: $ARGUMENTS
 ## Step 4: Resume Work
 11. Pick up where the previous session left off
 12. Follow the relevant workflow (runbook, plan, etc.)
-13. At the end, update `memory/session-log.md`
+13. At the end, update `session-log.md` in your auto-memory directory

@@ -387,6 +387,8 @@ class TriggerEngine:
             return True
         if trigger.category == "emergency_exit":
             return True
+        if trigger.direction == "exit" and getattr(trigger, "exit_binding_exempt", False):
+            return True
         if not entry_category or not trigger.category:
             return True
         if self.exit_binding_mode == "category":

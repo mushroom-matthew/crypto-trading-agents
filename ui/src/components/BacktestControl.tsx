@@ -39,6 +39,7 @@ export function BacktestControl() {
     max_symbol_exposure_pct: 40.0,
     max_portfolio_exposure_pct: 100.0,
     max_daily_loss_pct: 5.0,
+    max_daily_risk_budget_pct: 10.0,
     // Whipsaw defaults (relaxed for more trades)
     min_hold_hours: 0.5,
     min_flat_hours: 0.25,

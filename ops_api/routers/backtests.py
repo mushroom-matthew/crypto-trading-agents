@@ -1415,11 +1415,11 @@ async def get_playback_candles(
             raise HTTPException(status_code=404, detail=f"Backtest {run_id} not found")
 
         config = cached["config"]
-        start_date = datetime.fromisoformat(config.get("requested_start_date", config["start_date"]))
-        end_date = datetime.fromisoformat(config.get("requested_end_date", config["end_date"]))
+        start_date = ensure_utc(datetime.fromisoformat(config.get("requested_start_date", config["start_date"])))
+        end_date = ensure_utc(datetime.fromisoformat(config.get("requested_end_date", config["end_date"])))
         timeframe = config.get("timeframe", "1h")
         granularity_seconds = timeframe_to_seconds(timeframe)
-        warmup_candles = max(MIN_FEATURE_CANDLES, compute_indicator_warmup_candles(request.timeframe))
+        warmup_candles = max(MIN_FEATURE_CANDLES, compute_indicator_warmup_candles(timeframe))
         warmup_delta = timedelta(seconds=granularity_seconds * (warmup_candles - 1))
         buffered_start = start_date - warmup_delta
 

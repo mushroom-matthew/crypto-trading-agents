@@ -93,6 +93,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       max_symbol_exposure_pct: 50.0,
       max_portfolio_exposure_pct: 100.0,
       max_daily_loss_pct: 6.0,
+      max_daily_risk_budget_pct: 15.0,
       // High trade frequency
       max_trades_per_day: 50,
       max_triggers_per_symbol_per_day: 15,
@@ -125,6 +126,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       max_symbol_exposure_pct: 40.0,
       max_portfolio_exposure_pct: 100.0,
       max_daily_loss_pct: 5.0,
+      max_daily_risk_budget_pct: 10.0,
       // High trade frequency
       max_trades_per_day: 30,
       max_triggers_per_symbol_per_day: 10,
@@ -157,6 +159,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       max_symbol_exposure_pct: 100.0,
       max_portfolio_exposure_pct: 200.0,  // 2x leverage
       max_daily_loss_pct: 10.0,
+      max_daily_risk_budget_pct: 20.0,
       // High trade frequency
       max_trades_per_day: 30,
       max_triggers_per_symbol_per_day: 10,
@@ -189,6 +192,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       max_symbol_exposure_pct: 25.0,
       max_portfolio_exposure_pct: 80.0,
       max_daily_loss_pct: 3.0,
+      max_daily_risk_budget_pct: 6.0,
       // Low trade frequency
       max_trades_per_day: 10,
       max_triggers_per_symbol_per_day: 5,
