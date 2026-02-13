@@ -170,12 +170,17 @@ class TriggerCondition(SerializableModel):
     experiment_id: str | None = Field(default=None, description="Experiment that spawned this trigger, if any.")
     exit_binding_exempt: bool = Field(
         default=False,
-        description="When True, this exit trigger bypasses category-based exit binding checks at runtime. "
-        "Set by enforce_exit_binding when a symbol has multiple entry categories and the exit matches one of them.",
+        description="Internal flag: bypasses category-based exit binding checks at runtime. "
+        "Set only by enforce_exit_binding(); external input is always reset to False.",
     )
 
     @model_validator(mode="after")
     def _validate_trigger(self) -> "TriggerCondition":
+        # Safety: exit_binding_exempt is internal-only — reset any externally supplied value.
+        # Only enforce_exit_binding() in the compiler should set this to True.
+        # Use object.__setattr__ to bypass validate_assignment (avoids recursion).
+        object.__setattr__(self, "exit_binding_exempt", False)
+
         # emergency_exit requires exit_rule
         if self.category == "emergency_exit" and not (self.exit_rule or "").strip():
             raise ValueError("emergency_exit triggers must define a non-empty exit_rule")

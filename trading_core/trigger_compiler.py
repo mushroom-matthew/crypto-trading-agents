@@ -774,7 +774,7 @@ def enforce_exit_binding(triggers: List[TriggerCondition]) -> List[ExitBindingCo
             # Multi-category symbol: exit matches one of the entry categories.
             # Mark exempt so runtime binding check passes regardless of which
             # category actually opened the position.
-            trigger.exit_binding_exempt = True
+            object.__setattr__(trigger, "exit_binding_exempt", True)
             continue
 
         if len(entry_cats) == 1:

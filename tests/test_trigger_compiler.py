@@ -640,3 +640,18 @@ def test_enforce_exit_binding_strips_multi_category_no_match():
     assert triggers[2].exit_rule == ""
     # Exempt flag NOT set
     assert triggers[2].exit_binding_exempt is False
+
+
+def test_exit_binding_exempt_reset_on_external_input():
+    """exit_binding_exempt=True in external input is reset to False by validator."""
+    trigger = TriggerCondition(
+        id="btc_exit",
+        symbol="BTC-USD",
+        direction="exit",
+        timeframe="1h",
+        entry_rule="",
+        exit_rule="close < sma_short",
+        category="trend_continuation",
+        exit_binding_exempt=True,  # Externally supplied — should be reset
+    )
+    assert trigger.exit_binding_exempt is False
