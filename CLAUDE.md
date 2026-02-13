@@ -453,24 +453,24 @@ app.include_router(backtests.router)
 
 ## Memory Protocol
 
-This project uses an observational memory system stored in the Claude Code auto-memory directory.
+This project uses an observational memory system stored in the Claude Code auto-memory directory (the persistent directory shown in your system prompt, NOT the repo root `memory/` folder).
 
 **At the END of each session:**
-1. Update `memory/session-log.md` with what was accomplished, what's in progress, and blockers
-2. Update `memory/debugging-patterns.md` if a new recurring bug pattern was discovered
-3. Update `memory/MEMORY.md` "Active Work" section with current branch and state
+1. Update `session-log.md` in auto-memory with what was accomplished, what's in progress, and blockers
+2. Update `debugging-patterns.md` in auto-memory if a new recurring bug pattern was discovered
+3. Update `MEMORY.md` in auto-memory "Active Work" section with current branch and state
 
 **At the START of each session:**
-1. Read `memory/session-log.md` for the most recent entry
+1. Read `session-log.md` from auto-memory for the most recent entry
 2. Read any topic file relevant to the current task (architecture.md, test-patterns.md, domain-rules.md)
 
-**Memory files:**
-- `memory/MEMORY.md` -- Index and critical rules (loaded into every session's system prompt)
-- `memory/architecture.md` -- Key file locations and data model relationships
-- `memory/debugging-patterns.md` -- Recurring bugs and their fixes
-- `memory/test-patterns.md` -- Test setup conventions and common fixtures
-- `memory/domain-rules.md` -- Business logic invariants
-- `memory/session-log.md` -- Brief log of what each session accomplished
+**Memory files (all in auto-memory directory):**
+- `MEMORY.md` -- Index and critical rules (loaded into every session's system prompt)
+- `architecture.md` -- Key file locations and data model relationships
+- `debugging-patterns.md` -- Recurring bugs and their fixes
+- `test-patterns.md` -- Test setup conventions and common fixtures
+- `domain-rules.md` -- Business logic invariants
+- `session-log.md` -- Brief log of what each session accomplished
 
 ## Codex CLI Integration
 

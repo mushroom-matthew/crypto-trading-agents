@@ -1,3 +1,5 @@
+import pytest
+
 from backtesting.reports import build_run_summary
 
 
@@ -62,3 +64,32 @@ def test_build_run_summary_aggregates_limits_and_risk_usage():
     assert cap_state["resolved"]["max_triggers_per_symbol_per_day"]["min"] == 10.0
     assert cap_state["flags"]["strict_fixed_caps_days"] == 1
     assert cap_state["flags"]["legacy_mode_days"] == 1
+
+
+def test_risk_utilization_from_budget_pct_and_usage_events():
+    """When risk_budget is empty but risk_budget_pct and risk_usage_events exist,
+    the summary should derive non-zero risk utilization via the fallback path."""
+    daily = [
+        {
+            "equity_return_pct": 0.05,
+            "risk_budget": {},  # Empty — primary path yields nothing
+            "risk_budget_pct": 10.0,  # 10% of equity
+            "start_equity": 10000.0,
+            "risk_usage_events": [
+                {"risk_used": 200.0},
+                {"risk_used": 300.0},
+            ],
+            "trade_count": 3,
+            "limit_stats": {
+                "blocked_by_daily_cap": 0,
+                "blocked_by_plan_limits": 0,
+                "blocked_by_direction": 0,
+            },
+        },
+    ]
+    summary = build_run_summary(daily)
+    # Budget = 10% of 10000 = 1000. Used = 200+300 = 500. Utilization = 50%.
+    assert summary["risk_budget_used_pct_mean"] == pytest.approx(50.0)
+    assert summary["risk_budget_utilization_pct_mean"] == pytest.approx(50.0)
+    # Not all under 25% — should be in the 25-75 bucket
+    assert summary["risk_budget_25_to_75_pct_days"] == 100.0

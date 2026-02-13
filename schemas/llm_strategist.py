@@ -168,6 +168,11 @@ class TriggerCondition(SerializableModel):
     )
     learning_book: bool = Field(default=False, description="True if this trigger belongs to the learning book.")
     experiment_id: str | None = Field(default=None, description="Experiment that spawned this trigger, if any.")
+    exit_binding_exempt: bool = Field(
+        default=False,
+        description="When True, this exit trigger bypasses category-based exit binding checks at runtime. "
+        "Set by enforce_exit_binding when a symbol has multiple entry categories and the exit matches one of them.",
+    )
 
     @model_validator(mode="after")
     def _validate_trigger(self) -> "TriggerCondition":

@@ -768,8 +768,14 @@ def enforce_exit_binding(triggers: List[TriggerCondition]) -> List[ExitBindingCo
         if trigger.category == "emergency_exit":
             continue
         entry_cats = symbol_entry_categories.get(trigger.symbol, set())
-        if trigger.category in entry_cats:
-            continue  # Already matches an entry category — no fix needed
+        if len(entry_cats) == 1 and trigger.category in entry_cats:
+            continue  # Single entry category, exact match — no fix needed
+        if len(entry_cats) > 1 and trigger.category in entry_cats:
+            # Multi-category symbol: exit matches one of the entry categories.
+            # Mark exempt so runtime binding check passes regardless of which
+            # category actually opened the position.
+            trigger.exit_binding_exempt = True
+            continue
 
         if len(entry_cats) == 1:
             # Exactly one entry category — relabel to match
@@ -782,7 +788,8 @@ def enforce_exit_binding(triggers: List[TriggerCondition]) -> List[ExitBindingCo
             ))
             trigger.category = correct_cat
         elif len(entry_cats) == 0 or len(entry_cats) > 1:
-            # Zero or multiple entry categories — strip exit to avoid confusion
+            # Zero entry categories OR multiple entry categories with a non-matching
+            # exit category — strip exit to avoid confusion
             corrections.append(ExitBindingCorrection(
                 trigger_id=trigger.id,
                 symbol=trigger.symbol,
