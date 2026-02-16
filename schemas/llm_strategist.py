@@ -40,11 +40,23 @@ class IndicatorSnapshot(SerializableModel):
     ema_short: float | None = None
     ema_medium: float | None = None
     ema_long: float | None = None
+    ema_50: float | None = None
+    ema_200: float | None = None
     rsi_14: float | None = None
     macd: float | None = None
     macd_signal: float | None = None
     macd_hist: float | None = None
     atr_14: float | None = None
+    atr_14_prev1: float | None = None
+    atr_14_prev2: float | None = None
+    atr_14_prev3: float | None = None
+    atr_14_rising_3: bool | None = None
+    adx_14: float | None = None
+    impulse_ema50_24: bool | None = None
+    prev_open: float | None = None
+    prev_high: float | None = None
+    prev_low: float | None = None
+    prev_close: float | None = None
     roc_short: float | None = None
     roc_medium: float | None = None
     realized_vol_short: float | None = None
@@ -77,6 +89,7 @@ class IndicatorSnapshot(SerializableModel):
     vwap: float | None = None  # Volume-weighted average price
     vwap_distance_pct: float | None = None  # Distance from VWAP as %
     vol_burst: bool | None = None  # True when volume_multiple >= threshold
+    rand_u: float | None = None  # Deterministic pseudo-random scalar in [0, 1) for control tests
 
 
 class AssetState(SerializableModel):

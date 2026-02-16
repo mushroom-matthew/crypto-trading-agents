@@ -170,6 +170,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
     strict_days = 0
     legacy_days = 0
     min_hold_binding_pcts: list[float] = []
+    stale_context_bars: list[int] = []
 
     for report in daily_reports:
         data_quality = report.get("llm_data_quality") or "ok"
@@ -511,6 +512,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
             strict_days += 1
         elif flags:
             legacy_days += 1
+        stale_context_bars.append(int(report.get("stale_context_bars", 0) or 0))
 
     def _finalize_quality(agg_map: dict[str, dict[str, float | int]]) -> dict[str, dict[str, float]]:
         finalized: dict[str, dict[str, float]] = {}
@@ -599,6 +601,7 @@ def build_run_summary(daily_reports: Sequence[Mapping[str, Any]], baseline_summa
         "llm_rpr_source_days": rpr_source_days,
         "llm_rpr_filtered_days": rpr_filtered_days,
         "min_hold_binding_pct_mean": _safe_mean(min_hold_binding_pcts) if min_hold_binding_pcts else 0.0,
+        "stale_context_bars": int(sum(stale_context_bars)),
     }
     cap_summary = {
         "policy": {

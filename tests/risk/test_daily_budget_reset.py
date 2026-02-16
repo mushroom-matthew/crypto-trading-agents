@@ -23,10 +23,8 @@ def _bt_stub() -> LLMStrategistBacktester:
     bt = LLMStrategistBacktester.__new__(LLMStrategistBacktester)  # type: ignore
     bt.daily_risk_budget_pct = 10.0
     bt.daily_risk_budget_state = {}
-    bt.active_risk_limits = type("Limits", (), {"max_position_risk_pct": 1.0})()
-    bt.sizing_targets = {}
     bt.latest_daily_summary = {"risk_budget": {"used_pct": 100.0}}
-    bt.initial_cash = 1000.0  # Required fallback for _risk_budget_allowance
+    bt.initial_cash = 1000.0
     return bt
 
 
@@ -46,8 +44,8 @@ def test_day_two_not_blocked_by_day_one_usage() -> None:
         "symbol_usage": defaultdict(float),
         "blocks": defaultdict(int),
     }
-    allowance = bt._risk_budget_allowance("2021-01-02", _Order())
-    assert allowance is not None and allowance > 0
+    remaining = bt._risk_budget_gate("2021-01-02", _Order())
+    assert remaining == 100.0
 
 
 def test_day_usage_blocks_when_budget_exhausted_same_day() -> None:
@@ -58,8 +56,8 @@ def test_day_usage_blocks_when_budget_exhausted_same_day() -> None:
         "symbol_usage": defaultdict(float),
         "blocks": defaultdict(int),
     }
-    allowance = bt._risk_budget_allowance("2021-01-02", _Order())
-    assert allowance is None
+    remaining = bt._risk_budget_gate("2021-01-02", _Order())
+    assert remaining is None
 
 
 def test_used_pct_monotone_and_bounded() -> None:

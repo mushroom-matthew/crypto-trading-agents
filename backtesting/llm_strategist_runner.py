@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from decimal import Decimal
@@ -12,6 +13,7 @@ import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Sequence, Literal
 
@@ -19,19 +21,18 @@ import pandas as pd
 
 from agents.analytics import (
     IndicatorWindowConfig,
-    PortfolioHistory,
     build_asset_state,
     build_market_structure_snapshot,
     compute_factor_loadings,
     compute_indicator_snapshot,
     precompute_indicator_frame,
     snapshot_from_frame,
-    compute_portfolio_state,
     scalper_config,
 )
 from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import LLMCostTracker, StrategyPlanProvider
 from agents.strategies.risk_engine import RiskEngine, RiskProfile
+from agents.strategies.rule_dsl import RuleEvaluator
 from agents.strategies.strategy_memory import build_strategy_memory
 from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, ConflictResolution, ExitBindingMode, Order, TriggerEngine
@@ -58,6 +59,8 @@ from services.strategist_plan_service import StrategistPlanService
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
 from tools import execution_tools
+from tools.performance_analysis import PerformanceAnalyzer
+from trading_core.rule_registry import allowed_identifiers
 from trading_core.trigger_compiler import (
     compile_plan,
     enforce_plan_quality,
@@ -76,6 +79,10 @@ from trading_core.trade_quality import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MARKET_STRUCTURE_RULE_PATTERN = re.compile(
+    r"\b(?:nearest_support|nearest_resistance|distance_to_support_pct|distance_to_resistance_pct|recent_tests|trend)\b"
+)
 
 
 def _json_default(value: Any) -> Any:
@@ -121,6 +128,41 @@ def _ensure_timestamp_index(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_index()
 
 
+@dataclass(frozen=True)
+class ExecutionModelSettings:
+    """Controls deterministic execution semantics for backtests."""
+
+    model: Literal["close", "next_open"] = "close"
+    stop_loss_atr_mult: float | None = None
+    take_profit_atr_mult: float | None = None
+    trail_atr_mult: float | None = None
+    trail_activation_r: float = 1.0
+    allow_same_bar_exit: bool = False
+
+
+@dataclass
+class PendingOrder:
+    order: Order
+    signal_ts: datetime
+
+
+@dataclass
+class PositionRiskState:
+    symbol: str
+    timeframe: str
+    entry_ts: datetime
+    entry_price: float
+    direction: Literal["long", "short"]
+    stop_distance: float | None = None
+    target_distance: float | None = None
+    trail_distance: float | None = None
+    trail_activation_r: float | None = None
+    stop_price: float | None = None
+    target_price: float | None = None
+    trail_price: float | None = None
+    trail_active: bool = False
+
+
 @dataclass
 class PortfolioTracker:
     initial_cash: float
@@ -134,6 +176,16 @@ class PortfolioTracker:
     equity_records: List[Dict[str, Any]] = field(default_factory=list)
     trade_log: List[Dict[str, Any]] = field(default_factory=list)
     fills: List[Dict[str, Any]] = field(default_factory=list)
+    last_reject_reason: str | None = field(default=None, init=False)
+    _equity_timestamps: List[datetime] = field(default_factory=list, init=False, repr=False)
+    _equity_values: List[float] = field(default_factory=list, init=False, repr=False)
+    _cash_values: List[float] = field(default_factory=list, init=False, repr=False)
+    _trade_pnl_timestamps: List[datetime] = field(default_factory=list, init=False, repr=False)
+    _trade_pnl_values: List[float] = field(default_factory=list, init=False, repr=False)
+    _state_version: int = field(default=0, init=False, repr=False)
+    _cached_state_version: int = field(default=-1, init=False, repr=False)
+    _cached_state_as_of: datetime | None = field(default=None, init=False, repr=False)
+    _cached_portfolio_state: PortfolioState | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.cash = self.initial_cash
@@ -172,6 +224,7 @@ class PortfolioTracker:
         symbol: str,
         pnl: float,
         timestamp: datetime,
+        quantity: float,
         reason: str | None = None,
         entry_reason: str | None = None,
         entry_timeframe: str | None = None,
@@ -188,12 +241,17 @@ class PortfolioTracker:
         learning_book: bool = False,
         experiment_id: str | None = None,
         experiment_variant: str | None = None,
+        stop_distance: float | None = None,
+        target_distance: float | None = None,
+        trail_distance: float | None = None,
+        trail_activation_r: float | None = None,
     ) -> None:
         self.trade_log.append(
             {
                 "timestamp": timestamp,
                 "symbol": symbol,
                 "pnl": pnl,
+                "quantity": quantity,
                 "reason": reason,
                 "entry_reason": entry_reason,
                 "entry_timeframe": entry_timeframe,
@@ -210,8 +268,16 @@ class PortfolioTracker:
                 "learning_book": learning_book,
                 "experiment_id": experiment_id,
                 "experiment_variant": experiment_variant,
+                "stop_distance": stop_distance,
+                "target_distance": target_distance,
+                "trail_distance": trail_distance,
+                "trail_activation_r": trail_activation_r,
             }
         )
+        ts = self._normalize_timestamp(timestamp)
+        self._trade_pnl_timestamps.append(ts)
+        self._trade_pnl_values.append(float(pnl))
+        self._state_version += 1
 
     def _normalize_timestamp(self, timestamp: datetime) -> datetime:
         if isinstance(timestamp, pd.Timestamp):
@@ -258,6 +324,10 @@ class PortfolioTracker:
         learning_book: bool = False,
         experiment_id: str | None = None,
         experiment_variant: str | None = None,
+        stop_distance: float | None = None,
+        target_distance: float | None = None,
+        trail_distance: float | None = None,
+        trail_activation_r: float | None = None,
     ) -> None:
         position = self.positions.get(symbol, 0.0)
         avg_price = self.avg_entry_price.get(symbol, price)
@@ -284,6 +354,10 @@ class PortfolioTracker:
                     "learning_book": learning_book,
                     "experiment_id": experiment_id,
                     "experiment_variant": experiment_variant,
+                    "stop_distance": stop_distance,
+                    "target_distance": target_distance,
+                    "trail_distance": trail_distance,
+                    "trail_activation_r": trail_activation_r,
                 }
             return
         closing_qty = min(abs(position), abs(delta_qty))
@@ -311,6 +385,7 @@ class PortfolioTracker:
                 symbol,
                 pnl,
                 timestamp,
+                closing_qty,
                 reason,
                 entry_reason=meta.get("reason"),
                 entry_timeframe=meta.get("timeframe"),
@@ -327,6 +402,10 @@ class PortfolioTracker:
                 learning_book=meta.get("learning_book", False),
                 experiment_id=meta.get("experiment_id"),
                 experiment_variant=meta.get("experiment_variant"),
+                stop_distance=meta.get("stop_distance"),
+                target_distance=meta.get("target_distance"),
+                trail_distance=meta.get("trail_distance"),
+                trail_activation_r=meta.get("trail_activation_r"),
             )
         remaining = position + delta_qty
         if abs(remaining) <= 1e-9:
@@ -348,19 +427,26 @@ class PortfolioTracker:
                 "learning_book": learning_book,
                 "experiment_id": experiment_id,
                 "experiment_variant": experiment_variant,
+                "stop_distance": stop_distance,
+                "target_distance": target_distance,
+                "trail_distance": trail_distance,
+                "trail_activation_r": trail_activation_r,
             }
 
-    def execute(self, order: Order, market_structure_entry: Dict[str, Any] | None = None) -> None:
+    def execute(self, order: Order, market_structure_entry: Dict[str, Any] | None = None) -> bool:
+        self.last_reject_reason = None
         qty = max(order.quantity, 0.0)
         if qty <= 0:
-            return
+            self.last_reject_reason = "invalid_qty"
+            return False
         timestamp = self._normalize_timestamp(order.timestamp)
         notional = qty * order.price
         fee = notional * self.fee_rate
         if order.side == "buy":
             total_cost = notional + fee
             if total_cost > self.cash and self.positions.get(order.symbol, 0.0) >= 0:
-                return
+                self.last_reject_reason = "insufficient_cash_fee"
+                return False
             self.cash -= total_cost
             delta = qty
         else:
@@ -393,6 +479,10 @@ class PortfolioTracker:
             learning_book=order.learning_book,
             experiment_id=order.experiment_id,
             experiment_variant=order.experiment_variant,
+            stop_distance=order.stop_distance,
+            target_distance=order.target_distance,
+            trail_distance=order.trail_distance,
+            trail_activation_r=order.trail_activation_r,
         )
 
         self.fills.append(
@@ -416,22 +506,103 @@ class PortfolioTracker:
                 "exit_fraction": order.exit_fraction,
             }
         )
+        self._state_version += 1
+        return True
 
     def mark_to_market(self, timestamp: datetime, price_map: Mapping[str, float]) -> None:
+        timestamp = self._normalize_timestamp(timestamp)
         equity = self.cash
         for symbol, qty in self.positions.items():
             price = price_map.get(symbol)
             if price is not None:
                 equity += qty * price
-        self.equity_records.append({"timestamp": timestamp, "equity": equity, "cash": self.cash})
+        equity = float(equity)
+        cash = float(self.cash)
+        self.equity_records.append({"timestamp": timestamp, "equity": equity, "cash": cash})
+        self._equity_timestamps.append(timestamp)
+        self._equity_values.append(equity)
+        self._cash_values.append(cash)
+        self._state_version += 1
 
     def portfolio_state(self, timestamp: datetime) -> PortfolioState:
-        if not self.equity_records:
-            self.mark_to_market(timestamp, {})
-        equity_df = pd.DataFrame(self.equity_records)
-        trade_df = pd.DataFrame(self.trade_log) if self.trade_log else pd.DataFrame(columns=["timestamp", "symbol", "pnl"])
-        history = PortfolioHistory(equity_curve=equity_df, trade_log=trade_df)
-        return compute_portfolio_state(history, timestamp, self.positions)
+        as_of = self._normalize_timestamp(timestamp)
+        if not self._equity_timestamps:
+            self.mark_to_market(as_of, {})
+        if (
+            self._cached_portfolio_state is not None
+            and self._cached_state_version == self._state_version
+            and self._cached_state_as_of == as_of
+        ):
+            return self._cached_portfolio_state
+
+        end_idx = bisect_right(self._equity_timestamps, as_of)
+        if end_idx <= 0:
+            raise ValueError("equity history missing data for as_of timestamp")
+
+        last_equity = self._equity_values[end_idx - 1]
+        last_cash = self._cash_values[end_idx - 1]
+        last_ts = self._equity_timestamps[end_idx - 1]
+        start_7d = as_of - timedelta(days=7)
+        start_30d = as_of - timedelta(days=30)
+        start_90d = as_of - timedelta(days=90)
+
+        idx_7d = bisect_left(self._equity_timestamps, start_7d, 0, end_idx)
+        idx_30d = bisect_left(self._equity_timestamps, start_30d, 0, end_idx)
+        idx_90d = bisect_left(self._equity_timestamps, start_90d, 0, end_idx)
+
+        realized_pnl_7d = float(last_equity - self._equity_values[idx_7d]) if idx_7d < end_idx else 0.0
+        realized_pnl_30d = float(last_equity - self._equity_values[idx_30d]) if idx_30d < end_idx else 0.0
+
+        returns_window: List[float] = []
+        for i in range(1, end_idx):
+            if self._equity_timestamps[i] < start_30d:
+                continue
+            prev = self._equity_values[i - 1]
+            if prev != 0:
+                returns_window.append((self._equity_values[i] - prev) / prev)
+
+        analyzer = PerformanceAnalyzer()
+        sharpe = analyzer.calculate_sharpe_ratio(returns_window) if returns_window else 0.0
+        dd_window = self._equity_values[idx_90d:end_idx]
+        max_drawdown = analyzer.calculate_max_drawdown(dd_window) if dd_window else 0.0
+
+        trade_start = bisect_left(self._trade_pnl_timestamps, start_30d)
+        wins = 0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        total = 0
+        for event_idx in range(trade_start, len(self._trade_pnl_timestamps)):
+            trade_ts = self._trade_pnl_timestamps[event_idx]
+            pnl = self._trade_pnl_values[event_idx]
+            if trade_ts > as_of:
+                break
+            if pnl > 0.01:
+                wins += 1
+                total += 1
+                gross_profit += pnl
+            elif pnl < -0.01:
+                total += 1
+                gross_loss += abs(pnl)
+
+        win_rate = (wins / total) if total else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+
+        state = PortfolioState(
+            timestamp=last_ts,
+            equity=float(last_equity),
+            cash=float(last_cash),
+            positions=dict(self.positions),
+            realized_pnl_7d=realized_pnl_7d,
+            realized_pnl_30d=realized_pnl_30d,
+            sharpe_30d=sharpe,
+            max_drawdown_90d=max_drawdown,
+            win_rate_30d=win_rate,
+            profit_factor_30d=profit_factor,
+        )
+        self._cached_portfolio_state = state
+        self._cached_state_as_of = as_of
+        self._cached_state_version = self._state_version
+        return state
 
 
 @dataclass
@@ -501,6 +672,9 @@ class LLMStrategistBacktester:
         use_judge_shim: bool = False,
         exit_binding_mode: ExitBindingMode = "category",
         conflicting_signal_policy: ConflictResolution = "reverse",
+        execution_settings: ExecutionModelSettings | None = None,
+        force_flatten_at_end: bool = False,
+        market_structure_refresh_bars: int = 4,
     ) -> None:
         if not pairs:
             raise ValueError("pairs must be provided")
@@ -616,6 +790,8 @@ class LLMStrategistBacktester:
         self.skipped_activity_by_day: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.replans_by_day: Dict[str, int] = defaultdict(int)
         self.no_change_replan_suppressed_by_day: Dict[str, int] = defaultdict(int)
+        self.stale_context_bars_by_day: Dict[str, int] = defaultdict(int)
+        self.stale_context_bars_total: int = 0
         self.current_day_key: str | None = None
         self.latest_daily_summary: Dict[str, Any] | None = None
         self.last_slot_report: Dict[str, Any] | None = None
@@ -629,6 +805,8 @@ class LLMStrategistBacktester:
         self.default_symbol_trigger_cap = 6
         self.latest_trigger_trim: Dict[str, int] = {}
         self.flatten_positions_daily = flatten_positions_daily
+        self.force_flatten_at_end = bool(force_flatten_at_end)
+        self.market_structure_refresh_bars = max(1, int(market_structure_refresh_bars))
         self.flattened_days: set[str] = set()
         self.flatten_notional_threshold = max(0.0, flatten_notional_threshold)
         self.flatten_session_boundary_hour = flatten_session_boundary_hour
@@ -674,6 +852,9 @@ class LLMStrategistBacktester:
         self.priority_skip_confidence_threshold = priority_skip_confidence_threshold
         self.exit_binding_mode = exit_binding_mode
         self.conflicting_signal_policy = conflicting_signal_policy
+        self.execution_settings = execution_settings or ExecutionModelSettings()
+        self.pending_orders: Dict[tuple[str, str], PendingOrder] = {}
+        self.position_risk_state: Dict[str, PositionRiskState] = {}
         if self.priority_skip_confidence_threshold is None and self.is_scalp_profile:
             self.priority_skip_confidence_threshold = "B"
 
@@ -1169,6 +1350,23 @@ class LLMStrategistBacktester:
             )
         return summaries
 
+    def _rule_references_market_structure(self, rule: str | None) -> bool:
+        if not rule or not isinstance(rule, str):
+            return False
+        return bool(_MARKET_STRUCTURE_RULE_PATTERN.search(rule) or ("market_structure" in rule))
+
+    def _plan_references_market_structure(self, plan: StrategyPlan | None) -> bool:
+        if not plan:
+            return False
+        for trigger in plan.triggers:
+            if self._rule_references_market_structure(trigger.entry_rule):
+                return True
+            if self._rule_references_market_structure(trigger.exit_rule):
+                return True
+            if self._rule_references_market_structure(trigger.hold_rule):
+                return True
+        return False
+
     def _llm_input(
         self,
         timestamp: datetime,
@@ -1382,6 +1580,528 @@ class LLMStrategistBacktester:
             close=float(row["close"]),
             volume=float(row.get("volume", 0.0)),
         )
+
+    def _use_next_open_execution(self) -> bool:
+        return self.execution_settings.model == "next_open"
+
+    def _stop_distance_resolver(
+        self,
+        trigger: TriggerCondition,
+        indicator: IndicatorSnapshot,
+        bar: Bar,
+    ) -> float | None:
+        if not self._use_next_open_execution():
+            return None
+        mult = self.execution_settings.stop_loss_atr_mult
+        if mult is None:
+            return None
+        atr = indicator.atr_14
+        if atr is None or atr <= 0:
+            return None
+        return atr * mult
+
+    def _queue_orders_for_next_open(
+        self,
+        orders: List[Order],
+        signal_ts: datetime,
+        indicator: IndicatorSnapshot,
+    ) -> None:
+        if not orders:
+            return
+        atr = indicator.atr_14
+        for order in orders:
+            updated_order = order
+            if order.intent in {"entry", "conflict_reverse"}:
+                stop_distance = order.stop_distance
+                target_distance = order.target_distance
+                trail_distance = order.trail_distance
+                trail_activation_r = order.trail_activation_r
+                if order.stop_distance is None and self.execution_settings.stop_loss_atr_mult is not None:
+                    if atr is None or atr <= 0:
+                        continue
+                    stop_distance = atr * self.execution_settings.stop_loss_atr_mult
+                if self.execution_settings.take_profit_atr_mult is not None:
+                    if atr is None or atr <= 0:
+                        continue
+                    target_distance = atr * self.execution_settings.take_profit_atr_mult
+                if self.execution_settings.trail_atr_mult is not None:
+                    if atr is None or atr <= 0:
+                        continue
+                    trail_distance = atr * self.execution_settings.trail_atr_mult
+                    trail_activation_r = self.execution_settings.trail_activation_r
+                updated_order = replace(
+                    order,
+                    stop_distance=stop_distance,
+                    target_distance=target_distance,
+                    trail_distance=trail_distance,
+                    trail_activation_r=trail_activation_r,
+                )
+            key = (order.symbol, order.timeframe)
+            self.pending_orders[key] = PendingOrder(order=updated_order, signal_ts=signal_ts)
+
+    def _process_pending_orders(
+        self,
+        run_id: str,
+        day_key: str,
+        bar: Bar,
+        portfolio_state: PortfolioState,
+        plan_payload: Dict[str, Any] | None,
+        compiled_payload: Dict[str, Any] | None,
+        market_structure: Mapping[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        if not self._use_next_open_execution():
+            return []
+        key = (bar.symbol, bar.timeframe)
+        pending = self.pending_orders.get(key)
+        if pending is None:
+            return []
+        if pending.signal_ts >= bar.timestamp:
+            return []
+        if bar.open is None or pd.isna(bar.open):
+            self.pending_orders.pop(key, None)
+            return []
+        order = pending.order
+        if order.intent in {"entry", "conflict_reverse"}:
+            current_qty = self.portfolio.positions.get(order.symbol, 0.0)
+            if abs(current_qty) > 1e-9:
+                blocked = [
+                    {
+                        "timestamp": bar.timestamp.isoformat(),
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "price": bar.open,
+                        "quantity": order.quantity,
+                        "timeframe": bar.timeframe,
+                        "trigger_id": order.reason,
+                        "reason": "pending_entry_conflict",
+                        "detail": "Pending entry skipped: position already open",
+                    }
+                ]
+                self._process_orders_with_limits(
+                    run_id,
+                    day_key,
+                    [],
+                    portfolio_state,
+                    plan_payload,
+                    compiled_payload,
+                    blocked_entries=blocked,
+                    market_structure=market_structure,
+                )
+                self.pending_orders.pop(key, None)
+                return []
+        order = replace(order, price=bar.open, timestamp=bar.timestamp)
+        executed = self._execute_with_enrichment(
+            run_id,
+            day_key,
+            [order],
+            portfolio_state,
+            plan_payload,
+            compiled_payload,
+            current_load=1,
+            market_structure=market_structure,
+        )
+        self.pending_orders.pop(key, None)
+        return executed
+
+    def _execute_with_enrichment(
+        self,
+        run_id: str,
+        day_key: str,
+        orders: List[Order],
+        portfolio_state: PortfolioState,
+        plan_payload: Dict[str, Any] | None,
+        compiled_payload: Dict[str, Any] | None,
+        *,
+        blocked_entries: List[dict] | None = None,
+        current_load: int = 0,
+        market_structure: Mapping[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        fills_before = len(self.portfolio.fills)
+        executed_records = self._process_orders_with_limits(
+            run_id,
+            day_key,
+            orders,
+            portfolio_state,
+            plan_payload,
+            compiled_payload,
+            blocked_entries,
+            current_load=current_load,
+            market_structure=market_structure,
+        )
+        fills_after = len(self.portfolio.fills)
+        new_fill_count = fills_after - fills_before
+        if new_fill_count > 0 and executed_records:
+            for i, rec in enumerate(executed_records):
+                fill_idx = fills_before + i
+                if fill_idx < fills_after:
+                    fill = self.portfolio.fills[fill_idx]
+                    fill["risk_used"] = rec.get("risk_used")
+                    fill["allocated_risk_abs"] = rec.get("allocated_risk_abs")
+                    fill["actual_risk_at_stop"] = rec.get("actual_risk_at_stop")
+                    fill["stop_distance"] = rec.get("stop_distance")
+                    fill["profile_multiplier"] = rec.get("profile_multiplier")
+        if new_fill_count > 0:
+            for _ in range(new_fill_count):
+                self._on_trade_executed(portfolio_state.timestamp)
+        return executed_records
+
+    def _compute_strategy_metrics(self, equity_curve: pd.Series) -> Dict[str, Any]:
+        trades = list(self.portfolio.trade_log or [])
+        if not trades:
+            return {
+                "trade_count": 0,
+                "win_rate": 0.0,
+                "avg_win": 0.0,
+                "avg_loss": 0.0,
+                "profit_factor": 0.0,
+                "expectancy_r": 0.0,
+                "expectancy_r_mean": 0.0,
+                "expectancy_r_gross": 0.0,
+                "estimated_fees_abs": 0.0,
+                "total_risk_abs": 0.0,
+                "trades_per_month": 0.0,
+                "max_drawdown_pct": 0.0,
+                "exposure_time_pct": 0.0,
+                "avg_hold_hours": 0.0,
+                "median_hold_hours": 0.0,
+                "max_hold_hours_observed": 0.0,
+                "avg_hold_bars": 0.0,
+                "median_hold_bars": 0.0,
+                "max_hold_bars_observed": 0.0,
+                "regime_buckets": {},
+            }
+
+        wins: List[float] = []
+        losses: List[float] = []
+        r_values: List[float] = []
+        gross_r_values: List[float] = []
+        exposure_seconds = 0.0
+        hold_hours_list: List[float] = []
+        hold_bars_list: List[float] = []
+        estimated_fees_abs = 0.0
+        total_net_pnl = 0.0
+        total_risk_abs = 0.0
+        start_ts = self.start
+        end_ts = self.end
+
+        for trade in trades:
+            pnl_gross = float(trade.get("pnl", 0.0) or 0.0)
+            qty_val = trade.get("quantity")
+            entry_price = trade.get("entry_price")
+            exit_price = trade.get("exit_price")
+            fee_est = 0.0
+            if qty_val is not None and entry_price is not None and exit_price is not None:
+                try:
+                    fee_est = self.fee_rate * float(qty_val) * (abs(float(entry_price)) + abs(float(exit_price)))
+                except (TypeError, ValueError):
+                    fee_est = 0.0
+            estimated_fees_abs += fee_est
+            pnl = pnl_gross - fee_est
+            total_net_pnl += pnl
+            if pnl >= 0:
+                wins.append(pnl)
+            else:
+                losses.append(abs(pnl))
+            stop_distance = trade.get("stop_distance")
+            qty = trade.get("quantity")
+            if stop_distance is not None and qty is not None:
+                try:
+                    risk = float(stop_distance) * float(qty)
+                except (TypeError, ValueError):
+                    risk = 0.0
+                if risk > 0:
+                    total_risk_abs += risk
+                    r_values.append(pnl / risk)
+                    gross_r_values.append(pnl_gross / risk)
+
+            entry_ts = trade.get("entry_timestamp")
+            exit_ts = trade.get("timestamp")
+            entry_dt = self._coerce_timestamp(entry_ts)
+            exit_dt = self._coerce_timestamp(exit_ts)
+            if entry_dt and exit_dt and exit_dt > entry_dt:
+                hold_seconds = (exit_dt - entry_dt).total_seconds()
+                exposure_seconds += hold_seconds
+                hold_hours = hold_seconds / 3600.0
+                hold_hours_list.append(hold_hours)
+                if self.base_timeframe_seconds > 0:
+                    hold_bars_list.append(hold_seconds / self.base_timeframe_seconds)
+
+        total_trades = len(trades)
+        win_rate = (len(wins) / total_trades) if total_trades else 0.0
+        avg_win = sum(wins) / len(wins) if wins else 0.0
+        avg_loss = sum(losses) / len(losses) if losses else 0.0
+        profit_factor = (sum(wins) / sum(losses)) if losses and sum(losses) > 0 else (float("inf") if wins else 0.0)
+        avg_win_loss_ratio = (avg_win / avg_loss) if avg_loss else (float("inf") if avg_win else 0.0)
+        expectancy_r_mean = sum(r_values) / len(r_values) if r_values else 0.0
+        expectancy_r_weighted = (total_net_pnl / total_risk_abs) if total_risk_abs > 0 else 0.0
+        expectancy_r_gross = sum(gross_r_values) / len(gross_r_values) if gross_r_values else 0.0
+
+        months = 1.0
+        if start_ts and end_ts and end_ts > start_ts:
+            months = max(1.0, (end_ts - start_ts).days / 30.0)
+        trades_per_month = total_trades / months
+
+        max_drawdown_pct = 0.0
+        if not equity_curve.empty:
+            peak = equity_curve.iloc[0]
+            max_dd = 0.0
+            for val in equity_curve:
+                if val > peak:
+                    peak = val
+                drawdown = (peak - val) / peak if peak > 0 else 0.0
+                if drawdown > max_dd:
+                    max_dd = drawdown
+            max_drawdown_pct = max_dd * 100.0
+
+        exposure_time_pct = 0.0
+        if start_ts and end_ts and end_ts > start_ts:
+            total_seconds = (end_ts - start_ts).total_seconds()
+            if total_seconds > 0:
+                exposure_time_pct = exposure_seconds / total_seconds * 100.0
+
+        avg_hold_hours = sum(hold_hours_list) / len(hold_hours_list) if hold_hours_list else 0.0
+        median_hold_hours = 0.0
+        if hold_hours_list:
+            sorted_h = sorted(hold_hours_list)
+            mid = len(sorted_h) // 2
+            if len(sorted_h) % 2 == 0:
+                median_hold_hours = (sorted_h[mid - 1] + sorted_h[mid]) / 2.0
+            else:
+                median_hold_hours = sorted_h[mid]
+        max_hold_hours_observed = max(hold_hours_list) if hold_hours_list else 0.0
+
+        avg_hold_bars = sum(hold_bars_list) / len(hold_bars_list) if hold_bars_list else 0.0
+        median_hold_bars = 0.0
+        if hold_bars_list:
+            sorted_b = sorted(hold_bars_list)
+            mid_b = len(sorted_b) // 2
+            if len(sorted_b) % 2 == 0:
+                median_hold_bars = (sorted_b[mid_b - 1] + sorted_b[mid_b]) / 2.0
+            else:
+                median_hold_bars = sorted_b[mid_b]
+        max_hold_bars_observed = max(hold_bars_list) if hold_bars_list else 0.0
+
+        regime_buckets: Dict[str, Dict[str, Any]] = {}
+        for trade in trades:
+            symbol = trade.get("symbol")
+            entry_ts = self._coerce_timestamp(trade.get("entry_timestamp"))
+            if not symbol or entry_ts is None:
+                continue
+            snapshot = self._indicator_snapshot(symbol, "4h", entry_ts)
+            if snapshot is None:
+                continue
+            asset_state = build_asset_state(symbol, [snapshot])
+            bucket = f"{asset_state.trend_state}|{asset_state.vol_state}"
+            bucket_entry = regime_buckets.setdefault(
+                bucket,
+                {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "r_sum": 0.0, "r_count": 0},
+            )
+            pnl_gross = float(trade.get("pnl", 0.0) or 0.0)
+            qty_val = trade.get("quantity")
+            entry_price = trade.get("entry_price")
+            exit_price = trade.get("exit_price")
+            fee_est = 0.0
+            if qty_val is not None and entry_price is not None and exit_price is not None:
+                try:
+                    fee_est = self.fee_rate * float(qty_val) * (abs(float(entry_price)) + abs(float(exit_price)))
+                except (TypeError, ValueError):
+                    fee_est = 0.0
+            pnl = pnl_gross - fee_est
+            bucket_entry["trades"] += 1
+            bucket_entry["pnl"] += pnl
+            if pnl >= 0:
+                bucket_entry["wins"] += 1
+            else:
+                bucket_entry["losses"] += 1
+            stop_distance = trade.get("stop_distance")
+            qty = trade.get("quantity")
+            if stop_distance is not None and qty is not None:
+                try:
+                    risk = float(stop_distance) * float(qty)
+                except (TypeError, ValueError):
+                    risk = 0.0
+                if risk > 0:
+                    bucket_entry["r_sum"] += pnl / risk
+                    bucket_entry["r_count"] += 1
+
+        for payload in regime_buckets.values():
+            trades_count = payload["trades"]
+            payload["win_rate"] = (payload["wins"] / trades_count) if trades_count else 0.0
+            payload["expectancy_r"] = (payload["r_sum"] / payload["r_count"]) if payload["r_count"] else 0.0
+            payload.pop("r_sum", None)
+            payload.pop("r_count", None)
+
+        return {
+            "trade_count": total_trades,
+            "win_rate": win_rate,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "avg_win_loss_ratio": avg_win_loss_ratio,
+            "profit_factor": profit_factor,
+            "expectancy_r": expectancy_r_weighted,
+            "expectancy_r_mean": expectancy_r_mean,
+            "expectancy_r_gross": expectancy_r_gross,
+            "estimated_fees_abs": estimated_fees_abs,
+            "total_risk_abs": total_risk_abs,
+            "trades_per_month": trades_per_month,
+            "max_drawdown_pct": max_drawdown_pct,
+            "exposure_time_pct": exposure_time_pct,
+            "avg_hold_hours": avg_hold_hours,
+            "median_hold_hours": median_hold_hours,
+            "max_hold_hours_observed": max_hold_hours_observed,
+            "avg_hold_bars": avg_hold_bars,
+            "median_hold_bars": median_hold_bars,
+            "max_hold_bars_observed": max_hold_bars_observed,
+            "regime_buckets": regime_buckets,
+        }
+
+    def _update_trailing_state(self, state: PositionRiskState, bar: Bar) -> None:
+        if state.trail_distance is None or state.stop_distance is None:
+            return
+        activation_r = state.trail_activation_r or self.execution_settings.trail_activation_r
+        if state.direction == "long":
+            activation_price = state.entry_price + activation_r * state.stop_distance
+            if not state.trail_active and bar.high >= activation_price:
+                state.trail_active = True
+                state.trail_price = bar.high - state.trail_distance
+            if state.trail_active:
+                candidate = bar.high - state.trail_distance
+                if state.trail_price is None or candidate > state.trail_price:
+                    state.trail_price = candidate
+        else:
+            activation_price = state.entry_price - activation_r * state.stop_distance
+            if not state.trail_active and bar.low <= activation_price:
+                state.trail_active = True
+                state.trail_price = bar.low + state.trail_distance
+            if state.trail_active:
+                candidate = bar.low + state.trail_distance
+                if state.trail_price is None or candidate < state.trail_price:
+                    state.trail_price = candidate
+
+    def _select_exit_price(self, state: PositionRiskState, bar: Bar) -> tuple[float, str] | None:
+        candidates: List[tuple[str, float]] = []
+        if state.direction == "long":
+            if state.stop_price is not None and bar.open <= state.stop_price:
+                candidates.append(("stop_gap", bar.open))
+            if state.stop_price is not None and bar.low <= state.stop_price:
+                candidates.append(("stop", state.stop_price))
+            if state.trail_active and state.trail_price is not None and bar.low <= state.trail_price:
+                candidates.append(("trail", state.trail_price))
+            if state.target_price is not None and bar.high >= state.target_price:
+                candidates.append(("target", state.target_price))
+            if not candidates:
+                return None
+            price = min(price for _, price in candidates)
+        else:
+            if state.stop_price is not None and bar.open >= state.stop_price:
+                candidates.append(("stop_gap", bar.open))
+            if state.stop_price is not None and bar.high >= state.stop_price:
+                candidates.append(("stop", state.stop_price))
+            if state.trail_active and state.trail_price is not None and bar.high >= state.trail_price:
+                candidates.append(("trail", state.trail_price))
+            if state.target_price is not None and bar.low <= state.target_price:
+                candidates.append(("target", state.target_price))
+            if not candidates:
+                return None
+            price = max(price for _, price in candidates)
+
+        reason = None
+        for label, candidate in candidates:
+            if abs(candidate - price) <= 1e-9:
+                reason = label
+                break
+        return price, (reason or "exit")
+
+    def _intrabar_exit_orders(self, bar: Bar) -> List[Order]:
+        if not self._use_next_open_execution():
+            return []
+        if bar.timeframe != self.base_timeframe:
+            return []
+        state = self.position_risk_state.get(bar.symbol)
+        if not state:
+            return []
+        current_qty = self.portfolio.positions.get(bar.symbol, 0.0)
+        if abs(current_qty) <= 1e-9:
+            self.position_risk_state.pop(bar.symbol, None)
+            return []
+        if not self.execution_settings.allow_same_bar_exit and bar.timestamp == state.entry_ts:
+            return []
+        self._update_trailing_state(state, bar)
+        decision = self._select_exit_price(state, bar)
+        if decision is None:
+            return []
+        price, reason = decision
+        side: Literal["buy", "sell"] = "sell" if current_qty > 0 else "buy"
+        return [
+            Order(
+                symbol=bar.symbol,
+                side=side,
+                quantity=abs(current_qty),
+                price=price,
+                timeframe=bar.timeframe,
+                reason=f"vftp_{reason}",
+                timestamp=bar.timestamp,
+                intent="exit",
+            )
+        ]
+
+    def _update_position_risk_state(self, order: Order, pre_qty: float, post_qty: float) -> None:
+        if not self._use_next_open_execution():
+            return
+        def _sign(qty: float) -> int:
+            if qty > 1e-9:
+                return 1
+            if qty < -1e-9:
+                return -1
+            return 0
+
+        pre_sign = _sign(pre_qty)
+        post_sign = _sign(post_qty)
+        symbol = order.symbol
+
+        if pre_sign != 0 and post_sign == 0:
+            self.position_risk_state.pop(symbol, None)
+            return
+
+        if post_sign == 0:
+            return
+
+        if pre_sign == 0 or pre_sign != post_sign:
+            direction: Literal["long", "short"] = "long" if post_sign > 0 else "short"
+            stop_distance = order.stop_distance
+            target_distance = order.target_distance
+            trail_distance = order.trail_distance
+            trail_activation_r = order.trail_activation_r or self.execution_settings.trail_activation_r
+            stop_price = None
+            target_price = None
+            if stop_distance is not None:
+                stop_price = order.price - stop_distance if direction == "long" else order.price + stop_distance
+            if target_distance is not None:
+                target_price = order.price + target_distance if direction == "long" else order.price - target_distance
+            state = PositionRiskState(
+                symbol=symbol,
+                timeframe=order.timeframe,
+                entry_ts=order.timestamp,
+                entry_price=order.price,
+                direction=direction,
+                stop_distance=stop_distance,
+                target_distance=target_distance,
+                trail_distance=trail_distance,
+                trail_activation_r=trail_activation_r,
+                stop_price=stop_price,
+                target_price=target_price,
+            )
+            self.position_risk_state[symbol] = state
+            meta = self.portfolio.position_meta.get(symbol, {})
+            meta.update(
+                {
+                    "stop_distance": stop_distance,
+                    "target_distance": target_distance,
+                    "trail_distance": trail_distance,
+                    "trail_activation_r": trail_activation_r,
+                }
+            )
+            self.portfolio.position_meta[symbol] = meta
 
     def _coerce_timestamp(self, value: Any) -> datetime | None:
         if isinstance(value, datetime):
@@ -1672,10 +2392,12 @@ class LLMStrategistBacktester:
             "trigger_load",
             "min_hold",
             "min_flat",
+            "insufficient_cash_fee",
             "emergency_exit_veto_same_bar",
             "emergency_exit_veto_min_hold",
             "emergency_exit_missing_exit_rule",
             "emergency_exit_executed",
+            "pending_entry_conflict",
             # Runbook 35: previously mis-classified as "risk"
             "exit_binding_mismatch",
             "HOLD_RULE",
@@ -1910,8 +2632,8 @@ class LLMStrategistBacktester:
                     continue
                 risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
                 _record_hints(order)
-                allowance = self._risk_budget_allowance(day_key, order)
-                if allowance is None:
+                remaining_gate = self._risk_budget_gate(day_key, order)
+                if remaining_gate is None:
                     self._record_risk_budget_block(day_key, order.symbol)
                     _record_block_entry(
                         {
@@ -1930,19 +2652,42 @@ class LLMStrategistBacktester:
                     if plan_id:
                         execution_tools.engine.revert_trade(run_id, plan_id, order.timestamp, order.symbol, order.timeframe)
                     continue
-                self._commit_risk_budget(day_key, allowance, order.symbol)
-                limit_entry["trades_executed"] += 1
-                trigger_id = order.reason
-                risk_used = allowance or 0.0
-                actual_risk = None
-                if risk_snapshot:
-                    actual_risk = risk_snapshot.get("actual_risk_abs")
+                actual_risk = risk_snapshot.get("actual_risk_abs") if risk_snapshot else None
                 if actual_risk is None:
                     stop_dist = order.stop_distance or (risk_snapshot.get("stop_distance") if risk_snapshot else None)
                     if stop_dist is not None:
                         actual_risk = max(order.quantity * stop_dist, 0.0)
-                if actual_risk is None:
-                    actual_risk = risk_used
+                if actual_risk is None or actual_risk <= 0:
+                    actual_risk = risk_snapshot.get("allocated_risk_abs", 0.0) if risk_snapshot else 0.0
+                    if actual_risk <= 0:
+                        actual_risk = remaining_gate * 0.1
+                commit_amount = min(actual_risk, remaining_gate) if remaining_gate > 0 else actual_risk
+                structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
+                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
+                pre_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                filled = self.portfolio.execute(order, market_structure_entry=structure_snapshot)
+                post_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                if not filled:
+                    reject_reason = self.portfolio.last_reject_reason or "execution_rejected"
+                    _record_block_entry(
+                        {
+                            "timestamp": order.timestamp.isoformat(),
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "price": order.price,
+                            "quantity": order.quantity,
+                            "timeframe": order.timeframe,
+                            "trigger_id": order.reason,
+                            "reason": reject_reason,
+                            "detail": f"Portfolio rejected order: {reject_reason}",
+                        },
+                        "portfolio",
+                    )
+                    continue
+                self._commit_risk_budget(day_key, commit_amount, order.symbol)
+                limit_entry["trades_executed"] += 1
+                trigger_id = order.reason
+                risk_used = commit_amount or 0.0
                 # Runbook 14: default risk_used to actual_risk when budgets are off
                 if risk_used == 0.0 and actual_risk and actual_risk > 0:
                     risk_used = actual_risk
@@ -1973,11 +2718,7 @@ class LLMStrategistBacktester:
                 if session_window:
                     self.session_trade_counts[day_key][session_window] += 1
                 _record_execution_detail(order, "trigger_engine", risk_used=risk_used, latency_seconds=0.0)
-                structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
-                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
-                pre_qty = self.portfolio.positions.get(order.symbol, 0.0)
-                self.portfolio.execute(order, market_structure_entry=structure_snapshot)
-                post_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                self._update_position_risk_state(order, pre_qty, post_qty)
                 # Track fill in trigger engine for cooldown/hold period enforcement
                 is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
                 if self.current_trigger_engine:
@@ -2094,6 +2835,71 @@ class LLMStrategistBacktester:
             archetype = self._archetype_for_trigger(day_key, trigger_id)
             arche_load, arche_key = _archetype_state(archetype, order.timeframe, order.timestamp)
             events_payload = [{"trigger_id": trigger_id, "timestamp": timestamp}]
+            if order.intent == "exit":
+                limit_entry["trades_attempted"] += 1
+                latency_seconds = None
+                if plan_generated_at:
+                    latency_seconds = (order.timestamp - plan_generated_at).total_seconds()
+                structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
+                pre_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                filled = self.portfolio.execute(order, market_structure_entry=structure_snapshot)
+                post_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                if not filled:
+                    reject_reason = self.portfolio.last_reject_reason or "execution_rejected"
+                    _record_block_entry(
+                        {
+                            "timestamp": order.timestamp.isoformat(),
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "price": order.price,
+                            "quantity": order.quantity,
+                            "timeframe": order.timeframe,
+                            "trigger_id": order.reason,
+                            "reason": reject_reason,
+                            "detail": f"Portfolio rejected order: {reject_reason}",
+                        },
+                        "portfolio",
+                    )
+                    if plan_id:
+                        execution_tools.engine.revert_trade(run_id, plan_id, order.timestamp, order.symbol, order.timeframe)
+                    continue
+                limit_entry["trades_executed"] += 1
+                _record_execution_detail(order, "execution_engine", risk_used=0.0, latency_seconds=latency_seconds)
+                self._update_position_risk_state(order, pre_qty, post_qty)
+                if self.current_trigger_engine:
+                    self.current_trigger_engine.record_fill(order.symbol, False, order.timestamp)
+                if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
+                    self.last_flat_time_by_symbol[order.symbol] = order.timestamp
+                    self.last_flat_trigger_by_symbol[order.symbol] = _base_trigger_id(order.reason)
+                record = {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "price": order.price,
+                    "timeframe": order.timeframe,
+                    "reason": order.reason,
+                    "risk_used": 0.0,
+                    "latency_seconds": latency_seconds,
+                    "market_structure_entry": structure_snapshot,
+                }
+                executed_records.append(record)
+                self.trigger_activity_by_day[day_key][order.reason]["executed"] += 1
+                self._add_event("trade", {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "price": order.price,
+                    "trigger": order.reason,
+                })
+                logger.debug(
+                    "Executed exit order trigger=%s symbol=%s side=%s qty=%.6f price=%.2f",
+                    order.reason,
+                    order.symbol,
+                    order.side,
+                    order.quantity,
+                    order.price,
+                )
+                continue
             hold_detail = _min_hold_block(order)
             if hold_detail:
                 limit_entry["trades_attempted"] += 1
@@ -2224,8 +3030,8 @@ class LLMStrategistBacktester:
             if event and event.get("action") == "executed":
                 risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
                 _record_hints(order)
-                allowance = self._risk_budget_allowance(day_key, order)
-                if allowance is None:
+                remaining_gate = self._risk_budget_gate(day_key, order)
+                if remaining_gate is None:
                     self._record_risk_budget_block(day_key, order.symbol)
                     _record_block_entry(
                         {
@@ -2244,27 +3050,52 @@ class LLMStrategistBacktester:
                     if plan_id:
                         execution_tools.engine.revert_trade(run_id, plan_id, order.timestamp, order.symbol, order.timeframe)
                     continue
+                actual_risk = risk_snapshot.get("actual_risk_abs") if risk_snapshot else None
+                if actual_risk is None:
+                    stop_dist = order.stop_distance or (risk_snapshot.get("stop_distance") if risk_snapshot else None)
+                    if stop_dist is not None:
+                        actual_risk = max(order.quantity * stop_dist, 0.0)
+                if actual_risk is None or actual_risk <= 0:
+                    actual_risk = risk_snapshot.get("allocated_risk_abs", 0.0) if risk_snapshot else 0.0
+                    if actual_risk <= 0:
+                        actual_risk = remaining_gate * 0.1
                 load_scale = 1.0
                 if self.archetype_load_threshold > 0:
                     scale_start = max(1, int(self.archetype_load_threshold * self.archetype_load_scale_start))
                     if arche_load >= scale_start:
                         load_scale = max(0.25, 1 - (arche_load - scale_start) / max(1, (self.archetype_load_threshold - scale_start + 1)))
-                adjusted_allowance = allowance * load_scale
-                self._commit_risk_budget(day_key, adjusted_allowance, order.symbol)
-                limit_entry["trades_executed"] += 1
+                commit_amount = min(actual_risk, remaining_gate) if remaining_gate > 0 else actual_risk
+                commit_amount *= load_scale
                 latency_seconds = None
                 if plan_generated_at:
                     latency_seconds = (order.timestamp - plan_generated_at).total_seconds()
-                risk_used = adjusted_allowance or 0.0
-                actual_risk = None
-                if risk_snapshot:
-                    actual_risk = risk_snapshot.get("actual_risk_abs")
-                if actual_risk is None:
-                    stop_dist = order.stop_distance or (risk_snapshot.get("stop_distance") if risk_snapshot else None)
-                    if stop_dist is not None:
-                        actual_risk = max(order.quantity * stop_dist, 0.0)
-                if actual_risk is None:
-                    actual_risk = risk_used
+                structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
+                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
+                pre_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                filled = self.portfolio.execute(order, market_structure_entry=structure_snapshot)
+                post_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                if not filled:
+                    reject_reason = self.portfolio.last_reject_reason or "execution_rejected"
+                    _record_block_entry(
+                        {
+                            "timestamp": order.timestamp.isoformat(),
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "price": order.price,
+                            "quantity": order.quantity,
+                            "timeframe": order.timeframe,
+                            "trigger_id": order.reason,
+                            "reason": reject_reason,
+                            "detail": f"Portfolio rejected order: {reject_reason}",
+                        },
+                        "portfolio",
+                    )
+                    if plan_id:
+                        execution_tools.engine.revert_trade(run_id, plan_id, order.timestamp, order.symbol, order.timeframe)
+                    continue
+                self._commit_risk_budget(day_key, commit_amount, order.symbol)
+                limit_entry["trades_executed"] += 1
+                risk_used = commit_amount or 0.0
                 # Runbook 14: default risk_used to actual_risk when budgets are off
                 if risk_used == 0.0 and actual_risk and actual_risk > 0:
                     risk_used = actual_risk
@@ -2289,11 +3120,7 @@ class LLMStrategistBacktester:
                     self.session_trade_counts[day_key][session_window[0]] += 1
                 self.archetype_load_by_day[day_key][arche_key] = arche_load + 1
                 _record_execution_detail(order, "execution_engine", risk_used=risk_used, latency_seconds=latency_seconds)
-                structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
-                risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
-                pre_qty = self.portfolio.positions.get(order.symbol, 0.0)
-                self.portfolio.execute(order, market_structure_entry=structure_snapshot)
-                post_qty = self.portfolio.positions.get(order.symbol, 0.0)
+                self._update_position_risk_state(order, pre_qty, post_qty)
                 # Track fill in trigger engine for cooldown/hold period enforcement
                 is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
                 if self.current_trigger_engine:
@@ -2371,6 +3198,8 @@ class LLMStrategistBacktester:
             self.start,
             self.end,
         )
+        self.pending_orders.clear()
+        self.position_risk_state.clear()
         self._ensure_strategy_run(run_id)
         all_timestamps = sorted(
             {ts for pair in self.market_data.values() for df in pair.values() for ts in df.index if self.start <= ts <= self.end}
@@ -2392,8 +3221,12 @@ class LLMStrategistBacktester:
         daily_reports: List[Dict[str, Any]] = []
         self.sizing_targets = {}
         session_flattened: set[str] = set()
+        plan_market_structure_usage: Dict[str, bool] = {}
+        market_structure_cache: Dict[tuple[str, str], Dict[str, Any]] = {}
+        market_structure_last_refresh_idx: Dict[tuple[str, str], int] = {}
 
         active_assets: Dict[str, AssetState] = {}
+        active_assets_refreshed_ts: datetime | None = None
         cache_base = Path(self.plan_provider.cache_dir) / run_id
         daily_dir = cache_base / "daily_reports"
         daily_dir.mkdir(parents=True, exist_ok=True)
@@ -2401,6 +3234,10 @@ class LLMStrategistBacktester:
         self.bar_decisions_by_day.clear()
         self.trigger_activity_by_day.clear()
         self.skipped_activity_by_day.clear()
+        self.replans_by_day.clear()
+        self.no_change_replan_suppressed_by_day.clear()
+        self.stale_context_bars_by_day.clear()
+        self.stale_context_bars_total = 0
         self.limit_enforcement_by_day.clear()
         self.plan_limits_by_day.clear()
         self.flattened_days.clear()
@@ -2422,6 +3259,13 @@ class LLMStrategistBacktester:
             # Call progress callback every 50 candles or on significant events
             if self.progress_callback and self.candles_processed % 50 == 0:
                 self._report_progress()
+
+            # Keep indicator context fresh independent of replan cadence.
+            # Trigger/judge logic depends on these snapshots being current.
+            current_bar_asset_states = self._asset_states(ts)
+            if current_bar_asset_states:
+                active_assets = current_bar_asset_states
+                active_assets_refreshed_ts = ts
 
             day_key = ts.date().isoformat()
             if self.current_day_key and self.current_day_key != day_key:
@@ -2603,10 +3447,11 @@ class LLMStrategistBacktester:
                 )
 
             if new_plan_needed:
-                asset_states = self._asset_states(ts)
+                asset_states = current_bar_asset_states or self._asset_states(ts)
                 if not asset_states:
                     continue
                 active_assets = asset_states
+                active_assets_refreshed_ts = ts
                 self.latest_factor_exposures = self._factor_exposures(ts)
                 llm_input = self._llm_input(ts, asset_states, previous_plan=current_plan)
                 context_flags = {
@@ -2740,7 +3585,12 @@ class LLMStrategistBacktester:
                             run = self.run_registry.get_strategy_run(run_id)
                             run.current_plan_id = previous_plan.plan_id
                             self.run_registry.update_strategy_run(run)
-                            current_plan = previous_plan
+                            previous_generated_ts = getattr(previous_plan, "_plan_generated_at_ts", None)
+                            current_plan = previous_plan.model_copy(
+                                update={"generated_at": plan_start, "valid_until": plan_end}
+                            )
+                            if previous_generated_ts:
+                                object.__setattr__(current_plan, "_plan_generated_at_ts", previous_generated_ts)
                         plan_rebuild = False
                     # Only reset judge timing on initial plan or judge-triggered replan
                     # NOT on day-boundary replans (to avoid resetting the clock each day)
@@ -2751,6 +3601,12 @@ class LLMStrategistBacktester:
                         logger.info(
                             "Generated new plan at %s (initial=%s, judge_triggered=%s). Next judge at %s",
                             ts.isoformat(), is_initial_plan, judge_triggered_replan, self.next_judge_time.isoformat()
+                        )
+                    elif replan_suppressed:
+                        logger.info(
+                            "Replan suppressed at %s; keeping prior plan (generated_at=%s).",
+                            ts.isoformat(),
+                            current_plan.generated_at.isoformat() if current_plan else "unset",
                         )
                     else:
                         logger.info(
@@ -2824,16 +3680,21 @@ class LLMStrategistBacktester:
                         {rule.symbol: rule for rule in current_plan.sizing_rules},
                         daily_anchor_equity=self.daily_loss_anchor_by_day.get(day_key),
                         risk_profile=effective_risk_profile,
+                        fee_rate=self.fee_rate,
                     )
                     self.latest_risk_engine = risk_engine
                     # Collect samples from previous trigger engine before creating new one
                     if trigger_engine is not None and self.debug_trigger_sample_rate > 0:
                         samples = trigger_engine.get_evaluation_samples_summary()
                         self._append_trigger_evaluation_samples(samples)
+                    allowed_names = allowed_identifiers(self.timeframes)
+                    evaluator = RuleEvaluator(allowed_names=allowed_names)
                     trigger_engine = TriggerEngine(
                         current_plan,
                         risk_engine,
+                        evaluator=evaluator,
                         trade_risk=TradeRiskEvaluator(risk_engine),
+                        stop_distance_resolver=self._stop_distance_resolver if self._use_next_open_execution() else None,
                         confidence_override_threshold=self.confidence_override_threshold,
                         min_hold_bars=self.min_hold_bars if self.is_scalp_profile else 0,
                         debug_sample_rate=self.debug_trigger_sample_rate,
@@ -2992,6 +3853,20 @@ class LLMStrategistBacktester:
             if trigger_engine is None or current_plan is None:
                 continue
 
+            if active_assets_refreshed_ts != ts:
+                self.stale_context_bars_total += 1
+                self.stale_context_bars_by_day[day_key] += 1
+                logger.warning(
+                    "Stale asset context at %s (last_refresh=%s).",
+                    ts.isoformat(),
+                    active_assets_refreshed_ts.isoformat() if active_assets_refreshed_ts else None,
+                )
+
+            plan_uses_market_structure = plan_market_structure_usage.get(current_plan.plan_id)
+            if plan_uses_market_structure is None:
+                plan_uses_market_structure = self._plan_references_market_structure(current_plan)
+                plan_market_structure_usage[current_plan.plan_id] = plan_uses_market_structure
+
             slot_orders: List[Dict[str, Any]] = []
             market_structure_briefs: Dict[str, Any] = {}
             indicator_briefs = self._indicator_briefs(active_assets)
@@ -3009,6 +3884,11 @@ class LLMStrategistBacktester:
             self.portfolio.mark_to_market(ts, latest_prices)
 
             for pair in self.pairs:
+                if plan_uses_market_structure:
+                    cache_key = (pair, self.timeframes[0])
+                    cached = market_structure_cache.get(cache_key)
+                    if cached:
+                        market_structure_briefs[pair] = cached
                 for timeframe in self.timeframes:
                     df = self.market_data.get(pair, {}).get(timeframe)
                     if df is None or ts not in df.index:
@@ -3022,6 +3902,33 @@ class LLMStrategistBacktester:
                         symbol_debug[timeframe] = self._format_indicator_debug(indicator)
                     portfolio_state = self.portfolio.portfolio_state(ts)
                     asset_state = active_assets.get(pair)
+                    if self._use_next_open_execution():
+                        pending_records = self._process_pending_orders(
+                            run_id,
+                            day_key,
+                            bar,
+                            portfolio_state,
+                            current_plan_payload,
+                            current_compiled_payload,
+                            market_structure=market_structure_briefs,
+                        )
+                        if pending_records:
+                            slot_orders.extend(pending_records)
+                        exit_orders = self._intrabar_exit_orders(bar)
+                        if exit_orders:
+                            exit_records = self._execute_with_enrichment(
+                                run_id,
+                                day_key,
+                                exit_orders,
+                                portfolio_state,
+                                current_plan_payload,
+                                current_compiled_payload,
+                                current_load=len(exit_orders),
+                                market_structure=market_structure_briefs,
+                            )
+                            slot_orders.extend(exit_records)
+                        if pending_records or exit_orders:
+                            portfolio_state = self.portfolio.portfolio_state(ts)
                     logger.debug(
                         "Evaluating triggers ts=%s pair=%s timeframe=%s equity=%.2f cash=%.2f",
                         ts.isoformat(),
@@ -3060,52 +3967,70 @@ class LLMStrategistBacktester:
                         )
 
                     current_load = len(orders) + (len(blocked_entries) if blocked_entries else 0)
-                    fills_before = len(self.portfolio.fills)
-                    executed_records = self._process_orders_with_limits(
-                        run_id,
-                        day_key,
-                        orders,
-                        portfolio_state,
-                        current_plan_payload,
-                        current_compiled_payload,
-                        blocked_entries,
-                        current_load=current_load,
-                        market_structure=market_structure_briefs,
-                    )
-                    slot_orders.extend(executed_records)
-                    # Enrich portfolio fills with risk data from executed records
-                    fills_after = len(self.portfolio.fills)
-                    new_fill_count = fills_after - fills_before
-                    if new_fill_count > 0 and executed_records:
-                        for i, rec in enumerate(executed_records):
-                            fill_idx = fills_before + i
-                            if fill_idx < fills_after:
-                                fill = self.portfolio.fills[fill_idx]
-                                fill["risk_used"] = rec.get("risk_used")
-                                fill["allocated_risk_abs"] = rec.get("allocated_risk_abs")
-                                fill["actual_risk_at_stop"] = rec.get("actual_risk_at_stop")
-                                fill["stop_distance"] = rec.get("stop_distance")
-                                fill["profile_multiplier"] = rec.get("profile_multiplier")
-                    # Track trades for adaptive judge
-                    if new_fill_count > 0:
-                        for _ in range(new_fill_count):
-                            self._on_trade_executed(ts)
+                    if self._use_next_open_execution():
+                        if blocked_entries:
+                            self._execute_with_enrichment(
+                                run_id,
+                                day_key,
+                                [],
+                                portfolio_state,
+                                current_plan_payload,
+                                current_compiled_payload,
+                                blocked_entries=blocked_entries,
+                                current_load=current_load,
+                                market_structure=market_structure_briefs,
+                            )
+                        self._queue_orders_for_next_open(orders, ts, indicator)
+                        executed_records = []
+                    else:
+                        executed_records = self._execute_with_enrichment(
+                            run_id,
+                            day_key,
+                            orders,
+                            portfolio_state,
+                            current_plan_payload,
+                            current_compiled_payload,
+                            blocked_entries=blocked_entries,
+                            current_load=current_load,
+                            market_structure=market_structure_briefs,
+                        )
+                        slot_orders.extend(executed_records)
                     if timeframe == self.timeframes[0]:
                         latest_prices[pair] = bar.close
-                        try:
-                            subset = df[df.index <= ts]
-                            structure_snapshot = build_market_structure_snapshot(
-                                subset,
-                                symbol=pair,
-                                timeframe=timeframe,
-                                lookback=self.window_configs[timeframe].medium_window * 3,
-                                swing_window=2,
-                                tolerance_mult=0.75,
-                            )
-                            if structure_snapshot:
-                                market_structure_briefs[pair] = structure_snapshot.to_dict()
-                        except Exception as exc:  # pragma: no cover - defensive only
-                            logger.debug("Market structure snapshot failed for %s %s: %s", pair, timeframe, exc)
+                        if plan_uses_market_structure:
+                            try:
+                                cache_key = (pair, timeframe)
+                                lookback_bars = max(self.window_configs[timeframe].medium_window * 3, 50)
+                                ts_pos = int(df.index.get_indexer([ts])[0])
+                                if ts_pos < 0:
+                                    continue
+                                last_refresh_pos = market_structure_last_refresh_idx.get(cache_key)
+                                should_refresh = (
+                                    last_refresh_pos is None
+                                    or (ts_pos - last_refresh_pos) >= self.market_structure_refresh_bars
+                                    or cache_key not in market_structure_cache
+                                )
+                                if should_refresh:
+                                    window_start = max(0, ts_pos - lookback_bars + 1)
+                                    subset = df.iloc[window_start : ts_pos + 1]
+                                    structure_snapshot = build_market_structure_snapshot(
+                                        subset,
+                                        symbol=pair,
+                                        timeframe=timeframe,
+                                        lookback=lookback_bars,
+                                        swing_window=2,
+                                        tolerance_mult=0.75,
+                                    )
+                                    market_structure_last_refresh_idx[cache_key] = ts_pos
+                                    if structure_snapshot:
+                                        market_structure_cache[cache_key] = structure_snapshot.to_dict()
+                                    else:
+                                        market_structure_cache.pop(cache_key, None)
+                                cached = market_structure_cache.get(cache_key)
+                                if cached:
+                                    market_structure_briefs[pair] = cached
+                            except Exception as exc:  # pragma: no cover - defensive only
+                                logger.debug("Market structure snapshot failed for %s %s: %s", pair, timeframe, exc)
             if (
                 self.flatten_session_boundary_hour is not None
                 and ts.hour == self.flatten_session_boundary_hour
@@ -3131,9 +4056,20 @@ class LLMStrategistBacktester:
             self.last_slot_report = slot_report
 
         if self.current_day_key:
-            if self.flatten_positions_daily and self.last_slot_report:
+            if (self.flatten_positions_daily or self.force_flatten_at_end) and self.last_slot_report:
                 flatten_ts = datetime.fromisoformat(self.last_slot_report["timestamp"])
-                self._flatten_end_of_day(self.current_day_key, flatten_ts, latest_prices)
+                flatten_reason = (
+                    "window_end_flatten"
+                    if self.force_flatten_at_end and not self.flatten_positions_daily
+                    else "eod_flatten"
+                )
+                self._flatten_end_of_day(
+                    self.current_day_key,
+                    flatten_ts,
+                    latest_prices,
+                    force=self.force_flatten_at_end,
+                    reason=flatten_reason,
+                )
             summary = self._finalize_day(self.current_day_key, daily_dir, run_id)
             if summary:
                 self.latest_daily_summary = summary
@@ -3176,6 +4112,7 @@ class LLMStrategistBacktester:
         equity_return_pct = (final_equity / self.initial_cash - 1) * 100 if self.initial_cash else 0.0
         gross_trade_pnl = sum(float(entry.get("pnl", 0.0)) for entry in self.portfolio.trade_log)
         gross_trade_return_pct = (gross_trade_pnl / self.initial_cash * 100.0) if self.initial_cash else 0.0
+        strategy_metrics = self._compute_strategy_metrics(equity_curve)
         run_summary_path = cache_base / "run_summary.json"
         baseline_summary_path = None
         env_baseline_path = os.environ.get("BASELINE_SUMMARY_PATH")
@@ -3191,6 +4128,7 @@ class LLMStrategistBacktester:
                 if baseline_candidate.exists():
                     baseline_summary_path = baseline_candidate
         run_summary = write_run_summary(daily_reports, run_summary_path, baseline_summary_path=baseline_summary_path)
+        run_summary["stale_context_bars"] = int(self.stale_context_bars_total)
         # Aggregate stance distribution across all days
         total_stance_distribution = {"active": 0, "defensive": 0, "wait": 0}
         for day_stances in self.stance_distribution_by_day.values():
@@ -3202,6 +4140,7 @@ class LLMStrategistBacktester:
             "gross_trade_return_pct": gross_trade_return_pct,
             "return_pct": equity_return_pct,
             "run_summary": run_summary,
+            "stale_context_bars": int(self.stale_context_bars_total),
             # Walk-away tracking
             "walk_away_enabled": self.walk_away_enabled,
             "walk_away_events": self.walk_away_events,
@@ -3218,6 +4157,7 @@ class LLMStrategistBacktester:
             "policy_decision_records": self._policy_decision_records if self._policy_decision_records else None,
             "policy_decision_count": len(self._policy_decision_records),
             "policy_summary": self.policy_integration.get_decision_summary() if self.policy_integration else None,
+            "strategy_metrics": strategy_metrics,
         }
         # Serialize trade_log with datetime→isoformat conversion, excluding market_structure_entry to avoid bloat
         serialized_trade_log = []
@@ -3414,8 +4354,16 @@ class LLMStrategistBacktester:
         plan = self.plan_provider._enrich_plan(plan, llm_input=self._llm_input(plan.generated_at, self._asset_states(plan.generated_at)))  # type: ignore[arg-type]
         return plan
 
-    def _flatten_end_of_day(self, day_key: str, timestamp: datetime, price_map: Mapping[str, float]) -> None:
-        if not self.flatten_positions_daily or day_key in self.flattened_days:
+    def _flatten_end_of_day(
+        self,
+        day_key: str,
+        timestamp: datetime,
+        price_map: Mapping[str, float],
+        *,
+        force: bool = False,
+        reason: str = "eod_flatten",
+    ) -> None:
+        if ((not self.flatten_positions_daily) and (not force)) or day_key in self.flattened_days:
             return
         orders: List[Order] = []
         for symbol, qty in list(self.portfolio.positions.items()):
@@ -3434,12 +4382,17 @@ class LLMStrategistBacktester:
                 quantity=abs(qty),
                 price=price,
                 timeframe=self.timeframes[0],
-                reason="eod_flatten",
+                reason=reason,
                 timestamp=timestamp,
             )
-            self.portfolio.execute(order)
+            pre_qty = self.portfolio.positions.get(symbol, 0.0)
+            filled = self.portfolio.execute(order)
+            post_qty = self.portfolio.positions.get(symbol, 0.0)
+            if not filled:
+                continue
+            self._update_position_risk_state(order, pre_qty, post_qty)
             self.last_flat_time_by_symbol[symbol] = timestamp
-            self.last_flat_trigger_by_symbol[symbol] = "eod_flatten"
+            self.last_flat_trigger_by_symbol[symbol] = reason
             orders.append(order)
         if not orders:
             self.flattened_days.add(day_key)
@@ -3492,7 +4445,8 @@ class LLMStrategistBacktester:
             "slippage_adjustment": 0.0,
         }
 
-    def _risk_budget_allowance(self, day_key: str, order: Order) -> float | None:
+    def _risk_budget_gate(self, day_key: str, order: Order) -> float | None:
+        """Return remaining budget in currency, or None if exhausted. 0.0 = budget not configured."""
         pct = self.daily_risk_budget_pct or 0.0
         if pct <= 0:
             return 0.0
@@ -3505,24 +4459,10 @@ class LLMStrategistBacktester:
         notional = max(order.quantity * order.price, 0.0)
         if notional <= 0:
             return 0.0
-        target_risk_pct = (self.sizing_targets or {}).get(order.symbol)
-        if target_risk_pct is None:
-            target_risk_pct = self.active_risk_limits.max_position_risk_pct or 0.0
-        # Adaptive boost: based on same-day usage only (no cross-day carry-over).
-        prev_usage = (entry.get("used_abs", 0.0) / budget * 100.0) if budget > 0 else 100.0
-        adaptive_multiplier = 3.0 if prev_usage < 10.0 else 1.0
-        # Per-trade risk allowance expressed in currency, not double-scaled by notional.
-        base_equity = entry.get("start_equity", self.initial_cash)
-        per_trade_cap = max(target_risk_pct * adaptive_multiplier, 0.0) / 100.0
-        contribution = base_equity * per_trade_cap
-        if contribution <= 0:
-            return 0.0
-        used = entry.get("used_abs", 0.0)
-        remaining = budget - used
+        remaining = budget - entry.get("used_abs", 0.0)
         if remaining <= 0:
             return None
-        contribution = min(contribution, remaining)
-        return contribution
+        return remaining
 
     def _commit_risk_budget(self, day_key: str, contribution: float, symbol: str | None) -> None:
         if contribution <= 0:
@@ -3780,6 +4720,7 @@ class LLMStrategistBacktester:
         self.session_trade_counts.pop(day_key, None)
         self.archetype_load_by_day.pop(day_key, None)
         trigger_load_events = self.trigger_load_by_day.pop(day_key, [])
+        stale_context_bars = int(self.stale_context_bars_by_day.pop(day_key, 0))
         llm_meta_entries = self.llm_generation_by_day.pop(day_key, [])
         llm_failed_parse = any(entry.get("llm_failed_parse") for entry in llm_meta_entries)
         fallback_used = any(entry.get("fallback_plan_used") for entry in llm_meta_entries)
@@ -3833,6 +4774,7 @@ class LLMStrategistBacktester:
             "attempted_triggers": limit_entry["trades_attempted"],
             "executed_trades": limit_entry["trades_executed"],
             "flatten_positions_daily": self.flatten_positions_daily,
+            "force_flatten_at_end": self.force_flatten_at_end,
             "flatten_session_hour": self.flatten_session_boundary_hour,
             "flatten_policy": self.flatten_policy,
             "pnl_breakdown": pnl_breakdown,
@@ -3861,6 +4803,7 @@ class LLMStrategistBacktester:
             "llm_data_quality": llm_data_quality,
             "replan_rate_per_day": replans_count,
             "no_change_replan_suppressed_count": suppressed_replans,
+            "stale_context_bars": stale_context_bars,
             # Stance distribution for the day
             "stance_distribution": dict(self.stance_distribution_by_day.get(day_key, {})),
         }
@@ -5178,69 +6121,7 @@ class LLMStrategistBacktester:
         """
         snapshot = self._get_intraday_performance_snapshot(ts, day_key, latest_prices)
 
-        # Stale snapshot detection: skip evaluation if nothing changed
-        snapshot_key = (round(snapshot["equity"], 2), snapshot["trade_count"])
-        if snapshot_key == self.last_judge_snapshot_key:
-            self.consecutive_stale_skips += 1
-            self.stale_judge_evals_by_day[day_key] += 1
-            # Force trigger re-enablement after consecutive stale skips
-            force_reenable = (
-                self.consecutive_stale_skips >= self.stale_reenable_threshold
-                and self.active_judge_constraints is not None
-                and self.active_judge_constraints.disabled_trigger_ids
-                and (self.active_judge_action is None or self.active_judge_action.evals_remaining <= 0)
-            )
-            if force_reenable:
-                logger.info(
-                    "Stale snapshot re-enablement at %s: %d consecutive stale evals, clearing disabled_trigger_ids",
-                    ts.isoformat(), self.consecutive_stale_skips,
-                )
-                if self.active_judge_action and self.active_judge_action.evals_remaining <= 0:
-                    self.active_judge_action.status = "expired"
-                    self._persist_judge_action(run_id, self.active_judge_action)
-                self._add_event("stale_snapshot_reenable", {
-                    "consecutive_stale_skips": self.consecutive_stale_skips,
-                    "cleared_trigger_ids": list(self.active_judge_constraints.disabled_trigger_ids),
-                })
-                self.active_judge_constraints = self.active_judge_constraints.model_copy(
-                    update={"disabled_trigger_ids": []}
-                )
-                self._apply_intraday_engine_updates()
-                self.consecutive_stale_skips = 0
-            else:
-                self._add_event("stale_snapshot_skip", {
-                    "equity": snapshot_key[0],
-                    "trade_count": snapshot_key[1],
-                    "consecutive_stale_skips": self.consecutive_stale_skips,
-                })
-            logger.debug("Stale snapshot, skipping judge evaluation at %s", ts.isoformat())
-            # Advance next_judge_time so we don't re-trigger every bar
-            self.next_judge_time = ts + self.judge_cadence
-            self.stale_skip_count_since_last_real += 1
-            result = {
-                "timestamp": ts.isoformat(),
-                "score": None,
-                "should_replan": False,
-                "replan_reason": "stale_snapshot_reenable" if force_reenable else "stale_snapshot_skip",
-                "trigger_reason": trigger_reason,
-                "feedback": {},
-                "snapshot": snapshot,
-                "next_judge_time": (self.next_judge_time.isoformat() if self.next_judge_time else None),
-                "skipped": True,
-            }
-            # Only append the first stale skip per cadence window to avoid flooding history
-            if self.stale_skip_count_since_last_real <= 1:
-                self.intraday_judge_history.append(result)
-            self._add_event("intraday_judge", {
-                "score": None,
-                "should_replan": False,
-                "reason": result["replan_reason"],
-                "trigger_reason": trigger_reason,
-                "skipped": True,
-            })
-            return result
-        self.last_judge_snapshot_key = snapshot_key
-        self.consecutive_stale_skips = 0
+        # Stale snapshot skipping disabled: always run judge on cadence.
 
         # Compute deterministic trade quality metrics
         day_start = datetime(ts.year, ts.month, ts.day, tzinfo=ts.tzinfo)

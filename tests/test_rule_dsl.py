@@ -31,3 +31,9 @@ def test_rule_dsl_in_with_compound_expression():
     assert evaluator.evaluate("rsi_14 > 50 and vol_state in ['high', 'extreme']", context)
     context2 = {"rsi_14": 45.0, "vol_state": "extreme"}
     assert not evaluator.evaluate("rsi_14 > 50 and vol_state in ['high', 'extreme']", context2)
+
+
+def test_rule_dsl_supports_prev_high():
+    evaluator = RuleEvaluator()
+    context = {"close": 105.0, "prev_high": 100.0}
+    assert evaluator.evaluate("close > prev_high", context)

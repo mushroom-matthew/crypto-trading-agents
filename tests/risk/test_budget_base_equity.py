@@ -19,8 +19,6 @@ def _bt_stub(start_equity: float = 1000.0) -> LLMStrategistBacktester:
     bt = LLMStrategistBacktester.__new__(LLMStrategistBacktester)  # type: ignore
     bt.daily_risk_budget_pct = 10.0
     bt.daily_risk_budget_state = {}
-    bt.active_risk_limits = type("Limits", (), {"max_position_risk_pct": 1.0})()
-    bt.sizing_targets = {}
     bt.latest_daily_summary = None
     bt.initial_cash = start_equity
     bt.portfolio = type("PF", (), {"equity_records": [], "portfolio_state": lambda self, ts: None})()
@@ -40,9 +38,9 @@ def test_budget_abs_uses_start_of_day_equity() -> None:
 def test_first_trade_starts_at_zero_usage() -> None:
     bt = _bt_stub(start_equity=1000.0)
     bt._reset_risk_budget_for_day("2021-01-02", start_equity=1000.0)
-    allowance = bt._risk_budget_allowance(
+    remaining = bt._risk_budget_gate(
         "2021-01-02",
         Order(symbol="BTC", side="buy", quantity=1.0, price=10.0, timeframe="1h", reason="t", timestamp=datetime.utcnow()),
     )
-    assert allowance is not None
+    assert remaining is not None
     assert bt.daily_risk_budget_state["2021-01-02"]["used_abs"] == 0.0

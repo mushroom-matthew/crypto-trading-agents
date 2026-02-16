@@ -53,8 +53,26 @@ class CCXTAPILoader(MarketDataBackend):
         start = ensure_utc(start)
         end = ensure_utc(end)
         cached = self.cache.load(symbol, granularity) if self.cache else None
-        if cached is not None:
+        if cached is not None and not cached.empty:
             frame = cached
+            cached_start = frame.index.min()
+            cached_end = frame.index.max()
+            coverage_ok = cached_start <= start and cached_end >= end
+            if not coverage_ok:
+                logger.info(
+                    "cache coverage incomplete for %s %s (cached=%s->%s, requested=%s->%s); downloading window",
+                    symbol,
+                    granularity,
+                    cached_start,
+                    cached_end,
+                    start,
+                    end,
+                )
+                fetched = self._download(symbol, start, end, granularity)
+                frame = pd.concat([frame, fetched]).sort_index()
+                frame = frame[~frame.index.duplicated(keep="last")]
+                if self.cache:
+                    self.cache.store(symbol, granularity, frame)
         else:
             frame = self._download(symbol, start, end, granularity)
             if self.cache:
