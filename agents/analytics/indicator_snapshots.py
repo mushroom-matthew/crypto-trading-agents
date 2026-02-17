@@ -787,11 +787,11 @@ def _vol_from_snapshot(snapshot: IndicatorSnapshot) -> str:
     price = snapshot.close or 1.0
     atr_ratio = atr / price if price else 0.0
     vol_metric = max(atr_ratio, realized)
-    if vol_metric < 0.01:
+    if vol_metric < 0.015:
         return "low"
-    if vol_metric < 0.02:
+    if vol_metric < 0.03:
         return "normal"
-    if vol_metric < 0.05:
+    if vol_metric < 0.07:
         return "high"
     return "extreme"
 

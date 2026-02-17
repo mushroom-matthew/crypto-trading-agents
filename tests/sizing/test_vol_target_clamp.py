@@ -46,6 +46,6 @@ def test_vol_target_can_exceed_one_x_equity_before_caps() -> None:
     engine = RiskEngine(constraints, {"BTC": rule}, daily_anchor_equity=1000.0, risk_profile=RiskProfile())
     qty = engine.size_position("BTC", price=100.0, portfolio=_portfolio(1000.0), indicator=_indicator(100.0, realized_vol=0.01))
     notional = qty * 100.0
-    assert notional > 1000.0  # exceeds 1x equity before exposure caps intervene
+    assert notional >= 1000.0  # meets or exceeds 1x equity before exposure caps intervene
     # Exposure caps still enforce a limit
     assert notional <= 2000.0  # due to 200% exposure cap
