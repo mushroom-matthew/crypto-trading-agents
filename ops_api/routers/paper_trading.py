@@ -355,6 +355,26 @@ async def start_session(config: PaperTradingSessionConfig):
 
         # Start workflow
         client = await get_temporal_client()
+
+        # Ensure the shared execution ledger workflow is running
+        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+        from agents.workflows.execution_ledger_workflow import ExecutionLedgerWorkflow
+        from temporalio.service import RPCError, RPCStatusCode
+
+        ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+        try:
+            await ledger_handle.describe()
+        except RPCError as err:
+            if err.status == RPCStatusCode.NOT_FOUND:
+                await client.start_workflow(
+                    ExecutionLedgerWorkflow.run,
+                    id=MOCK_LEDGER_WORKFLOW_ID,
+                    task_queue=TASK_QUEUE,
+                )
+                logger.info("Started ledger workflow %s", MOCK_LEDGER_WORKFLOW_ID)
+            else:
+                raise
+
         await client.start_workflow(
             PaperTradingWorkflow.run,
             args=[workflow_config, None],  # config, resume_state

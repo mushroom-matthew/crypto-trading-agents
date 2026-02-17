@@ -27,6 +27,7 @@ BROKER_WF_ID = "broker-agent"
 EXECUTION_WF_ID = "execution-agent"
 JUDGE_WF_ID = "judge-agent"
 LEDGER_WF_ID = "mock-ledger"
+MOCK_LEDGER_WORKFLOW_ID = LEDGER_WF_ID
 
 # Nudge Schedule
 NUDGE_SCHEDULE_ID = "ensemble-nudge"
