@@ -24,6 +24,7 @@ from agents.analytics import (
     build_asset_state,
     build_market_structure_snapshot,
     compute_factor_loadings,
+    compute_htf_structural_fields,
     compute_indicator_snapshot,
     precompute_indicator_frame,
     snapshot_from_frame,
@@ -38,7 +39,7 @@ from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, ConflictResolution, ExitBindingMode, Order, TriggerEngine
 from agents.strategies.policy_trigger_integration import PolicyTriggerIntegration
 from schemas.policy import PolicyConfig, PolicyDecisionRecord, get_policy_config_from_plan
-from backtesting.dataset import load_ohlcv
+from backtesting.dataset import load_ohlcv, load_with_htf
 from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_transport
 from services.judge_feedback_service import JudgeFeedbackService
 from backtesting.reports import write_run_summary
@@ -707,6 +708,7 @@ class LLMStrategistBacktester:
             base_timeframes, derived_timeframes, self.timeframes
         )
 
+        self.daily_data: Dict[str, pd.DataFrame] = {}
         self.market_data = self._normalize_market_data(market_data) if market_data is not None else self._load_data()
         if (self.start is None or self.end is None) and self.market_data:
             timestamps = sorted({ts for tf_map in self.market_data.values() for df in tf_map.values() for ts in df.index})
@@ -1110,8 +1112,9 @@ class LLMStrategistBacktester:
         data: Dict[str, Dict[str, pd.DataFrame]] = {}
         base_timeframe = min(self.timeframes, key=self._timeframe_seconds)
         for pair in self.pairs:
-            base_df = load_ohlcv(pair, self.start, self.end, timeframe=base_timeframe)
+            base_df, daily_df = load_with_htf(pair, self.start, self.end, base_timeframe=base_timeframe)
             base_df = _ensure_timestamp_index(base_df)
+            self.daily_data[pair] = _ensure_timestamp_index(daily_df)
             tf_map: Dict[str, pd.DataFrame] = {}
             for timeframe in self.timeframes:
                 if timeframe == base_timeframe:
@@ -1132,10 +1135,20 @@ class LLMStrategistBacktester:
         return frames
 
     def _indicator_snapshot(self, symbol: str, timeframe: str, timestamp: datetime) -> IndicatorSnapshot | None:
+        daily_df = self.daily_data.get(symbol)
         frame = self.indicator_frames.get(symbol, {}).get(timeframe)
         if frame is not None:
             snapshot = snapshot_from_frame(frame, timestamp, symbol, timeframe)
             if snapshot is not None:
+                htf = compute_htf_structural_fields(timestamp, daily_df)
+                if htf:
+                    current_close = snapshot.close
+                    daily_atr_htf = htf.get("htf_daily_atr", 1.0) or 1.0
+                    daily_mid_htf = (
+                        htf.get("htf_daily_high", current_close) + htf.get("htf_daily_low", current_close)
+                    ) / 2.0
+                    htf["htf_price_vs_daily_mid"] = (current_close - daily_mid_htf) / max(daily_atr_htf, 1e-9)
+                    snapshot = snapshot.model_copy(update=htf)
                 return snapshot
         df = self.market_data.get(symbol, {}).get(timeframe)
         if df is None:
@@ -1143,7 +1156,13 @@ class LLMStrategistBacktester:
         subset = df[df.index <= timestamp]
         if subset.empty:
             return None
-        return compute_indicator_snapshot(subset, symbol=symbol, timeframe=timeframe, config=self.window_configs[timeframe])
+        return compute_indicator_snapshot(
+            subset,
+            symbol=symbol,
+            timeframe=timeframe,
+            config=self.window_configs[timeframe],
+            daily_df=daily_df,
+        )
 
     def _ensure_required_timeframes(self, tf_map: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         if all(tf in tf_map for tf in self.timeframes):

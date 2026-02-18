@@ -112,6 +112,27 @@ Scalper-specific guidance (when using 5m or 1m timeframes):
 - Volume burst confirmation: require vol_burst == true for breakout entries to confirm institutional participation.
 - Tighter volatility gates: use ewma_vol or realized_vol_fast instead of longer-window volatility metrics.
 
+Candlestick pattern signals (is_* fields are 0.0/1.0 floats):
+- Use boolean patterns as CONFIRMATION, not as standalone conditions.
+  Example: "is_hammer > 0.5 and close > nearest_support and rsi_14 < 40" (hammer + support + oversold)
+- candle_strength > 1.0 confirms an impulse move; combine with vol_burst for breakout entries.
+- is_inside_bar signals compression; pair with low bollinger bandwidth for setup detection.
+- is_outside_bar at a key level often precedes strong directional moves.
+- is_bullish_engulfing and is_bearish_engulfing are two-bar reversal signals requiring prior bar.
+- Pattern context matters: a hammer is only bullish at support or after a downtrend.
+
+Higher-timeframe structural anchors (htf_* fields — prior completed daily session):
+- htf_daily_high and htf_daily_low are the most-watched institutional levels. Prefer these for
+  stop and target references over percentage-based stops when available.
+- Long stops: "close < htf_daily_low * 0.995" (0.5% buffer below prior day's low)
+- Short stops: "close > htf_daily_high * 1.005"
+- Targets: "close > htf_daily_high * 0.998" (approach before resistance), "close > htf_5d_high * 0.995" for breakouts.
+- htf_price_vs_daily_mid > 1.0 means far above daily midpoint — reduce long confidence.
+  htf_price_vs_daily_mid < -1.0 means far below midpoint — favor long entries.
+- htf_5d_high / htf_5d_low are the weekly range proxy for major pivots.
+- NOTE: htf_* fields are None before the second completed daily bar in a backtest run.
+  Always pair with a fallback: "htf_daily_low is not None and close < htf_daily_low * 0.995 or close < sma_long * 0.97".
+
 Optional market-structure telemetry (use if present):
 - market_structure[SYMBOL] or global_context.market_structure[SYMBOL] may include nearest_support/resistance, distance_to_support_pct, distance_to_resistance_pct, trend, support_levels, resistance_levels, recent_tests.
 - Prefer entries near defended support in uptrends or after resistance flips to support; avoid initiating longs into nearby resistance or shorts into nearby support.

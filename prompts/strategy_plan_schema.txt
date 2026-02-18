@@ -9,6 +9,8 @@ CRITICAL - Available Timeframes Constraint:
 
 Allowed Rule Identifiers (entry_rule/exit_rule/hold_rule may ONLY use these):
 - Base indicators: symbol, timeframe, close, volume, volume_multiple, sma_short, sma_medium, sma_long, ema_short, ema_medium, ema_long, rsi_14, macd, macd_signal, macd_hist, atr_14, roc_short, roc_medium, realized_vol_short, realized_vol_medium, donchian_upper_short, donchian_lower_short, bollinger_upper, bollinger_lower, cycle_high_200, cycle_low_200, cycle_range_200, cycle_position, fib_236, fib_382, fib_500, fib_618, fib_786, last_expansion_pct, last_contraction_pct, expansion_contraction_ratio, ema_fast, ema_very_fast, realized_vol_fast, ewma_vol, vwap, vwap_distance_pct, vol_burst.
+- Candlestick morphology identifiers: candle_body_pct, candle_upper_wick_pct, candle_lower_wick_pct, candle_strength, is_bullish, is_bearish, is_doji, is_hammer, is_shooting_star, is_pin_bar, is_bullish_engulfing, is_bearish_engulfing, is_inside_bar, is_outside_bar, is_impulse_candle.
+- Higher-timeframe structural anchors: htf_daily_open, htf_daily_high, htf_daily_low, htf_daily_close, htf_prev_daily_high, htf_prev_daily_low, htf_prev_daily_open, htf_daily_atr, htf_daily_range_pct, htf_price_vs_daily_mid, htf_5d_high, htf_5d_low, htf_prev_daily_mid.
 - Derived indicators: bollinger_middle, trend_state, vol_state.
 - Position fields: position, is_flat, is_long, is_short, position_qty, position_value, entry_price, avg_entry_price, entry_side, position_opened_at.
 - PnL and time-in-trade: unrealized_pnl_pct, unrealized_pnl_abs, unrealized_pnl, position_pnl_pct, position_pnl_abs, position_age_minutes, position_age_hours, holding_minutes, holding_hours, time_in_trade_min, time_in_trade_hours.
@@ -88,3 +90,60 @@ Optional fields (if provided) MUST follow these schemas:
   symbol (string), suggested_risk_pct (number), rationale (string)
 - max_triggers_per_symbol_per_day: integer
 - trigger_budgets: object mapping symbol -> integer (per-symbol trigger caps)
+
+CANDLESTICK PATTERN IDENTIFIERS (scalar/boolean):
+  candle_body_pct         — body as fraction of range (0=doji, 1=marubozu)
+  candle_upper_wick_pct   — upper wick fraction of range
+  candle_lower_wick_pct   — lower wick fraction of range
+  candle_strength         — body / ATR (>1.0 = impulse move, <0.3 = indecision)
+  is_bullish              — 1.0 if close > open
+  is_bearish              — 1.0 if close < open
+  is_doji                 — 1.0 if body_pct < 0.10 (indecision)
+  is_hammer               — 1.0 if bullish reversal shape at low
+  is_shooting_star        — 1.0 if bearish reversal shape at high
+  is_pin_bar              — 1.0 if wick > 60% of range (either side)
+  is_bullish_engulfing    — 1.0 if current bar engulfs prior bearish body
+  is_bearish_engulfing    — 1.0 if current bar engulfs prior bullish body
+  is_inside_bar           — 1.0 if current range inside prior bar (compression)
+  is_outside_bar          — 1.0 if current range outside prior bar (expansion)
+  is_impulse_candle       — 1.0 if body >= ATR threshold (decisive move)
+
+CANDLESTICK USAGE GUIDANCE:
+- Use boolean patterns as CONFIRMATION for entry/exit triggers, not as sole condition.
+  Example: "is_hammer == 1 and close > nearest_support and rsi_14 < 40" (hammer + support + oversold)
+- Evaluate boolean features as: is_hammer > 0.5 or is_hammer == 1 in rule expressions.
+- candle_strength > 1.0 suggests an impulse move; use for breakout confirmation.
+- is_inside_bar is a compression signal; combine with low BB bandwidth for setup detection.
+- is_outside_bar at a key level often precedes a strong directional move.
+- Two-bar patterns (engulfing, inside, outside) require prior bar — always available after bar 1.
+- Pattern context matters: a hammer is bullish only at support or after a downtrend.
+  Combine candle patterns with structural context, not in isolation.
+
+HIGHER-TIMEFRAME STRUCTURAL ANCHOR IDENTIFIERS (prior completed daily session):
+  htf_daily_high          — Prior session's high (key resistance)
+  htf_daily_low           — Prior session's low (key support)
+  htf_daily_open          — Prior session's open (intraday pivot reference)
+  htf_daily_close         — Prior session's close (momentum reference)
+  htf_prev_daily_high     — Session-before-prior's high (2-day lookback high)
+  htf_prev_daily_low      — Session-before-prior's low (2-day lookback low)
+  htf_daily_atr           — Daily ATR(14) (volatility normalizer for HTF)
+  htf_daily_range_pct     — Prior session's range as % of close
+  htf_price_vs_daily_mid  — (close - daily_mid) / daily_atr; ATR-normalized position
+                            >0 = above prior midpoint, <0 = below, |value|>1 = far from mid
+  htf_5d_high             — Rolling 5-session high (weekly proxy resistance)
+  htf_5d_low              — Rolling 5-session low (weekly proxy support)
+  htf_prev_daily_mid      — Midpoint of session-before-prior: (prev2_high + prev2_low) / 2
+
+HTF STOP AND TARGET ANCHORING:
+- Long stop below daily structure: close < htf_daily_low * 0.995
+  (0.5% buffer below yesterday's low — prevents stop hunts from noise)
+- Short stop above daily structure: close > htf_daily_high * 1.005
+- Target at prior high: close > htf_daily_high * 0.998
+  (approach target as exit rule — capture before resistance)
+- Weekly proxy target: close > htf_5d_high * 0.995 for breakout targets
+- Position context: htf_price_vs_daily_mid > 1.0 means far above daily midpoint
+  (prefer exits over entries for longs at these levels)
+  htf_price_vs_daily_mid < -1.0 means far below midpoint
+  (prefer entries for longs — oversold relative to session structure)
+- NOTE: htf_* fields are None before the second completed daily bar. Always combine
+  with a fallback (e.g., "htf_daily_low is not None and close < htf_daily_low * 0.995 or close < sma_long * 0.97").

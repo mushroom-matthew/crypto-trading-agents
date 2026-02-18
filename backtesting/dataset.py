@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -47,3 +47,27 @@ def load_ohlcv(
     start = ensure_utc(start)
     end = ensure_utc(end)
     return selected_backend.fetch_history(pair, start, end, timeframe)
+
+
+def load_with_htf(
+    pair: str,
+    start: datetime,
+    end: datetime,
+    base_timeframe: str = "1h",
+    use_cache: bool = True,
+    backend: MarketDataBackend | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load base timeframe OHLCV plus daily OHLCV for the same date range.
+
+    The daily bars include a 20-day buffer before start for ATR(14) warmup.
+
+    Returns:
+        (base_df, daily_df) where daily_df covers start - 20d to end.
+        If base_timeframe is already '1d', daily_df == base_df.
+    """
+    base_df = load_ohlcv(pair, start, end, base_timeframe, use_cache, backend)
+    if base_timeframe == "1d":
+        return base_df, base_df
+    daily_start = ensure_utc(start) - timedelta(days=20)
+    daily_df = load_ohlcv(pair, daily_start, end, "1d", use_cache, backend)
+    return base_df, daily_df
