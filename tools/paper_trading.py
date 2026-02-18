@@ -402,11 +402,8 @@ async def query_ledger_portfolio_activity() -> Dict[str, Any]:
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
     client = await Client.connect(address, namespace=namespace)
-    try:
-        handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
-        return await handle.query("get_portfolio_status")
-    finally:
-        await client.service_client.disconnect()
+    handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+    return await handle.query("get_portfolio_status")
 
 
 @activity.defn
