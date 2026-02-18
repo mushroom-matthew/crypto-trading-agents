@@ -338,6 +338,27 @@ class TriggerEngine:
                 "time_in_trade_hours",
             ):
                 context.setdefault(key, None)
+        # Runbook 42: level-anchored stop/target identifiers
+        # Read from position_meta (populated at fill time by _resolve_stop_price_anchored)
+        active_meta = (position_meta or {}).get(indicator.symbol) or {} if position_meta else {}
+        active_stop = active_meta.get("stop_price_abs")
+        active_target = active_meta.get("target_price_abs")
+        is_flat = context.get("is_flat", True)
+        current_close = indicator.close or 0.0
+        context["below_stop"] = bool(current_close < active_stop) if (active_stop and not is_flat) else False
+        context["above_target"] = bool(current_close > active_target) if (active_target and not is_flat) else False
+        context["stop_price"] = active_stop or 0.0
+        context["target_price"] = active_target or 0.0
+        context["stop_distance_pct"] = (
+            abs(current_close - active_stop) / current_close * 100.0
+            if (active_stop and current_close)
+            else 0.0
+        )
+        context["target_distance_pct"] = (
+            abs(active_target - current_close) / current_close * 100.0
+            if (active_target and current_close)
+            else 0.0
+        )
         return context
 
     def _trend_state_from_snapshot(self, snapshot: IndicatorSnapshot) -> str:

@@ -71,6 +71,25 @@ class TradeLeg(BaseModel):
         default=None,
         description="Position quantity after this leg",
     )
+    # Level-anchored stop/target fields (Runbook 42)
+    stop_price_abs: Optional[float] = Field(
+        default=None,
+        description="Absolute stop price set at entry (below = exit for longs, above = exit for shorts)",
+    )
+    target_price_abs: Optional[float] = Field(
+        default=None,
+        description="Absolute profit target price set at entry",
+    )
+    stop_anchor_type: Optional[str] = Field(
+        default=None,
+        description="How the stop was computed: 'pct', 'atr', 'htf_daily_low', 'htf_prev_daily_low', "
+                    "'donchian_lower', 'fib_level', 'candle_low', 'manual'",
+    )
+    target_anchor_type: Optional[str] = Field(
+        default=None,
+        description="How the target was computed: 'measured_move', 'htf_daily_high', 'htf_5d_high', "
+                    "'fib_level', 'r_multiple', 'manual'",
+    )
     # Learning book tags
     learning_book: bool = Field(
         default=False, description="True if this leg is part of learning book"

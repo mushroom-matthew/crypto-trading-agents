@@ -129,6 +129,107 @@ def _ensure_timestamp_index(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_index()
 
 
+def _resolve_stop_price_anchored(
+    trigger: "TriggerCondition",
+    fill_price: float,
+    snapshot: "IndicatorSnapshot",
+    direction: str,
+) -> tuple[float | None, str | None]:
+    """Compute absolute stop price from anchor type and current snapshot.
+
+    Returns (stop_price, anchor_type_used) or (None, None) if unresolvable.
+    """
+    anchor = getattr(trigger, "stop_anchor_type", None) or "pct"
+
+    if anchor == "pct":
+        pct = (getattr(trigger, "stop_loss_pct", None) or 0.0) / 100.0
+        if pct > 0:
+            price = fill_price * (1 - pct) if direction == "long" else fill_price * (1 + pct)
+            return price, "pct"
+        return None, None
+
+    if anchor == "atr":
+        atr = getattr(snapshot, "atr_14", None)
+        if atr:
+            mult = 1.5
+            offset = atr * mult
+            price = fill_price - offset if direction == "long" else fill_price + offset
+            return price, "atr"
+
+    elif anchor == "htf_daily_low":
+        level = getattr(snapshot, "htf_daily_low", None)
+        if level:
+            return level * 0.995, "htf_daily_low"
+
+    elif anchor == "htf_prev_daily_low":
+        level = getattr(snapshot, "htf_prev_daily_low", None)
+        if level:
+            return level * 0.995, "htf_prev_daily_low"
+
+    elif anchor == "donchian_lower":
+        level = getattr(snapshot, "donchian_lower_short", None)
+        if level:
+            return level * 0.995, "donchian_lower"
+
+    elif anchor == "fib_618":
+        level = getattr(snapshot, "fib_618", None)
+        if level:
+            return level, "fib_618"
+
+    elif anchor == "candle_low":
+        level = getattr(snapshot, "low", None)
+        if level:
+            return level * 0.998, "candle_low"
+
+    return None, None
+
+
+def _resolve_target_price_anchored(
+    trigger: "TriggerCondition",
+    fill_price: float,
+    stop_price: float | None,
+    snapshot: "IndicatorSnapshot",
+    direction: str,
+) -> tuple[float | None, str | None]:
+    """Compute absolute target price from anchor type.
+
+    Returns (target_price, anchor_type_used) or (None, None) if unresolvable.
+    """
+    anchor = getattr(trigger, "target_anchor_type", None)
+    if not anchor:
+        return None, None
+
+    if anchor == "htf_daily_high":
+        level = getattr(snapshot, "htf_daily_high", None)
+        if level:
+            return level * 0.998, "htf_daily_high"
+
+    elif anchor == "htf_5d_high":
+        level = getattr(snapshot, "htf_5d_high", None)
+        if level:
+            return level * 0.998, "htf_5d_high"
+
+    elif anchor == "measured_move":
+        upper = getattr(snapshot, "donchian_upper_short", None)
+        lower = getattr(snapshot, "donchian_lower_short", None)
+        if upper is not None and lower is not None:
+            range_height = upper - lower
+            price = fill_price + range_height if direction == "long" else fill_price - range_height
+            return price, "measured_move"
+
+    elif anchor == "r_multiple_2" and stop_price is not None:
+        risk = abs(fill_price - stop_price)
+        price = fill_price + 2 * risk if direction == "long" else fill_price - 2 * risk
+        return price, "r_multiple_2"
+
+    elif anchor == "r_multiple_3" and stop_price is not None:
+        risk = abs(fill_price - stop_price)
+        price = fill_price + 3 * risk if direction == "long" else fill_price - 3 * risk
+        return price, "r_multiple_3"
+
+    return None, None
+
+
 @dataclass(frozen=True)
 class ExecutionModelSettings:
     """Controls deterministic execution semantics for backtests."""
@@ -2120,6 +2221,24 @@ class LLMStrategistBacktester:
                     "trail_activation_r": trail_activation_r,
                 }
             )
+            # Runbook 42: resolve level-anchored stop/target at entry
+            trigger_map = {
+                t.id: t for t in self.current_trigger_engine.plan.triggers
+            } if self.current_trigger_engine else {}
+            trigger = trigger_map.get(order.reason)
+            if trigger is not None:
+                snapshot = self._indicator_snapshot(symbol, order.timeframe, order.timestamp)
+                if snapshot is not None:
+                    stop_abs, stop_anchor = _resolve_stop_price_anchored(
+                        trigger, order.price, snapshot, direction
+                    )
+                    target_abs, target_anchor = _resolve_target_price_anchored(
+                        trigger, order.price, stop_abs, snapshot, direction
+                    )
+                    meta["stop_price_abs"] = stop_abs
+                    meta["target_price_abs"] = target_abs
+                    meta["stop_anchor_type"] = stop_anchor
+                    meta["target_anchor_type"] = target_anchor
             self.portfolio.position_meta[symbol] = meta
 
     def _coerce_timestamp(self, value: Any) -> datetime | None:
