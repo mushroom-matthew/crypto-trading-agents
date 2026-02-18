@@ -17,6 +17,12 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 
 ## Priority Runbooks (Numbered)
 - [01-strategist-simplification.md](01-strategist-simplification.md): Simplify LLM strategist - allow empty triggers, remove risk redundancy, vector store prep. **Phase 1 COMPLETE** (schema, classifier, prompt, risk removal, stance tracking). Vector store and regime alerts deferred.
+- [37-risk-budget-commit-actual.md](37-risk-budget-commit-actual.md): **P0 — Real-money blocker.** Fix 255x overcharge in `_commit_risk_budget()` — deduct actual_risk_at_stop, not theoretical cap. Budget exhausts after 2–4 trades with microscopic positions.
+- [38-candlestick-pattern-features.md](38-candlestick-pattern-features.md): Add candlestick morphology to the feature vector — 15 new identifiers (is_hammer, is_engulfing, is_inside_bar, candle_strength, etc.) in `metrics/candlestick.py`. Prerequisite for reversal and breakout templates.
+- [39-universe-screener.md](39-universe-screener.md): Autonomous instrument screening — anomaly scoring across a configurable crypto universe, LLM instrument recommendation with thesis and strategy type. Shifts LLM role from "write RSI rules" to "choose what to trade and why."
+- [40-compression-breakout-template.md](40-compression-breakout-template.md): Compression→expansion breakout strategy template — 4 new indicators (bb_bandwidth_pct_rank, compression_flag, expansion_flag, breakout_confirmed) and canonical breakout prompt. Depends on Runbook 38.
+- [41-htf-structure-cascade.md](41-htf-structure-cascade.md): Always load daily candles as an anchor layer — 12 new `htf_*` fields (daily_high, daily_low, prev_daily_high, 5d_high, daily_atr, etc.) for level-based stop and target anchoring. Prerequisite for Runbook 42.
+- [42-level-anchored-stops.md](42-level-anchored-stops.md): Absolute stop/target prices stored per TradeLeg at fill time — 7 stop anchor types (htf_daily_low, donchian_lower, candle_low, atr, etc.), 6 target types (measured_move, htf_daily_high, r_multiple). Exposes `below_stop` and `above_target` as trigger identifiers. Depends on Runbooks 41 and 38.
 - ~~04-emergency-exit-runbook-hold-cooldown.md~~: Min-hold and cooldown enforcement. → Completed, see [X-emergency-exit-runbook-hold-cooldown.md](X-emergency-exit-runbook-hold-cooldown.md).
 - ~~05-emergency-exit-runbook-bypass-override.md~~: Bypass and override behavior. → Completed, see [X-emergency-exit-runbook-bypass-override.md](X-emergency-exit-runbook-bypass-override.md).
 - ~~06-emergency-exit-runbook-edge-cases.md~~: Emergency-exit edge cases. → Completed, see [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md).
@@ -103,7 +109,26 @@ Runbooks 21-27 address issues discovered in backtest ebf53879. Recommended sub-o
 19. **07**: AWS deploy / CI/CD
 20. **08**: Multi-wallet (Phantom/Solana/EVM read-only + reconciliation)
 
-> **Why this order differs from filenames:** The true blocker for the policy pivot is "anti-churn + continuity + clean replans," not just risk math. Learning Book isolation is trust infrastructure, not a feature — without it, experiments muddy PnL and interpretability is lost. Strategist simplification (01) is major but moves later because emergency exits and judge robustness are hard safety invariants that must be machine-enforced first. After those are green, Phase 1 policy integration (18) is mandatory; Phase 2 model integration (19) is optional and reversible.
+### Phase 6 — Strategy intelligence (new direction, 2026-02)
+Runbooks 37–42 represent a product direction shift: from "LLM writes indicator rules" toward "LLM reasons about market structure and chooses instruments." These must be sequenced carefully — candle features and HTF structure are prerequisites for the breakout template and level-anchored stops.
+
+**P0 — Must ship before real money:**
+21. **37**: Risk budget commit actual (255x overcharge blocks all real-capital use cases)
+
+**Stratum A — Feature foundations (parallel-safe, implement first):**
+22. **38**: Candlestick pattern features (independent; adds 15 identifiers to feature vector)
+23. **41**: HTF structure cascade (independent; adds 12 daily anchor fields)
+
+**Stratum B — Strategy templates (after Stratum A merges):**
+24. **40**: Compression breakout template (requires 38 for is_impulse_candle, is_inside_bar)
+25. **42**: Level-anchored stops (requires 38 for candle_low anchor, 41 for htf_daily_low anchor)
+
+**Stratum C — Market intelligence (after Stratum B validates in paper trading):**
+26. **39**: Universe screener (standalone; can be built in parallel but validated after 40/42)
+
+> **Why this order:** Runbook 37 is a correctness bug with zero-cost fix — ship immediately. Candlestick features (38) and HTF structure (41) are additive with no risk of regression and unlock everything downstream. The breakout template (40) and level-anchored stops (42) depend on those features and should be validated together via a paper trading backtest before the universe screener (39) is enabled — you want a working strategy before adding autonomous instrument selection.
+
+> **Paper trading as the validation gate:** Unlike prior runbooks that were validated via backtest, Runbook 39 (universe screener) can only be meaningfully validated via paper trading. The screener surfaces real-time anomalies; no historical simulation can test whether it would have identified the right instrument at the right time. Plan for a 30-day paper trading period after 39 ships before enabling live capital routing.
 
 ## Backlog Runbooks (_)
 - [_emergency-exit-runbook-judge-loop-design.md](_emergency-exit-runbook-judge-loop-design.md): Judge/strategist loop design gaps (non-test items).
