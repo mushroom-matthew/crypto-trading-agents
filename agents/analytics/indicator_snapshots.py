@@ -22,6 +22,8 @@ class IndicatorWindowConfig:
     short_window: int = 20
     medium_window: int = 50
     long_window: int = 200
+    impulse_window: int = 24
+    impulse_atr_mult: float = 0.8
     rsi_period: int = 14
     atr_period: int = 14
     roc_short: int = 10
@@ -346,11 +348,16 @@ def compute_indicator_snapshot(
     sma_medium = _result_to_value(tech.sma(prepared, period=window.medium_window))
     sma_long = _result_to_value(tech.sma(prepared, period=window.long_window))
     ema_short = _result_to_value(tech.ema(prepared, period=window.short_window))
-    ema_medium = _result_to_value(tech.ema(prepared, period=window.medium_window))
+    ema_medium_series = tech.ema(prepared, period=window.medium_window).series_list[0].series
+    ema_medium = _latest(ema_medium_series)
     ema_long = _result_to_value(tech.ema(prepared, period=window.long_window))
     rsi_val = _result_to_value(tech.rsi(prepared, period=window.rsi_period))
     macd_val, macd_signal, macd_hist = _macd_values(prepared, window.macd_fast, window.macd_slow, window.macd_signal)
-    atr_val = _result_to_value(tech.atr(prepared, period=window.atr_period))
+    atr_result = tech.atr(prepared, period=window.atr_period)
+    atr_series = atr_result.series_list[0].series
+    atr_val = _latest(atr_series)
+    adx_result = tech.adx(prepared, period=14)
+    adx_val = _latest(adx_result.series_list[2].series)
     boll = tech.bollinger_bands(prepared, period=window.short_window, mult=2.0)
     boll_middle = _latest(boll.series_list[0].series)
     boll_upper = _latest(boll.series_list[1].series)
@@ -395,6 +402,34 @@ def compute_indicator_snapshot(
     # Volume burst detection
     vol_burst_flag = _vol_burst(volume_multiple, window.vol_burst_threshold)
 
+    def _prev_value(series: pd.Series, offset: int) -> float | None:
+        if len(series) <= offset:
+            return None
+        value = series.iloc[-(offset + 1)]
+        if pd.isna(value):
+            return None
+        return float(value)
+
+    prev_open = _prev_value(open_series, 1) if open_series is not None else None
+    prev_high = _prev_value(high, 1)
+    prev_low = _prev_value(low, 1)
+    prev_close = _prev_value(close, 1)
+    atr_prev1 = _prev_value(atr_series, 1)
+    atr_prev2 = _prev_value(atr_series, 2)
+    atr_prev3 = _prev_value(atr_series, 3)
+    atr_rising_3 = None
+    if atr_val is not None and atr_prev1 is not None and atr_prev2 is not None and atr_prev3 is not None:
+        atr_rising_3 = atr_val > atr_prev1 > atr_prev2 > atr_prev3
+    impulse_ema50_24 = None
+    if atr_val is not None and atr_val > 0 and len(close) >= window.impulse_window:
+        try:
+            diff_series = close - ema_medium_series
+            max_diff = diff_series.tail(window.impulse_window).max()
+            if not pd.isna(max_diff):
+                impulse_ema50_24 = float(max_diff) >= (window.impulse_atr_mult * atr_val)
+        except Exception:
+            impulse_ema50_24 = None
+
     as_of = prepared["timestamp"].iloc[-1].to_pydatetime()
     return IndicatorSnapshot(
         symbol=symbol,
@@ -412,11 +447,23 @@ def compute_indicator_snapshot(
         ema_short=ema_short,
         ema_medium=ema_medium,
         ema_long=ema_long,
+        ema_50=ema_medium,
+        ema_200=ema_long,
         rsi_14=rsi_val,
         macd=macd_val,
         macd_signal=macd_signal,
         macd_hist=macd_hist,
         atr_14=atr_val,
+        atr_14_prev1=atr_prev1,
+        atr_14_prev2=atr_prev2,
+        atr_14_prev3=atr_prev3,
+        atr_14_rising_3=atr_rising_3,
+        adx_14=adx_val,
+        impulse_ema50_24=impulse_ema50_24,
+        prev_open=prev_open,
+        prev_high=prev_high,
+        prev_low=prev_low,
+        prev_close=prev_close,
         roc_short=roc_short,
         roc_medium=roc_medium,
         realized_vol_short=realized_short,
@@ -474,6 +521,7 @@ def precompute_indicator_frame(
     macd_signal = macd_result.series_list[1].series
     macd_hist = macd_result.series_list[2].series
     atr_val = tech.atr(prepared, period=window.atr_period).series_list[0].series
+    adx_val = tech.adx(prepared, period=14).series_list[2].series
     boll = tech.bollinger_bands(prepared, period=window.short_window, mult=2.0)
     boll_middle = boll.series_list[0].series
     boll_upper = boll.series_list[1].series
@@ -517,6 +565,19 @@ def precompute_indicator_frame(
     # Volume burst detection
     vol_burst = volume_multiple >= window.vol_burst_threshold
 
+    prev_open = open_series.shift(1) if open_series is not None else pd.Series(np.nan, index=prepared.index)
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+    prev_close = close.shift(1)
+    atr_prev1 = atr_val.shift(1)
+    atr_prev2 = atr_val.shift(2)
+    atr_prev3 = atr_val.shift(3)
+    atr_rising_3 = (atr_val > atr_prev1) & (atr_prev1 > atr_prev2) & (atr_prev2 > atr_prev3)
+    impulse_ema50_24 = (close - ema_medium).rolling(
+        window=window.impulse_window,
+        min_periods=window.impulse_window,
+    ).max() >= (window.impulse_atr_mult * atr_val)
+
     frame = pd.DataFrame(
         {
             "timestamp": prepared["timestamp"],
@@ -532,11 +593,23 @@ def precompute_indicator_frame(
             "ema_short": ema_short,
             "ema_medium": ema_medium,
             "ema_long": ema_long,
+            "ema_50": ema_medium,
+            "ema_200": ema_long,
             "rsi_14": rsi_val,
             "macd": macd_line,
             "macd_signal": macd_signal,
             "macd_hist": macd_hist,
             "atr_14": atr_val,
+            "atr_14_prev1": atr_prev1,
+            "atr_14_prev2": atr_prev2,
+            "atr_14_prev3": atr_prev3,
+            "atr_14_rising_3": atr_rising_3,
+            "adx_14": adx_val,
+            "impulse_ema50_24": impulse_ema50_24,
+            "prev_open": prev_open,
+            "prev_high": prev_high,
+            "prev_low": prev_low,
+            "prev_close": prev_close,
             "roc_short": roc_short,
             "roc_medium": roc_medium,
             "realized_vol_short": realized_short,
@@ -631,11 +704,23 @@ def snapshot_from_frame(
         ema_short=_optional_float(row.get("ema_short")),
         ema_medium=_optional_float(row.get("ema_medium")),
         ema_long=_optional_float(row.get("ema_long")),
+        ema_50=_optional_float(row.get("ema_50")),
+        ema_200=_optional_float(row.get("ema_200")),
         rsi_14=_optional_float(row.get("rsi_14")),
         macd=_optional_float(row.get("macd")),
         macd_signal=_optional_float(row.get("macd_signal")),
         macd_hist=_optional_float(row.get("macd_hist")),
         atr_14=_optional_float(row.get("atr_14")),
+        atr_14_prev1=_optional_float(row.get("atr_14_prev1")),
+        atr_14_prev2=_optional_float(row.get("atr_14_prev2")),
+        atr_14_prev3=_optional_float(row.get("atr_14_prev3")),
+        atr_14_rising_3=_optional_bool(row.get("atr_14_rising_3")),
+        adx_14=_optional_float(row.get("adx_14")),
+        impulse_ema50_24=_optional_bool(row.get("impulse_ema50_24")),
+        prev_open=_optional_float(row.get("prev_open")),
+        prev_high=_optional_float(row.get("prev_high")),
+        prev_low=_optional_float(row.get("prev_low")),
+        prev_close=_optional_float(row.get("prev_close")),
         roc_short=_optional_float(row.get("roc_short")),
         roc_medium=_optional_float(row.get("roc_medium")),
         realized_vol_short=_optional_float(row.get("realized_vol_short")),
@@ -702,11 +787,11 @@ def _vol_from_snapshot(snapshot: IndicatorSnapshot) -> str:
     price = snapshot.close or 1.0
     atr_ratio = atr / price if price else 0.0
     vol_metric = max(atr_ratio, realized)
-    if vol_metric < 0.01:
+    if vol_metric < 0.015:
         return "low"
-    if vol_metric < 0.02:
+    if vol_metric < 0.03:
         return "normal"
-    if vol_metric < 0.05:
+    if vol_metric < 0.07:
         return "high"
     return "extreme"
 

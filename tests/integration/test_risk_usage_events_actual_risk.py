@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1].parent
 if str(ROOT) not in sys.path:
@@ -68,3 +69,8 @@ def test_risk_usage_events_capture_actual_risk(tmp_path: Path) -> None:
     events = result.daily_reports[0].get("risk_usage_events", [])
     assert events, "expected risk_usage_events to be populated"
     assert any((evt.get("actual_risk_at_stop") or 0) > 0 for evt in events), "actual_risk_at_stop should be recorded"
+    for evt in events:
+        actual = evt.get("actual_risk_at_stop") or 0.0
+        if actual > 0:
+            used = evt.get("risk_used") or 0.0
+            assert used == pytest.approx(actual, rel=1e-6, abs=1e-6)

@@ -394,6 +394,19 @@ async def fetch_current_prices_activity(symbols: List[str]) -> Dict[str, float]:
 
 
 @activity.defn
+async def query_ledger_portfolio_activity() -> Dict[str, Any]:
+    """Query the execution ledger for current portfolio status (must run as activity for Temporal client access)."""
+    from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+    from temporalio.client import Client
+
+    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+    namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
+    client = await Client.connect(address, namespace=namespace)
+    handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+    return await handle.query("get_portfolio_status")
+
+
+@activity.defn
 async def emit_paper_trading_event_activity(
     session_id: str,
     event_type: str,
@@ -657,11 +670,11 @@ class PaperTradingWorkflow:
 
     async def _generate_plan(self) -> None:
         """Generate a new strategy plan."""
-        # Get portfolio state from ledger
-        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
-
-        ledger_handle = workflow.get_external_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
-        portfolio_state = await ledger_handle.query("get_portfolio_status")
+        # Get portfolio state from ledger (via activity — external handles can't query)
+        portfolio_state = await workflow.execute_activity(
+            query_ledger_portfolio_activity,
+            schedule_to_close_timeout=timedelta(seconds=10),
+        )
 
         # Build market context (simplified for now)
         market_context = {}
@@ -718,11 +731,11 @@ class PaperTradingWorkflow:
 
     async def _evaluate_and_execute(self) -> None:
         """Evaluate triggers and execute orders."""
-        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
-
-        # Get current portfolio state
-        ledger_handle = workflow.get_external_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
-        portfolio_state = await ledger_handle.query("get_portfolio_status")
+        # Get current portfolio state (via activity — external handles can't query)
+        portfolio_state = await workflow.execute_activity(
+            query_ledger_portfolio_activity,
+            schedule_to_close_timeout=timedelta(seconds=10),
+        )
 
         # Build market data from latest prices
         market_data = {}
@@ -813,11 +826,11 @@ class PaperTradingWorkflow:
 
     async def _record_equity_snapshot(self) -> None:
         """Record a periodic equity snapshot for charting."""
-        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
-
         try:
-            ledger_handle = workflow.get_external_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
-            portfolio_state = await ledger_handle.query("get_portfolio_status")
+            portfolio_state = await workflow.execute_activity(
+                query_ledger_portfolio_activity,
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
 
             snapshot = {
                 "timestamp": workflow.now().isoformat(),

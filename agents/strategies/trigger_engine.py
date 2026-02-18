@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, List, Literal, Mapping
+from typing import Any, Callable, Iterable, List, Literal, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,9 @@ class Order:
     reason: str
     timestamp: datetime
     stop_distance: float | None = None
+    target_distance: float | None = None
+    trail_distance: float | None = None
+    trail_activation_r: float | None = None
     emergency: bool = False
     cooldown_recommendation_bars: int | None = None
     trigger_category: str | None = None
@@ -81,6 +85,7 @@ class TriggerEngine:
         risk_engine: RiskEngine,
         evaluator: RuleEvaluator | None = None,
         trade_risk: TradeRiskEvaluator | None = None,
+        stop_distance_resolver: Callable[[TriggerCondition, IndicatorSnapshot, Bar], float | None] | None = None,
         confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
         min_hold_bars: int = 4,
         trade_cooldown_bars: int = 2,
@@ -130,6 +135,7 @@ class TriggerEngine:
         self.risk_engine = risk_engine
         self.evaluator = evaluator or RuleEvaluator()
         self.trade_risk = trade_risk or TradeRiskEvaluator(risk_engine)
+        self.stop_distance_resolver = stop_distance_resolver
         self.judge_constraints = judge_constraints
         self.confidence_override_threshold = confidence_override_threshold
         self.min_hold_bars = max(0, min_hold_bars)
@@ -214,6 +220,10 @@ class TriggerEngine:
             return None
 
         context = indicator.model_dump()
+        # Deterministic pseudo-random scalar for control strategies.
+        rand_key = f"{indicator.symbol}|{indicator.timeframe}|{indicator.as_of.isoformat()}"
+        rand_hash = hashlib.sha256(rand_key.encode("utf-8")).hexdigest()
+        context["rand_u"] = (int(rand_hash[:16], 16) % 1_000_000) / 1_000_000.0
         for key, value in list(context.items()):
             alias = _alias_key(key)
             if alias and alias not in context:
@@ -354,11 +364,11 @@ class TriggerEngine:
         price = snapshot.close or 1.0
         atr_ratio = atr / price if price else 0.0
         vol_metric = max(atr_ratio, realized)
-        if vol_metric < 0.01:
+        if vol_metric < 0.015:
             return "low"
-        if vol_metric < 0.02:
+        if vol_metric < 0.03:
             return "normal"
-        if vol_metric < 0.05:
+        if vol_metric < 0.07:
             return "high"
         return "extreme"
 
@@ -533,7 +543,11 @@ class TriggerEngine:
         if desired == current:
             return None
         stop_distance = None
-        if trigger.stop_loss_pct is not None:
+        if self.stop_distance_resolver is not None:
+            stop_distance = self.stop_distance_resolver(trigger, indicator, bar)
+            if stop_distance is not None and stop_distance <= 0:
+                stop_distance = None
+        elif trigger.stop_loss_pct is not None:
             stop_distance = abs(bar.close * trigger.stop_loss_pct / 100.0)
         check = self.trade_risk.evaluate(trigger, "entry", bar.close, portfolio, indicator, stop_distance=stop_distance)
         if not check.allowed:

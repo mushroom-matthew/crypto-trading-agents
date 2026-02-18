@@ -22,6 +22,10 @@ EventType = Literal[
     "fill",
     "position_update",
     "llm_call",
+    "session_started",
+    "session_stopped",
+    "order_executed",
+    "symbols_discovered",
 ]
 
 

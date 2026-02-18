@@ -19,7 +19,8 @@ from agents.strategies.llm_client import LLMClient
 from backtesting.risk_config import resolve_risk_limits
 from backtesting.logging_config import setup_backtest_logging
 from schemas.strategy_run import RiskLimitSettings
-from .llm_strategist_runner import LLMStrategistBacktester
+from .llm_strategist_runner import ExecutionModelSettings, LLMStrategistBacktester
+from backtesting.vftp import FixedPlanProvider, build_vftp_plan
 from .simulator import run_backtest, run_portfolio_backtest
 from backtesting.reports import write_run_summary
 from .strategies import StrategyWrapperConfig, StrategyParameters
@@ -399,6 +400,7 @@ def main() -> None:
     parser.add_argument("--plan-file", help="Path to JSON file with planner plans")
     parser.add_argument("--use-saved-plans", action="store_true", help="Load plan metadata from data/strategy_configs.json")
     parser.add_argument("--llm-strategist", choices=["enabled", "disabled"], default="disabled", help="Enable the LLM strategist workflow")
+    parser.add_argument("--strategy", choices=["vftp"], help="Run a fixed deterministic strategy plan")
     parser.add_argument("--llm-calls-per-day", type=int, default=1)
     parser.add_argument("--llm-cache-dir", default=".cache/strategy_plans")
     parser.add_argument("--llm-run-id", default="default")
@@ -411,11 +413,22 @@ def main() -> None:
     parser.add_argument("--risk-config", help="Optional JSON/YAML file containing risk limits (keys: max_position_risk_pct, etc.)")
     parser.add_argument("--timeframes", nargs="+", default=["1h", "4h", "1d"], help="Timeframe list for strategist indicators")
     parser.add_argument("--log-level", default="INFO", help="Backtest log level (DEBUG, INFO, etc.)")
+    parser.add_argument(
+        "--market-structure-refresh-bars",
+        type=int,
+        default=4,
+        help="Recompute market structure snapshot every N base bars when rule expressions reference it.",
+    )
     parser.add_argument("--log-file", help="Optional file path to append logs")
     parser.add_argument("--log-json", action="store_true", help="Emit JSON-formatted logs")
     parser.add_argument("--debug-limits", choices=["off", "basic", "verbose"], default="off", help="Enable limit-enforcement diagnostics")
     parser.add_argument("--debug-output-dir", default=".debug/backtests", help="Directory for verbose limit debug files")
     parser.add_argument("--flatten-daily", action="store_true", help="Flatten all open positions at the end of each trading day")
+    parser.add_argument(
+        "--force-flatten-at-end",
+        action="store_true",
+        help="Force-close any remaining open positions on the final bar of the backtest window.",
+    )
     parser.add_argument("--flatten-threshold", type=float, default=0.0, help="Only flatten positions with notional above this USD value")
     parser.add_argument("--flatten-session-hour", type=int, default=None, help="Optional UTC hour to flatten positions (e.g., 0 for midnight session close)")
     parser.add_argument(
@@ -517,6 +530,50 @@ def main() -> None:
         cli_risk_overrides,
     )
 
+    if args.strategy == "vftp":
+        if args.pairs and len(args.pairs) > 1:
+            raise ValueError("VFTP strategy supports a single pair only")
+        symbol = (args.pairs[0] if args.pairs else args.pair) or "BTC-USD"
+        risk_pct = args.max_position_risk_pct if args.max_position_risk_pct is not None else 1.0
+        plan = build_vftp_plan(symbol, risk_pct=risk_pct)
+        plan_provider = FixedPlanProvider(plan, cache_dir=Path(args.llm_cache_dir))
+        execution_settings = ExecutionModelSettings(
+            model="next_open",
+            stop_loss_atr_mult=1.2,
+            take_profit_atr_mult=2.2,
+            trail_atr_mult=1.5,
+            trail_activation_r=1.0,
+            allow_same_bar_exit=False,
+        )
+        backtester = LLMStrategistBacktester(
+            pairs=[symbol],
+            start=start,
+            end=end,
+            initial_cash=args.initial_cash,
+            fee_rate=args.fee_rate,
+            llm_client=LLMClient(),
+            cache_dir=Path(args.llm_cache_dir),
+            llm_calls_per_day=1,
+            risk_params=risk_limits.to_risk_params(),
+            plan_provider=plan_provider,
+            timeframes=["1h", "4h"],
+            flatten_positions_daily=args.flatten_daily,
+            force_flatten_at_end=args.force_flatten_at_end,
+            flatten_notional_threshold=args.flatten_threshold,
+            flatten_session_boundary_hour=args.flatten_session_hour,
+            execution_settings=execution_settings,
+            market_structure_refresh_bars=args.market_structure_refresh_bars,
+        )
+        result = backtester.run(run_id=args.llm_run_id or "vftp")
+        print("=== VFTP Summary ===")
+        for key, value in result.summary.items():
+            print(f"{key}: {value}")
+        if result.summary.get("strategy_metrics"):
+            print("\n=== VFTP Strategy Metrics ===")
+            for key, value in (result.summary.get("strategy_metrics") or {}).items():
+                print(f"{key}: {value}")
+        return
+
     if args.llm_strategist == "enabled":
         risk_params = risk_limits.to_risk_params()
         pairs = args.pairs or [args.pair]
@@ -565,6 +622,7 @@ def main() -> None:
             prompt_template_path=prompt_path,
             timeframes=args.timeframes,
             flatten_positions_daily=args.flatten_daily,
+            force_flatten_at_end=args.force_flatten_at_end,
             flatten_notional_threshold=args.flatten_threshold,
             flatten_session_boundary_hour=args.flatten_session_hour,
             session_trade_multipliers=session_multipliers,
@@ -572,6 +630,7 @@ def main() -> None:
             flatten_policy=flatten_policy,
             factor_data_path=factor_data_path,
             auto_hedge_market=args.auto_hedge_market,
+            market_structure_refresh_bars=args.market_structure_refresh_bars,
         )
         result = backtester.run(run_id=args.llm_run_id)
         print("=== LLM Strategist Summary ===")

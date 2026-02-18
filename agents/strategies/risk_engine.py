@@ -48,11 +48,13 @@ class RiskEngine:
         sizing_rules: Mapping[str, PositionSizingRule],
         daily_anchor_equity: float | None = None,
         risk_profile: RiskProfile | None = None,
+        fee_rate: float = 0.0,
     ) -> None:
         self.constraints = constraints
         self.sizing_rules: Dict[str, PositionSizingRule] = dict(sizing_rules)
         self.daily_anchor_equity = daily_anchor_equity
         self.risk_profile = risk_profile or RiskProfile()
+        self.fee_rate = max(0.0, float(fee_rate or 0.0))
         self.last_block_reason: str | None = None
         # Snapshot of last sizing decision for telemetry (allocated vs actual risk).
         self.last_risk_snapshot: Dict[str, float | None] = {}
@@ -200,6 +202,9 @@ class RiskEngine:
             "max_symbol_exposure_pct": self._available_symbol_capacity(symbol, price, portfolio),
             "max_portfolio_exposure_pct": self._available_portfolio_capacity(portfolio),
         }
+        if side != "short":
+            max_affordable_notional = max(0.0, portfolio.cash / (1.0 + self.fee_rate))
+            caps["insufficient_cash_fee"] = max_affordable_notional
         for name, value in caps.items():
             if value <= 0:
                 self.last_block_reason = name
