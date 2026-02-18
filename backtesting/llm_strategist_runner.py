@@ -2658,9 +2658,17 @@ class LLMStrategistBacktester:
                     if stop_dist is not None:
                         actual_risk = max(order.quantity * stop_dist, 0.0)
                 if actual_risk is None or actual_risk <= 0:
+                    # Runbook 37: when stop distance is unavailable, fall back to the theoretical
+                    # per-trade cap (conservative assumption: trade is at-risk for the full cap).
+                    # allocated_risk_abs is preferred over remaining_gate*0.1 because it's bounded
+                    # by the per-trade limit rather than the remaining daily budget.
                     actual_risk = risk_snapshot.get("allocated_risk_abs", 0.0) if risk_snapshot else 0.0
-                    if actual_risk <= 0:
-                        actual_risk = remaining_gate * 0.1
+                    if actual_risk > 0:
+                        logger.warning(
+                            "actual_risk_abs unavailable for %s/%s; using theoretical cap %.4f "
+                            "(no stop distance — investigate stop_distance propagation upstream).",
+                            order.symbol, order.side, actual_risk,
+                        )
                 commit_amount = min(actual_risk, remaining_gate) if remaining_gate > 0 else actual_risk
                 structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
                 risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
@@ -2692,6 +2700,12 @@ class LLMStrategistBacktester:
                 if risk_used == 0.0 and actual_risk and actual_risk > 0:
                     risk_used = actual_risk
                 self.risk_usage_by_day[day_key][(trigger_id, order.timeframe)] += risk_used
+                _theoretical_cap = risk_snapshot.get("allocated_risk_abs") if risk_snapshot else None
+                _overcharge_ratio = (
+                    _theoretical_cap / max(actual_risk, 1e-9)
+                    if (_theoretical_cap and actual_risk and actual_risk > 0)
+                    else None
+                )
                 self.risk_usage_events_by_day[day_key].append(
                     {
                         "trigger_id": trigger_id,
@@ -2699,6 +2713,8 @@ class LLMStrategistBacktester:
                         "hour": order.timestamp.hour,
                         "risk_used": risk_used,
                         "actual_risk_at_stop": actual_risk,
+                        "theoretical_cap": _theoretical_cap,
+                        "risk_overcharge_ratio": _overcharge_ratio,
                         "profile_multiplier": risk_snapshot.get("profile_multiplier") if risk_snapshot else None,
                         "profile_multiplier_components": risk_snapshot.get("profile_multiplier_components") if risk_snapshot else None,
                         "archetype": risk_snapshot.get("archetype") if risk_snapshot else None,
@@ -3056,9 +3072,17 @@ class LLMStrategistBacktester:
                     if stop_dist is not None:
                         actual_risk = max(order.quantity * stop_dist, 0.0)
                 if actual_risk is None or actual_risk <= 0:
+                    # Runbook 37: when stop distance is unavailable, fall back to the theoretical
+                    # per-trade cap (conservative assumption: trade is at-risk for the full cap).
+                    # allocated_risk_abs is preferred over remaining_gate*0.1 because it's bounded
+                    # by the per-trade limit rather than the remaining daily budget.
                     actual_risk = risk_snapshot.get("allocated_risk_abs", 0.0) if risk_snapshot else 0.0
-                    if actual_risk <= 0:
-                        actual_risk = remaining_gate * 0.1
+                    if actual_risk > 0:
+                        logger.warning(
+                            "actual_risk_abs unavailable for %s/%s; using theoretical cap %.4f "
+                            "(no stop distance — investigate stop_distance propagation upstream).",
+                            order.symbol, order.side, actual_risk,
+                        )
                 load_scale = 1.0
                 if self.archetype_load_threshold > 0:
                     scale_start = max(1, int(self.archetype_load_threshold * self.archetype_load_scale_start))
@@ -3100,6 +3124,12 @@ class LLMStrategistBacktester:
                 if risk_used == 0.0 and actual_risk and actual_risk > 0:
                     risk_used = actual_risk
                 self.risk_usage_by_day[day_key][(raw_trigger_id, order.timeframe)] += risk_used
+                _theoretical_cap = risk_snapshot.get("allocated_risk_abs") if risk_snapshot else None
+                _overcharge_ratio = (
+                    _theoretical_cap / max(actual_risk, 1e-9)
+                    if (_theoretical_cap and actual_risk and actual_risk > 0)
+                    else None
+                )
                 self.risk_usage_events_by_day[day_key].append(
                     {
                         "trigger_id": raw_trigger_id,
@@ -3107,6 +3137,8 @@ class LLMStrategistBacktester:
                         "hour": order.timestamp.hour,
                         "risk_used": risk_used,
                         "actual_risk_at_stop": actual_risk,
+                        "theoretical_cap": _theoretical_cap,
+                        "risk_overcharge_ratio": _overcharge_ratio,
                         "archetype": archetype,
                         "profile_multiplier": risk_snapshot.get("profile_multiplier") if risk_snapshot else None,
                         "profile_multiplier_components": risk_snapshot.get("profile_multiplier_components") if risk_snapshot else None,
@@ -4435,6 +4467,9 @@ class LLMStrategistBacktester:
             float(self.portfolio.equity_records[-1]["equity"]) if self.portfolio.equity_records else float(self.initial_cash)
         )
         budget_abs = equity * (pct / 100.0)
+        _risk_limits = getattr(self, "active_risk_limits", None)
+        per_trade_cap_pct = getattr(_risk_limits, "max_position_risk_pct", 0.0) or 0.0
+        per_trade_cap_abs = equity * (per_trade_cap_pct / 100.0) if per_trade_cap_pct > 0 else 0.0
         self.daily_risk_budget_state[day_key] = {
             "budget_pct": pct,
             "start_equity": equity,
@@ -4443,6 +4478,7 @@ class LLMStrategistBacktester:
             "symbol_usage": defaultdict(float),
             "blocks": defaultdict(int),
             "slippage_adjustment": 0.0,
+            "per_trade_cap_abs": per_trade_cap_abs,
         }
 
     def _risk_budget_gate(self, day_key: str, order: Order) -> float | None:
@@ -4470,9 +4506,17 @@ class LLMStrategistBacktester:
         entry = self.daily_risk_budget_state.get(day_key)
         if not entry:
             return
-        entry["used_abs"] = entry.get("used_abs", 0.0) + contribution
+        per_trade_cap = entry.get("per_trade_cap_abs", 0.0)
+        if per_trade_cap > 0 and contribution > per_trade_cap * 1.01:
+            logger.error(
+                "risk budget contribution %.4f exceeds per_trade_cap %.4f for %s — "
+                "stop distance or sizing mismatch upstream. Investigate before scaling capital.",
+                contribution, per_trade_cap, symbol or "unknown",
+            )
+        deduction = min(contribution, per_trade_cap) if per_trade_cap > 0 else contribution
+        entry["used_abs"] = entry.get("used_abs", 0.0) + deduction
         if symbol:
-            entry["symbol_usage"][symbol] += contribution
+            entry["symbol_usage"][symbol] += deduction
 
     def _record_risk_budget_block(self, day_key: str, symbol: str | None) -> None:
         entry = self.daily_risk_budget_state.get(day_key)
@@ -4734,10 +4778,24 @@ class LLMStrategistBacktester:
         suppressed_replans = self.no_change_replan_suppressed_by_day.pop(day_key, 0)
         allocated_risk_abs = 0.0
         actual_risk_abs = 0.0
+        _overcharge_ratios = []
         for evt in risk_usage_events:
             allocated_risk_abs += float(evt.get("risk_used", 0.0))
             if evt.get("actual_risk_at_stop") is not None:
                 actual_risk_abs += float(evt.get("actual_risk_at_stop", 0.0))
+            if evt.get("risk_overcharge_ratio") is not None:
+                _overcharge_ratios.append(float(evt["risk_overcharge_ratio"]))
+        _overcharge_ratios.sort()
+        risk_overcharge_ratio_median = (
+            _overcharge_ratios[len(_overcharge_ratios) // 2] if _overcharge_ratios else None
+        )
+        risk_overcharge_ratio_max = max(_overcharge_ratios) if _overcharge_ratios else None
+        if risk_overcharge_ratio_median is not None and risk_overcharge_ratio_median > 10:
+            logger.warning(
+                "risk_overcharge_ratio_median=%.1f (day=%s) — budget is likely consuming "
+                "theoretical cap instead of actual stop-distance risk.",
+                risk_overcharge_ratio_median, day_key,
+            )
         # Explicit block counters for observability.
         daily_loss_blocks = int(risk_breakdown.get(BlockReason.RISK.value, 0) + risk_breakdown.get("max_daily_loss_pct", 0))
         daily_cap_blocks = int(risk_breakdown.get("daily_cap", 0))
@@ -4781,6 +4839,8 @@ class LLMStrategistBacktester:
             "symbol_pnl": symbol_pnl,
             "allocated_risk_abs": allocated_risk_abs,
             "actual_risk_abs": actual_risk_abs,
+            "risk_overcharge_ratio_median": risk_overcharge_ratio_median,
+            "risk_overcharge_ratio_max": risk_overcharge_ratio_max,
             "risk_usage": {f"{k[0]}|{k[1]}": v for k, v in (risk_usage or {}).items()},
             "risk_usage_events": risk_usage_events,
             "daily_loss_blocks": daily_loss_blocks,

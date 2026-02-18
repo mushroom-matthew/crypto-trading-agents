@@ -109,15 +109,39 @@ uv run pytest -k "risk_budget" -vv
 
 ## Test Evidence
 ```
-TODO
+uv run pytest tests/risk/ tests/integration/test_risk_usage_events_actual_risk.py -v
+20 passed, 1 warning
+
+tests/risk/test_budget_base_equity.py::test_budget_abs_uses_start_of_day_equity PASSED
+tests/risk/test_budget_base_equity.py::test_first_trade_starts_at_zero_usage PASSED
+tests/risk/test_daily_budget_reset.py::test_day_two_not_blocked_by_day_one_usage PASSED
+tests/risk/test_daily_budget_reset.py::test_day_usage_blocks_when_budget_exhausted_same_day PASSED
+tests/risk/test_daily_budget_reset.py::test_used_pct_monotone_and_bounded PASSED
+tests/risk/test_daily_loss_anchor.py::test_anchor_not_reset_intraday PASSED
+tests/risk/test_daily_loss_anchor.py::test_anchor_resets_on_new_day PASSED
+tests/risk/test_exit_bypass.py::test_exit_does_nothing_when_flat PASSED
+tests/risk/test_exit_bypass.py::test_exit_flattens_when_position_exists PASSED
+tests/risk/test_exit_bypass.py::test_emergency_exit_bypasses_risk_budget PASSED
+tests/risk/test_exit_bypass.py::test_regular_entry_blocked_by_zero_risk_budget PASSED
+tests/risk/test_risk_at_stop.py::test_stop_distance_expands_notional_to_match_risk_cap PASSED
+tests/risk/test_risk_at_stop.py::test_no_stop_uses_notional_cap PASSED
+tests/risk/test_risk_at_stop.py::test_tighter_stop_allows_larger_size PASSED
+tests/risk/test_risk_budget_commit_actual.py::test_deducts_actual_not_theoretical PASSED
+tests/risk/test_risk_budget_commit_actual.py::test_capped_deduction_when_contribution_exceeds_per_trade_cap PASSED
+tests/risk/test_risk_budget_commit_actual.py::test_budget_gate_blocks_when_exhausted PASSED
+tests/risk/test_risk_budget_commit_actual.py::test_overcharge_ratio_in_daily_report PASSED
+tests/risk/test_risk_budget_commit_actual.py::test_risk_budget_commits_actual_risk PASSED
+tests/integration/test_risk_usage_events_actual_risk.py::test_risk_usage_events_capture_actual_risk PASSED
 ```
 
 ## Acceptance Criteria
-- [ ] `_commit_risk_budget()` deducts `actual_risk_at_stop`, not theoretical cap
-- [ ] Risk gate (`_risk_budget_allowance()`) still blocks trades where actual risk would exceed cap
-- [ ] Daily report includes `risk_overcharge_ratio_median` and `risk_overcharge_ratio_max`
-- [ ] Backtest shows `risk_overcharge_ratio_median` < 5.0 (was ~255x)
-- [ ] Trade count per day increases (budget no longer exhausts after 2–4 trades)
+- [x] `_commit_risk_budget()` deducts `actual_risk_at_stop`, not theoretical cap (capped at per_trade_cap)
+- [x] `_commit_risk_budget()` logs error when contribution > per_trade_cap * 1.01
+- [x] Fallback chain removed `remaining_gate * 0.1` (was wrong); fallback to `allocated_risk_abs` with warning
+- [x] `per_trade_cap_abs` stored in budget state at day reset (from `active_risk_limits.max_position_risk_pct`)
+- [x] Daily report includes `risk_overcharge_ratio_median` and `risk_overcharge_ratio_max`
+- [ ] Backtest shows `risk_overcharge_ratio_median` < 5.0 (was ~255x) — needs live backtest validation
+- [ ] Trade count per day increases (budget no longer exhausts after 2–4 trades) — needs live backtest validation
 
 ## Human Verification Evidence
 ```
@@ -129,6 +153,7 @@ Confirm trades_per_day increases from ~0.43 baseline.
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-18 | Runbook created from Codex backtest analysis of 5386c15c | Claude |
+| 2026-02-18 | Implemented: per_trade_cap_abs, _commit_risk_budget() cap+error, removed remaining_gate*0.1 fallback, added overcharge ratio telemetry. 20 tests passing. | Claude |
 
 ## Worktree Setup
 ```bash
