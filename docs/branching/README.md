@@ -23,6 +23,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [40-compression-breakout-template.md](40-compression-breakout-template.md): Compression→expansion breakout strategy template — 4 new indicators (bb_bandwidth_pct_rank, compression_flag, expansion_flag, breakout_confirmed) and canonical breakout prompt. Depends on Runbook 38.
 - [41-htf-structure-cascade.md](41-htf-structure-cascade.md): Always load daily candles as an anchor layer — 12 new `htf_*` fields (daily_high, daily_low, prev_daily_high, 5d_high, daily_atr, etc.) for level-based stop and target anchoring. Prerequisite for Runbook 42.
 - [42-level-anchored-stops.md](42-level-anchored-stops.md): Absolute stop/target prices stored per TradeLeg at fill time — 7 stop anchor types (htf_daily_low, donchian_lower, candle_low, atr, etc.), 6 target types (measured_move, htf_daily_high, r_multiple). Exposes `below_stop` and `above_target` as trigger identifiers. Depends on Runbooks 41 and 38.
+- [43-signal-ledger-and-reconciler.md](43-signal-ledger-and-reconciler.md): Signal Ledger + Outcome Reconciler — `SignalEvent` schema with full provenance, persistent `signal_ledger` table, fill drift telemetry (slippage_bps, fill_latency_ms), MFE/MAE tracking, and 5 statistical capital gates. Foundation for monetizable signal track record. Depends on Runbook 42 for stop/target fields.
 - ~~04-emergency-exit-runbook-hold-cooldown.md~~: Min-hold and cooldown enforcement. → Completed, see [X-emergency-exit-runbook-hold-cooldown.md](X-emergency-exit-runbook-hold-cooldown.md).
 - ~~05-emergency-exit-runbook-bypass-override.md~~: Bypass and override behavior. → Completed, see [X-emergency-exit-runbook-bypass-override.md](X-emergency-exit-runbook-bypass-override.md).
 - ~~06-emergency-exit-runbook-edge-cases.md~~: Emergency-exit edge cases. → Completed, see [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md).
@@ -110,21 +111,22 @@ Runbooks 21-27 address issues discovered in backtest ebf53879. Recommended sub-o
 20. **08**: Multi-wallet (Phantom/Solana/EVM read-only + reconciliation)
 
 ### Phase 6 — Strategy intelligence (new direction, 2026-02)
-Runbooks 37–42 represent a product direction shift: from "LLM writes indicator rules" toward "LLM reasons about market structure and chooses instruments." These must be sequenced carefully — candle features and HTF structure are prerequisites for the breakout template and level-anchored stops.
+Runbooks 37–43 represent a product direction shift: from "LLM writes indicator rules" toward "LLM reasons about market structure and chooses instruments." These must be sequenced carefully — candle features and HTF structure are prerequisites for the breakout template and level-anchored stops.
 
 **P0 — Must ship before real money:**
-21. **37**: Risk budget commit actual (255x overcharge blocks all real-capital use cases)
+21. **37**: Risk budget commit actual (255x overcharge blocks all real-capital use cases) ✅ implemented
 
-**Stratum A — Feature foundations (parallel-safe, implement first):**
+**Stratum A — Feature foundations + Signal infrastructure (parallel-safe):**
 22. **38**: Candlestick pattern features (independent; adds 15 identifiers to feature vector)
 23. **41**: HTF structure cascade (independent; adds 12 daily anchor fields)
+24. **43**: Signal ledger & outcome reconciler (Signal→Risk Policy→Execution Adapter architecture; statistical capital gates; requires 42 for stop/target fields)
 
 **Stratum B — Strategy templates (after Stratum A merges):**
-24. **40**: Compression breakout template (requires 38 for is_impulse_candle, is_inside_bar)
-25. **42**: Level-anchored stops (requires 38 for candle_low anchor, 41 for htf_daily_low anchor)
+25. **40**: Compression breakout template (requires 38 for is_impulse_candle, is_inside_bar)
+26. **42**: Level-anchored stops (requires 38 for candle_low anchor, 41 for htf_daily_low anchor)
 
 **Stratum C — Market intelligence (after Stratum B validates in paper trading):**
-26. **39**: Universe screener (standalone; can be built in parallel but validated after 40/42)
+27. **39**: Universe screener (standalone; can be built in parallel but validated after 40/42)
 
 > **Why this order:** Runbook 37 is a correctness bug with zero-cost fix — ship immediately. Candlestick features (38) and HTF structure (41) are additive with no risk of regression and unlock everything downstream. The breakout template (40) and level-anchored stops (42) depend on those features and should be validated together via a paper trading backtest before the universe screener (39) is enabled — you want a working strategy before adding autonomous instrument selection.
 
