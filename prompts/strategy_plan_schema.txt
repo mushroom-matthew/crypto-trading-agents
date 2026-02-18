@@ -147,3 +147,43 @@ HTF STOP AND TARGET ANCHORING:
   (prefer entries for longs — oversold relative to session structure)
 - NOTE: htf_* fields are None before the second completed daily bar. Always combine
   with a fallback (e.g., "htf_daily_low is not None and close < htf_daily_low * 0.995 or close < sma_long * 0.97").
+
+LEVEL-ANCHORED STOP/TARGET FIELDS (Runbook 42):
+  stop_anchor_type (optional field on TriggerCondition):
+    Controls how the stop price is computed when the trigger fires.
+    Values: 'pct' | 'atr' | 'htf_daily_low' | 'htf_prev_daily_low' |
+            'donchian_lower' | 'fib_618' | 'candle_low'
+    Default (null): uses stop_loss_pct percentage calculation.
+    PREFERRED for structure-based strategies: 'htf_daily_low', 'donchian_lower'.
+
+  target_anchor_type (optional field on TriggerCondition):
+    Controls how the profit target is computed at fill time.
+    Values: 'measured_move' | 'htf_daily_high' | 'htf_5d_high' |
+            'r_multiple_2' | 'r_multiple_3'
+    Default (null): no stored target, exits via exit_rule only.
+
+BUILT-IN IDENTIFIERS available after entry (evaluate to True/False or float):
+  below_stop      — True when current close is below the stored stop_price_abs
+  above_target    — True when current close is above the stored target_price_abs
+  stop_price      — The resolved stop price (float, 0.0 if no stop set)
+  target_price    — The resolved target price (float, 0.0 if no target set)
+  stop_distance_pct   — % distance between close and stop_price
+  target_distance_pct — % distance between close and target_price
+
+USAGE IN EXIT RULES:
+  Recommended exit pattern for structure-based entries:
+    exit_rule: "not is_flat and (below_stop or above_target)"
+
+  Combined with rule-based exits:
+    exit_rule: "not is_flat and (below_stop or above_target or (rsi_14 > 75 and macd_hist < 0))"
+
+  Approach-to-target scale-out (risk_reduce):
+    exit_rule: "not is_flat and target_distance_pct < 0.3"
+    exit_fraction: 0.5
+
+STOP ANCHORING PRIORITY (use the tightest that still makes structural sense):
+  1. candle_low     — tightest (below trigger bar's low); best for high-conviction setups
+  2. donchian_lower — below compression range low; canonical for breakout setups
+  3. htf_daily_low  — below prior session low; gives more room but structurally important
+  4. atr            — 1.5 ATR below entry; volatility-normalized fallback
+  5. pct            — last resort; arbitrary, not structure-based
