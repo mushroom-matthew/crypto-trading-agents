@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from metrics import technical as tech
+from metrics import candlestick as cs
 from metrics.base import MetricResult, prepare_ohlcv_df
 from schemas.llm_strategist import AssetState, IndicatorSnapshot
 
@@ -328,11 +329,87 @@ def _expansion_contraction(
     return expansion_pct, contraction_pct, ratio
 
 
+def _daily_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Compute ATR on daily bars using true-range rolling mean."""
+    high = df["high"]
+    low = df["low"]
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr_series = tr.rolling(window=period, min_periods=period).mean()
+    last = atr_series.iloc[-1]
+    return float(last) if not pd.isna(last) else float((high - low).mean())
+
+
+def compute_htf_structural_fields(
+    bar_timestamp: "datetime",
+    daily_df: pd.DataFrame | None,
+) -> dict:
+    """Compute prior-session daily anchor fields for a given bar timestamp.
+
+    Finds the two most recently completed daily sessions before bar_timestamp
+    and returns structural anchor values: high, low, open, close, ATR, 5-day
+    rolling extremes, and position-in-range metric.
+
+    Returns an empty dict if daily_df is None, empty, or has fewer than 2
+    completed sessions before bar_timestamp (ATR warmup not yet satisfied).
+    """
+    if daily_df is None or daily_df.empty:
+        return {}
+
+    idx = daily_df.index
+    if hasattr(idx, "date"):
+        bar_date = bar_timestamp.date() if hasattr(bar_timestamp, "date") else bar_timestamp.to_pydatetime().date()
+        completed = daily_df[idx.date < bar_date]
+    else:
+        # Fallback: compare as timestamps
+        ts = pd.Timestamp(bar_timestamp)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        completed = daily_df[daily_df.index < ts.normalize()]
+
+    if len(completed) < 2:
+        return {}
+
+    prev = completed.iloc[-1]    # Most recently completed session (yesterday)
+    prev2 = completed.iloc[-2]   # Session before that
+
+    daily_atr_val = _daily_atr(completed)
+    last_5 = completed.tail(5)
+    five_day_high = float(last_5["high"].max())
+    five_day_low = float(last_5["low"].min())
+
+    daily_high = float(prev["high"])
+    daily_low = float(prev["low"])
+    daily_close = float(prev["close"])
+    daily_mid = (daily_high + daily_low) / 2.0
+
+    return {
+        "htf_daily_open": float(prev["open"]),
+        "htf_daily_high": daily_high,
+        "htf_daily_low": daily_low,
+        "htf_daily_close": daily_close,
+        "htf_prev_daily_high": float(prev2["high"]),
+        "htf_prev_daily_low": float(prev2["low"]),
+        "htf_prev_daily_open": float(prev2["open"]),
+        "htf_daily_atr": daily_atr_val,
+        "htf_daily_range_pct": (daily_high - daily_low) / max(daily_close, 1e-9) * 100.0,
+        "htf_5d_high": five_day_high,
+        "htf_5d_low": five_day_low,
+        "htf_prev_daily_mid": (float(prev2["high"]) + float(prev2["low"])) / 2.0,
+    }
+
+
 def compute_indicator_snapshot(
     df: pd.DataFrame,
     symbol: str,
     timeframe: str,
     config: IndicatorWindowConfig | None = None,
+    daily_df: pd.DataFrame | None = None,
 ) -> IndicatorSnapshot:
     """Produce an IndicatorSnapshot from OHLCV data."""
 
@@ -374,6 +451,10 @@ def compute_indicator_snapshot(
         mean_volume = float(volume_series.tail(window.short_window).mean())
         if mean_volume and not np.isnan(mean_volume):
             volume_multiple = float(volume_val / mean_volume) if volume_val is not None else None
+
+    # Candlestick morphology features (Runbook 38)
+    candle_feats = cs.compute_candlestick_features(prepared, atr_series)
+    _cf = candle_feats.iloc[-1]
 
     # Cycle indicators (200-bar window for cyclical analysis)
     cycle_high, cycle_low, cycle_range, cycle_position = _cycle_indicators(
@@ -431,6 +512,15 @@ def compute_indicator_snapshot(
             impulse_ema50_24 = None
 
     as_of = prepared["timestamp"].iloc[-1].to_pydatetime()
+
+    # HTF structural anchor fields (Runbook 41)
+    htf = compute_htf_structural_fields(as_of, daily_df)
+    if htf:
+        current_close = float(close.iloc[-1])
+        daily_atr_htf = htf.get("htf_daily_atr", 1.0) or 1.0
+        daily_mid_htf = (htf.get("htf_daily_high", current_close) + htf.get("htf_daily_low", current_close)) / 2.0
+        htf["htf_price_vs_daily_mid"] = (current_close - daily_mid_htf) / max(daily_atr_htf, 1e-9)
+
     return IndicatorSnapshot(
         symbol=symbol,
         timeframe=timeframe,
@@ -493,6 +583,36 @@ def compute_indicator_snapshot(
         vwap=vwap_val,
         vwap_distance_pct=vwap_dist,
         vol_burst=vol_burst_flag,
+        # Candlestick morphology (Runbook 38)
+        candle_body_pct=float(_cf["candle_body_pct"]),
+        candle_upper_wick_pct=float(_cf["candle_upper_wick_pct"]),
+        candle_lower_wick_pct=float(_cf["candle_lower_wick_pct"]),
+        candle_strength=float(_cf["candle_strength"]),
+        is_bullish=float(_cf["is_bullish"]),
+        is_bearish=float(_cf["is_bearish"]),
+        is_doji=float(_cf["is_doji"]),
+        is_hammer=float(_cf["is_hammer"]),
+        is_shooting_star=float(_cf["is_shooting_star"]),
+        is_pin_bar=float(_cf["is_pin_bar"]),
+        is_bullish_engulfing=float(_cf["is_bullish_engulfing"]),
+        is_bearish_engulfing=float(_cf["is_bearish_engulfing"]),
+        is_inside_bar=float(_cf["is_inside_bar"]),
+        is_outside_bar=float(_cf["is_outside_bar"]),
+        is_impulse_candle=float(_cf["is_impulse_candle"]),
+        # HTF structural anchors (Runbook 41)
+        htf_daily_open=htf.get("htf_daily_open"),
+        htf_daily_high=htf.get("htf_daily_high"),
+        htf_daily_low=htf.get("htf_daily_low"),
+        htf_daily_close=htf.get("htf_daily_close"),
+        htf_prev_daily_high=htf.get("htf_prev_daily_high"),
+        htf_prev_daily_low=htf.get("htf_prev_daily_low"),
+        htf_prev_daily_open=htf.get("htf_prev_daily_open"),
+        htf_daily_atr=htf.get("htf_daily_atr"),
+        htf_daily_range_pct=htf.get("htf_daily_range_pct"),
+        htf_price_vs_daily_mid=htf.get("htf_price_vs_daily_mid"),
+        htf_5d_high=htf.get("htf_5d_high"),
+        htf_5d_low=htf.get("htf_5d_low"),
+        htf_prev_daily_mid=htf.get("htf_prev_daily_mid"),
     )
 
 
@@ -564,6 +684,9 @@ def precompute_indicator_frame(
 
     # Volume burst detection
     vol_burst = volume_multiple >= window.vol_burst_threshold
+
+    # Candlestick morphology features (Runbook 38)
+    candle_feats_frame = cs.compute_candlestick_features(prepared, atr_val)
 
     prev_open = open_series.shift(1) if open_series is not None else pd.Series(np.nan, index=prepared.index)
     prev_high = high.shift(1)
@@ -639,6 +762,22 @@ def precompute_indicator_frame(
             "vwap": vwap_series,
             "vwap_distance_pct": vwap_distance_pct,
             "vol_burst": vol_burst,
+            # Candlestick morphology (Runbook 38)
+            "candle_body_pct": candle_feats_frame["candle_body_pct"],
+            "candle_upper_wick_pct": candle_feats_frame["candle_upper_wick_pct"],
+            "candle_lower_wick_pct": candle_feats_frame["candle_lower_wick_pct"],
+            "candle_strength": candle_feats_frame["candle_strength"],
+            "is_bullish": candle_feats_frame["is_bullish"],
+            "is_bearish": candle_feats_frame["is_bearish"],
+            "is_doji": candle_feats_frame["is_doji"],
+            "is_hammer": candle_feats_frame["is_hammer"],
+            "is_shooting_star": candle_feats_frame["is_shooting_star"],
+            "is_pin_bar": candle_feats_frame["is_pin_bar"],
+            "is_bullish_engulfing": candle_feats_frame["is_bullish_engulfing"],
+            "is_bearish_engulfing": candle_feats_frame["is_bearish_engulfing"],
+            "is_inside_bar": candle_feats_frame["is_inside_bar"],
+            "is_outside_bar": candle_feats_frame["is_outside_bar"],
+            "is_impulse_candle": candle_feats_frame["is_impulse_candle"],
         }
     )
     frame.set_index("timestamp", inplace=True)
@@ -750,6 +889,24 @@ def snapshot_from_frame(
         vwap=_optional_float(row.get("vwap")),
         vwap_distance_pct=_optional_float(row.get("vwap_distance_pct")),
         vol_burst=_optional_bool(row.get("vol_burst")),
+        # Candlestick morphology (Runbook 38) — precomputed in frame
+        candle_body_pct=_optional_float(row.get("candle_body_pct")),
+        candle_upper_wick_pct=_optional_float(row.get("candle_upper_wick_pct")),
+        candle_lower_wick_pct=_optional_float(row.get("candle_lower_wick_pct")),
+        candle_strength=_optional_float(row.get("candle_strength")),
+        is_bullish=_optional_float(row.get("is_bullish")),
+        is_bearish=_optional_float(row.get("is_bearish")),
+        is_doji=_optional_float(row.get("is_doji")),
+        is_hammer=_optional_float(row.get("is_hammer")),
+        is_shooting_star=_optional_float(row.get("is_shooting_star")),
+        is_pin_bar=_optional_float(row.get("is_pin_bar")),
+        is_bullish_engulfing=_optional_float(row.get("is_bullish_engulfing")),
+        is_bearish_engulfing=_optional_float(row.get("is_bearish_engulfing")),
+        is_inside_bar=_optional_float(row.get("is_inside_bar")),
+        is_outside_bar=_optional_float(row.get("is_outside_bar")),
+        is_impulse_candle=_optional_float(row.get("is_impulse_candle")),
+        # HTF structural anchors (Runbook 41) — not precomputed; always None from frame
+        # Applied by the runner via model_copy after snapshot_from_frame returns.
     )
 
 

@@ -304,16 +304,47 @@ uv run pytest -k "snapshot" -vv
 
 ## Test Evidence
 ```
-TODO
+uv run pytest tests/test_candlestick_patterns.py tests/test_htf_structure_cascade.py -vv
+45 passed in 4.25s
+
+tests/test_candlestick_patterns.py::test_body_pct_marubozu PASSED
+tests/test_candlestick_patterns.py::test_body_pct_doji PASSED
+tests/test_candlestick_patterns.py::test_upper_wick_pct_only_upper PASSED
+tests/test_candlestick_patterns.py::test_lower_wick_pct_only_lower PASSED
+tests/test_candlestick_patterns.py::test_candle_strength_impulse PASSED
+tests/test_candlestick_patterns.py::test_candle_strength_zero_atr PASSED
+tests/test_candlestick_patterns.py::test_is_bullish PASSED
+tests/test_candlestick_patterns.py::test_is_bearish PASSED
+tests/test_candlestick_patterns.py::test_is_bullish_and_bearish_mutually_exclusive PASSED
+tests/test_candlestick_patterns.py::test_doji_detected PASSED
+tests/test_candlestick_patterns.py::test_doji_not_detected_for_full_body PASSED
+tests/test_candlestick_patterns.py::test_hammer_detected PASSED
+tests/test_candlestick_patterns.py::test_hammer_not_detected_for_shooting_star PASSED
+tests/test_candlestick_patterns.py::test_shooting_star_detected PASSED
+tests/test_candlestick_patterns.py::test_pin_bar_lower_wick PASSED
+tests/test_candlestick_patterns.py::test_pin_bar_upper_wick PASSED
+tests/test_candlestick_patterns.py::test_bullish_engulfing_detected PASSED
+tests/test_candlestick_patterns.py::test_bullish_engulfing_not_fired_on_first_bar PASSED
+tests/test_candlestick_patterns.py::test_bearish_engulfing_detected PASSED
+tests/test_candlestick_patterns.py::test_inside_bar_detected PASSED
+tests/test_candlestick_patterns.py::test_inside_bar_not_detected_when_range_equal PASSED
+tests/test_candlestick_patterns.py::test_outside_bar_detected PASSED
+tests/test_candlestick_patterns.py::test_impulse_candle_detected PASSED
+tests/test_candlestick_patterns.py::test_impulse_candle_not_detected_small_body PASSED
+tests/test_candlestick_patterns.py::test_all_features_present PASSED
+tests/test_candlestick_patterns.py::test_all_features_are_float PASSED
+tests/test_candlestick_patterns.py::test_no_nan_in_single_bar_features PASSED
+tests/test_candlestick_patterns.py::test_two_bar_patterns_zero_on_first_row PASSED
 ```
 
 ## Acceptance Criteria
-- [ ] `metrics/candlestick.py` contains all 15 features (4 scalar, 11 boolean)
-- [ ] Each pattern detector passes unit test with known OHLC inputs
-- [ ] `IndicatorSnapshot` schema includes all 15 new optional fields
-- [ ] `compute_indicator_snapshot()` populates candlestick features from live OHLCV
-- [ ] Allowed identifiers in `strategy_plan_schema.txt` list all 15 names with usage guidance
-- [ ] No existing tests broken (Pydantic `extra="forbid"` satisfied, no field name collisions)
+- [x] `metrics/candlestick.py` contains all 15 features (4 scalar, 11 boolean)
+- [x] Each pattern detector passes unit test with known OHLC inputs
+- [x] `IndicatorSnapshot` schema includes all 15 new optional fields
+- [x] `compute_indicator_snapshot()` populates candlestick features from live OHLCV
+- [x] `precompute_indicator_frame()` + `snapshot_from_frame()` also populate candlestick features
+- [x] Allowed identifiers in `strategy_plan_schema.txt` list all 15 names with usage guidance
+- [x] No existing tests broken (649 passing, 2 isolation-only pre-existing failures)
 
 ## Human Verification Evidence
 ```

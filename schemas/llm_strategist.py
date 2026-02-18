@@ -90,6 +90,36 @@ class IndicatorSnapshot(SerializableModel):
     vwap_distance_pct: float | None = None  # Distance from VWAP as %
     vol_burst: bool | None = None  # True when volume_multiple >= threshold
     rand_u: float | None = None  # Deterministic pseudo-random scalar in [0, 1) for control tests
+    # Candlestick morphology features (Runbook 38)
+    candle_body_pct: float | None = None          # 0=doji, 1=marubozu
+    candle_upper_wick_pct: float | None = None    # upper wick / range
+    candle_lower_wick_pct: float | None = None    # lower wick / range
+    candle_strength: float | None = None          # body / ATR (>1 = impulse move)
+    is_bullish: float | None = None               # 1.0 if close > open
+    is_bearish: float | None = None               # 1.0 if close < open
+    is_doji: float | None = None                  # 1.0 if body_pct < 0.10
+    is_hammer: float | None = None                # 1.0 if hammer pattern
+    is_shooting_star: float | None = None         # 1.0 if shooting star pattern
+    is_pin_bar: float | None = None               # 1.0 if long wick either side
+    is_bullish_engulfing: float | None = None     # 1.0 if bullish engulfing
+    is_bearish_engulfing: float | None = None     # 1.0 if bearish engulfing
+    is_inside_bar: float | None = None            # 1.0 if range inside prior bar
+    is_outside_bar: float | None = None           # 1.0 if range outside prior bar
+    is_impulse_candle: float | None = None        # 1.0 if body >= ATR threshold
+    # Higher-timeframe structural anchor layer (Runbook 41)
+    htf_daily_open: float | None = None           # Prior completed session's open
+    htf_daily_high: float | None = None           # Prior completed session's high
+    htf_daily_low: float | None = None            # Prior completed session's low
+    htf_daily_close: float | None = None          # Prior completed session's close
+    htf_prev_daily_high: float | None = None      # Session-before-prior's high
+    htf_prev_daily_low: float | None = None       # Session-before-prior's low
+    htf_prev_daily_open: float | None = None      # Session-before-prior's open
+    htf_daily_atr: float | None = None            # ATR(14) on daily bars
+    htf_daily_range_pct: float | None = None      # (daily_high - daily_low) / daily_close * 100
+    htf_price_vs_daily_mid: float | None = None   # (close - daily_mid) / daily_atr (ATR-normalized)
+    htf_5d_high: float | None = None              # Rolling 5-session high (weekly proxy)
+    htf_5d_low: float | None = None               # Rolling 5-session low (weekly proxy)
+    htf_prev_daily_mid: float | None = None       # (prev2_high + prev2_low) / 2
 
 
 class AssetState(SerializableModel):
