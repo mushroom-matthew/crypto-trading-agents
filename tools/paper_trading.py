@@ -27,6 +27,7 @@ with workflow.unsafe.imports_passed_through():
         IndicatorWindowConfig,
         build_asset_state,
         compute_indicator_snapshot,
+        compute_htf_structural_fields,
         compute_portfolio_state,
     )
     from schemas.llm_strategist import (
@@ -128,20 +129,25 @@ async def generate_strategy_plan_activity(
     assets = []
     for symbol in symbols:
         ctx = market_context.get(symbol, {})
-        close = float(ctx.get("price", 0.0) or 0.0)
-        snapshot = IndicatorSnapshot(
-            symbol=symbol,
-            timeframe="1h",
-            as_of=now,
-            close=close,
-            rsi_14=ctx.get("rsi_14"),
-            sma_short=ctx.get("sma_short"),
-            sma_medium=ctx.get("sma_medium"),
-            sma_long=ctx.get("sma_long"),
-            atr_14=ctx.get("atr_14"),
-            bollinger_upper=ctx.get("bollinger_upper"),
-            bollinger_lower=ctx.get("bollinger_lower"),
-        )
+        # If the context came from fetch_indicator_snapshots_activity it has the
+        # full IndicatorSnapshot field set.  Reconstruct directly to preserve all
+        # indicators (RSI, SMA, ATR, Bollinger, candlestick, HTF anchors, etc.).
+        # Fall back to the minimal subset for backwards-compat (e.g. cold-start).
+        if ctx.get("close") is not None or ctx.get("as_of") is not None:
+            snap_init = {k: v for k, v in ctx.items()
+                         if k not in ("trend_state", "vol_state", "price")}
+            snap_init.setdefault("symbol", symbol)
+            snap_init.setdefault("timeframe", "1h")
+            snap_init.setdefault("as_of", now)
+            try:
+                snapshot = IndicatorSnapshot.model_validate(snap_init)
+            except Exception as e:
+                logger.warning(f"Full indicator snapshot validation failed for {symbol}, using minimal: {e}")
+                close = float(ctx.get("price", ctx.get("close", 0.0)) or 0.0)
+                snapshot = IndicatorSnapshot(symbol=symbol, timeframe="1h", as_of=now, close=close)
+        else:
+            close = float(ctx.get("price", 0.0) or 0.0)
+            snapshot = IndicatorSnapshot(symbol=symbol, timeframe="1h", as_of=now, close=close)
         assets.append(build_asset_state(symbol, [snapshot]))
 
     positions_raw = portfolio_state.get("positions", {})
@@ -397,6 +403,72 @@ async def fetch_current_prices_activity(symbols: List[str]) -> Dict[str, float]:
         return prices
     finally:
         await client.close()
+
+
+@activity.defn
+async def fetch_indicator_snapshots_activity(
+    symbols: List[str],
+    timeframe: str = "1h",
+    lookback_candles: int = 300,
+) -> Dict[str, Any]:
+    """Fetch OHLCV history and compute full indicator snapshots for each symbol.
+
+    Returns {symbol: dict} with all IndicatorSnapshot fields, plus
+    'trend_state' and 'vol_state' derived from the indicators.  This gives
+    the LLM strategist the same macro/micro picture it gets from the backtester.
+    """
+    import ccxt.async_support as ccxt
+    import numpy as np
+    import pandas as pd
+
+    client = ccxt.coinbaseexchange()
+    client.enableRateLimit = True
+    now = datetime.now(timezone.utc)
+    results: Dict[str, Any] = {}
+
+    def _ohlcv_to_df(rows: list) -> pd.DataFrame:
+        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["time"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        return df.set_index("time").drop(columns=["timestamp"])
+
+    try:
+        for symbol in symbols:
+            try:
+                # Fetch intraday history
+                ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=lookback_candles)
+                if not ohlcv:
+                    logger.warning(f"No OHLCV data for {symbol} {timeframe}")
+                    continue
+                df = _ohlcv_to_df(ohlcv)
+
+                # Fetch daily bars for HTF structural anchors (Runbook 41)
+                daily_ohlcv = await client.fetch_ohlcv(symbol, "1d", limit=30)
+                daily_df = _ohlcv_to_df(daily_ohlcv) if daily_ohlcv else None
+
+                # Compute full indicator snapshot (RSI, SMA, ATR, Bollinger, candlestick, etc.)
+                config = IndicatorWindowConfig(timeframe=timeframe)
+                snapshot = compute_indicator_snapshot(df, symbol, timeframe, config=config, daily_df=daily_df)
+
+                # Apply HTF structural fields (daily anchor layer)
+                if daily_df is not None:
+                    htf = compute_htf_structural_fields(now, daily_df)
+                    if htf:
+                        daily_atr = htf.get("htf_daily_atr", 1.0) or 1.0
+                        daily_high = htf.get("htf_daily_high", snapshot.close)
+                        daily_low = htf.get("htf_daily_low", snapshot.close)
+                        daily_mid = (daily_high + daily_low) / 2.0
+                        htf["htf_price_vs_daily_mid"] = (snapshot.close - daily_mid) / max(daily_atr, 1e-9)
+                        snapshot = snapshot.model_copy(update=htf)
+
+                snap_dict = snapshot.model_dump()
+                results[symbol] = snap_dict
+
+            except Exception as e:
+                logger.warning(f"Failed to compute indicators for {symbol}: {e}")
+    finally:
+        await client.close()
+
+    return results
 
 
 @activity.defn
@@ -682,23 +754,30 @@ class PaperTradingWorkflow:
             schedule_to_close_timeout=timedelta(seconds=10),
         )
 
-        # Fetch live prices so market context has real data for the LLM
-        current_prices = await workflow.execute_activity(
-            fetch_current_prices_activity,
-            args=[self.symbols],
-            schedule_to_close_timeout=timedelta(seconds=30),
+        # Fetch OHLCV history and compute full indicator snapshots so the LLM
+        # sees the same macro/micro picture as the backtester (RSI, SMA, ATR,
+        # Bollinger, candlestick morphology, HTF daily anchors, etc.).
+        indicator_snapshots = await workflow.execute_activity(
+            fetch_indicator_snapshots_activity,
+            args=[self.symbols, "1h", 300],
+            schedule_to_close_timeout=timedelta(minutes=2),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
-        # Build market context — prefer live price over ledger last_prices
+        # Build market context from full snapshots; fall back to ledger price
+        # for any symbol that failed indicator computation.
         market_context = {}
         for symbol in self.symbols:
-            price = current_prices.get(symbol) or portfolio_state.get("last_prices", {}).get(symbol, 0)
-            market_context[symbol] = {
-                "price": price,
-                "trend_state": "sideways",  # will be replaced by screener output (Runbook 39)
-                "vol_state": "normal",
-            }
+            snap = indicator_snapshots.get(symbol)
+            if snap:
+                market_context[symbol] = snap
+            else:
+                last_price = portfolio_state.get("last_prices", {}).get(symbol, 0)
+                market_context[symbol] = {
+                    "price": last_price,
+                    "trend_state": "sideways",
+                    "vol_state": "normal",
+                }
 
         # Generate plan
         plan_dict = await workflow.execute_activity(
