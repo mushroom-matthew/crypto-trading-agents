@@ -682,13 +682,21 @@ class PaperTradingWorkflow:
             schedule_to_close_timeout=timedelta(seconds=10),
         )
 
-        # Build market context (simplified for now)
+        # Fetch live prices so market context has real data for the LLM
+        current_prices = await workflow.execute_activity(
+            fetch_current_prices_activity,
+            args=[self.symbols],
+            schedule_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+        # Build market context — prefer live price over ledger last_prices
         market_context = {}
         for symbol in self.symbols:
-            # In full implementation, would query ComputeFeatureVector workflows
+            price = current_prices.get(symbol) or portfolio_state.get("last_prices", {}).get(symbol, 0)
             market_context[symbol] = {
-                "price": portfolio_state.get("last_prices", {}).get(symbol, 0),
-                "trend_state": "sideways",  # default; will be computed from indicators when screener is wired
+                "price": price,
+                "trend_state": "sideways",  # will be replaced by screener output (Runbook 39)
                 "vol_state": "normal",
             }
 
