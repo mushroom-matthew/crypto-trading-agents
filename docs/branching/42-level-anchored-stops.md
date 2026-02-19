@@ -263,11 +263,19 @@ uv run pytest -k "trade_set" -vv
 
 ## Test Evidence
 ```
+# Initial implementation (Runbook 42):
 uv run pytest tests/test_level_anchored_stops.py tests/test_trigger_engine.py tests/test_trade_set.py -vv
 90 passed in 9.82s
 
 Full suite: 681 passed, 3 failed (pre-existing isolation failures), 1 skipped
 New tests added: 33 (test_level_anchored_stops.py)
+
+# Hotfix: direction-aware anchors + stop_hit/target_hit (fix/r42-direction-aware):
+uv run pytest tests/test_level_anchored_stops.py -vv
+64 passed in 14.79s
+
+Full suite: 713 passed, 2 failed (pre-existing isolation failures), 1 skipped
+New tests added: 31 additional (64 total in test_level_anchored_stops.py)
 ```
 
 ## Acceptance Criteria
@@ -298,6 +306,12 @@ TriggerCondition schema accepts stop_anchor_type and target_anchor_type without 
 | 2026-02-18 | Implementation: agents/strategies/trigger_engine.py — added below_stop, above_target, stop_price, target_price, stop_distance_pct, target_distance_pct to _context() namespace | Claude |
 | 2026-02-18 | Implementation: prompts/strategy_plan_schema.txt — added LEVEL-ANCHORED STOP/TARGET FIELDS section | Claude |
 | 2026-02-18 | Tests: tests/test_level_anchored_stops.py — 33 new unit tests | Claude |
+| 2026-02-18 | Hotfix (fix/r42-direction-aware): _resolve_stop_price_anchored() made direction-aware — long-only anchors return None for shorts; added short-only anchors (htf_daily_high, htf_prev_daily_high, donchian_upper, candle_high); added family anchors (htf_daily_extreme, htf_prev_daily_extreme, donchian_extreme, candle_extreme); ATR mult now configurable via stop_loss_atr_mult | Claude |
+| 2026-02-18 | Hotfix: _resolve_target_price_anchored() made direction-aware — htf_daily_high/htf_5d_high long-only; added short targets (htf_daily_low, htf_5d_low); added family targets (htf_daily_extreme, htf_5d_extreme) | Claude |
+| 2026-02-18 | Hotfix: trigger_engine._context() — replaced below_stop/above_target with direction-aware stop_hit/target_hit; kept old names as backward-compat aliases | Claude |
+| 2026-02-18 | Hotfix: schemas/llm_strategist.py — added stop_loss_atr_mult to TriggerCondition | Claude |
+| 2026-02-18 | Hotfix: prompts/strategy_plan_schema.txt — documented all new anchors, stop_hit/target_hit, stop_loss_atr_mult, precedence rules | Claude |
+| 2026-02-18 | Hotfix: tests/test_level_anchored_stops.py — 31 new tests (64 total) covering direction-aware behavior | Claude |
 
 ## Worktree Setup
 ```bash

@@ -45,6 +45,7 @@ def _snapshot(**kwargs) -> IndicatorSnapshot:
         as_of=_ts(),
         close=50000.0,
         low=49500.0,
+        high=50500.0,
         atr_14=800.0,
         donchian_lower_short=48000.0,
         donchian_upper_short=52000.0,
@@ -52,7 +53,9 @@ def _snapshot(**kwargs) -> IndicatorSnapshot:
         htf_daily_low=48500.0,
         htf_prev_daily_low=48000.0,
         htf_daily_high=52500.0,
+        htf_prev_daily_high=52000.0,
         htf_5d_high=53000.0,
+        htf_5d_low=47500.0,
     )
     defaults.update(kwargs)
     return IndicatorSnapshot(**defaults)
@@ -432,3 +435,319 @@ def test_stop_price_zero_when_no_stop():
     ctx = _make_engine_context(close=50000.0, stop_price_abs=None, target_price_abs=None, is_long=True)
     assert ctx["stop_price"] == 0.0
     assert ctx["target_price"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Direction-aware anchors — short-only and family (Runbook 42 hotfix)
+# ---------------------------------------------------------------------------
+
+def test_stop_htf_daily_low_returns_none_for_short():
+    """Long-only htf_daily_low anchor must return None for shorts."""
+    trig = _trigger(stop_anchor_type="htf_daily_low", direction="short")
+    snap = _snapshot(htf_daily_low=48500.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert price is None
+    assert anchor is None
+
+
+def test_stop_htf_prev_daily_low_returns_none_for_short():
+    """Long-only htf_prev_daily_low anchor must return None for shorts."""
+    trig = _trigger(stop_anchor_type="htf_prev_daily_low", direction="short")
+    snap = _snapshot(htf_prev_daily_low=48000.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert price is None
+    assert anchor is None
+
+
+def test_stop_donchian_lower_returns_none_for_short():
+    """Long-only donchian_lower anchor must return None for shorts."""
+    trig = _trigger(stop_anchor_type="donchian_lower", direction="short")
+    snap = _snapshot(donchian_lower_short=48000.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert price is None
+    assert anchor is None
+
+
+def test_stop_candle_low_returns_none_for_short():
+    """Long-only candle_low anchor must return None for shorts."""
+    trig = _trigger(stop_anchor_type="candle_low", direction="short")
+    snap = _snapshot(low=49500.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert price is None
+    assert anchor is None
+
+
+def test_stop_htf_daily_high_for_short():
+    """htf_daily_high: 0.5% above prior session high for shorts."""
+    trig = _trigger(stop_anchor_type="htf_daily_high", direction="short")
+    snap = _snapshot(htf_daily_high=52500.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert anchor == "htf_daily_high"
+    assert price == pytest.approx(52500.0 * 1.005, rel=1e-6)
+
+
+def test_stop_htf_daily_high_returns_none_for_long():
+    """Short-only htf_daily_high anchor must return None for longs."""
+    trig = _trigger(stop_anchor_type="htf_daily_high", direction="long")
+    snap = _snapshot(htf_daily_high=52500.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "long")
+    assert price is None
+    assert anchor is None
+
+
+def test_stop_htf_prev_daily_high_for_short():
+    """htf_prev_daily_high: 0.5% above session-before-prior high for shorts."""
+    trig = _trigger(stop_anchor_type="htf_prev_daily_high", direction="short")
+    snap = _snapshot()
+    snap = _snapshot(htf_prev_daily_high=52000.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert anchor == "htf_prev_daily_high"
+    assert price == pytest.approx(52000.0 * 1.005, rel=1e-6)
+
+
+def test_stop_donchian_upper_for_short():
+    """donchian_upper: 0.5% above Donchian upper for shorts."""
+    trig = _trigger(stop_anchor_type="donchian_upper", direction="short")
+    snap = _snapshot(donchian_upper_short=52000.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert anchor == "donchian_upper"
+    assert price == pytest.approx(52000.0 * 1.005, rel=1e-6)
+
+
+def test_stop_candle_high_for_short():
+    """candle_high: 0.2% above trigger bar's high for shorts."""
+    trig = _trigger(stop_anchor_type="candle_high", direction="short")
+    snap = _snapshot(high=50500.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert anchor == "candle_high"
+    assert price == pytest.approx(50500.0 * 1.002, rel=1e-6)
+
+
+def test_stop_htf_daily_extreme_long():
+    """htf_daily_extreme auto-selects htf_daily_low for longs."""
+    trig = _trigger(stop_anchor_type="htf_daily_extreme")
+    snap = _snapshot(htf_daily_low=48500.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "long")
+    assert anchor == "htf_daily_extreme"
+    assert price == pytest.approx(48500.0 * 0.995, rel=1e-6)
+
+
+def test_stop_htf_daily_extreme_short():
+    """htf_daily_extreme auto-selects htf_daily_high for shorts."""
+    trig = _trigger(stop_anchor_type="htf_daily_extreme", direction="short")
+    snap = _snapshot(htf_daily_high=52500.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert anchor == "htf_daily_extreme"
+    assert price == pytest.approx(52500.0 * 1.005, rel=1e-6)
+
+
+def test_stop_donchian_extreme_long():
+    """donchian_extreme auto-selects donchian_lower for longs."""
+    trig = _trigger(stop_anchor_type="donchian_extreme")
+    snap = _snapshot(donchian_lower_short=48000.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "long")
+    assert anchor == "donchian_extreme"
+    assert price == pytest.approx(48000.0 * 0.995, rel=1e-6)
+
+
+def test_stop_donchian_extreme_short():
+    """donchian_extreme auto-selects donchian_upper for shorts."""
+    trig = _trigger(stop_anchor_type="donchian_extreme", direction="short")
+    snap = _snapshot(donchian_upper_short=52000.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert anchor == "donchian_extreme"
+    assert price == pytest.approx(52000.0 * 1.005, rel=1e-6)
+
+
+def test_stop_candle_extreme_short():
+    """candle_extreme auto-selects candle high for shorts."""
+    trig = _trigger(stop_anchor_type="candle_extreme", direction="short")
+    snap = _snapshot(high=50800.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "short")
+    assert anchor == "candle_extreme"
+    assert price == pytest.approx(50800.0 * 1.002, rel=1e-6)
+
+
+def test_stop_atr_custom_mult():
+    """'atr' anchor uses stop_loss_atr_mult when provided."""
+    trig = _trigger(stop_anchor_type="atr", stop_loss_atr_mult=2.0)
+    snap = _snapshot(atr_14=800.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "long")
+    assert anchor == "atr"
+    assert price == pytest.approx(50000.0 - 2.0 * 800.0, rel=1e-6)
+
+
+def test_stop_atr_default_mult_when_none():
+    """'atr' anchor uses 1.5 mult when stop_loss_atr_mult is None."""
+    trig = _trigger(stop_anchor_type="atr")  # stop_loss_atr_mult defaults to None
+    snap = _snapshot(atr_14=800.0)
+    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "long")
+    assert anchor == "atr"
+    assert price == pytest.approx(50000.0 - 1.5 * 800.0, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Direction-aware target anchors — short-only and family
+# ---------------------------------------------------------------------------
+
+def test_target_htf_daily_high_returns_none_for_short():
+    """Long-only htf_daily_high target must return None for shorts."""
+    trig = _trigger(target_anchor_type="htf_daily_high", direction="short")
+    snap = _snapshot(htf_daily_high=52500.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "short")
+    assert price is None
+    assert anchor is None
+
+
+def test_target_htf_daily_low_for_short():
+    """htf_daily_low target: 0.2% above prior session low for shorts."""
+    trig = _trigger(target_anchor_type="htf_daily_low", direction="short")
+    snap = _snapshot(htf_daily_low=48500.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "short")
+    assert anchor == "htf_daily_low"
+    assert price == pytest.approx(48500.0 * 1.002, rel=1e-6)
+
+
+def test_target_htf_daily_low_returns_none_for_long():
+    """Short-only htf_daily_low target must return None for longs."""
+    trig = _trigger(target_anchor_type="htf_daily_low")
+    snap = _snapshot(htf_daily_low=48500.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "long")
+    assert price is None
+    assert anchor is None
+
+
+def test_target_htf_5d_low_for_short():
+    """htf_5d_low target: 0.2% above 5-day low for shorts."""
+    trig = _trigger(target_anchor_type="htf_5d_low", direction="short")
+    snap = _snapshot(htf_5d_low=47500.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "short")
+    assert anchor == "htf_5d_low"
+    assert price == pytest.approx(47500.0 * 1.002, rel=1e-6)
+
+
+def test_target_htf_daily_extreme_long():
+    """htf_daily_extreme target auto-selects htf_daily_high for longs."""
+    trig = _trigger(target_anchor_type="htf_daily_extreme")
+    snap = _snapshot(htf_daily_high=52500.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "long")
+    assert anchor == "htf_daily_extreme"
+    assert price == pytest.approx(52500.0 * 0.998, rel=1e-6)
+
+
+def test_target_htf_daily_extreme_short():
+    """htf_daily_extreme target auto-selects htf_daily_low for shorts."""
+    trig = _trigger(target_anchor_type="htf_daily_extreme", direction="short")
+    snap = _snapshot(htf_daily_low=48500.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "short")
+    assert anchor == "htf_daily_extreme"
+    assert price == pytest.approx(48500.0 * 1.002, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# stop_hit / target_hit — direction-aware (Runbook 42 hotfix)
+# ---------------------------------------------------------------------------
+
+def _make_engine_context_v2(
+    close: float,
+    stop_price_abs: float | None,
+    target_price_abs: float | None,
+    pos_direction: str = "long",  # "long" | "short"
+) -> dict:
+    """Simulate the direction-aware _context() Runbook 42 block."""
+    is_flat = False  # in a position
+    current_close = close
+    context: dict = {
+        "close": close,
+        "is_flat": is_flat,
+        "is_long": pos_direction == "long",
+        "is_short": pos_direction == "short",
+        "position": pos_direction,
+    }
+
+    if stop_price_abs and not is_flat:
+        if pos_direction == "short":
+            context["stop_hit"] = bool(current_close > stop_price_abs)
+        else:
+            context["stop_hit"] = bool(current_close < stop_price_abs)
+    else:
+        context["stop_hit"] = False
+
+    if target_price_abs and not is_flat:
+        if pos_direction == "short":
+            context["target_hit"] = bool(current_close < target_price_abs)
+        else:
+            context["target_hit"] = bool(current_close > target_price_abs)
+    else:
+        context["target_hit"] = False
+
+    context["below_stop"] = context["stop_hit"]
+    context["above_target"] = context["target_hit"]
+    context["stop_price"] = stop_price_abs or 0.0
+    context["target_price"] = target_price_abs or 0.0
+    return context
+
+
+def test_stop_hit_long_fires_when_close_below():
+    """For longs: stop_hit=True when close < stop."""
+    ctx = _make_engine_context_v2(close=48000.0, stop_price_abs=48500.0, target_price_abs=None, pos_direction="long")
+    assert ctx["stop_hit"] is True
+
+
+def test_stop_hit_long_false_when_close_above():
+    """For longs: stop_hit=False when close > stop."""
+    ctx = _make_engine_context_v2(close=49000.0, stop_price_abs=48500.0, target_price_abs=None, pos_direction="long")
+    assert ctx["stop_hit"] is False
+
+
+def test_stop_hit_short_fires_when_close_above():
+    """For shorts: stop_hit=True when close > stop (stop is above entry)."""
+    ctx = _make_engine_context_v2(close=52000.0, stop_price_abs=51500.0, target_price_abs=None, pos_direction="short")
+    assert ctx["stop_hit"] is True
+
+
+def test_stop_hit_short_false_when_close_below():
+    """For shorts: stop_hit=False when close < stop."""
+    ctx = _make_engine_context_v2(close=50000.0, stop_price_abs=51500.0, target_price_abs=None, pos_direction="short")
+    assert ctx["stop_hit"] is False
+
+
+def test_target_hit_long_fires_when_close_above():
+    """For longs: target_hit=True when close > target."""
+    ctx = _make_engine_context_v2(close=53000.0, stop_price_abs=None, target_price_abs=52500.0, pos_direction="long")
+    assert ctx["target_hit"] is True
+
+
+def test_target_hit_short_fires_when_close_below():
+    """For shorts: target_hit=True when close < target (target is below entry)."""
+    ctx = _make_engine_context_v2(close=47000.0, stop_price_abs=None, target_price_abs=48000.0, pos_direction="short")
+    assert ctx["target_hit"] is True
+
+
+def test_below_stop_is_alias_for_stop_hit():
+    """below_stop is an alias for stop_hit (same value)."""
+    ctx = _make_engine_context_v2(close=48000.0, stop_price_abs=48500.0, target_price_abs=None, pos_direction="long")
+    assert ctx["below_stop"] == ctx["stop_hit"]
+
+
+def test_above_target_is_alias_for_target_hit():
+    """above_target is an alias for target_hit (same value)."""
+    ctx = _make_engine_context_v2(close=53000.0, stop_price_abs=None, target_price_abs=52500.0, pos_direction="long")
+    assert ctx["above_target"] == ctx["target_hit"]
+
+
+def test_stop_loss_atr_mult_field_accepted():
+    """TriggerCondition accepts stop_loss_atr_mult."""
+    trig = TriggerCondition(
+        id="t1",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="is_flat",
+        exit_rule="stop_hit",
+        confidence_grade="A",
+        category="trend_continuation",
+        stop_anchor_type="atr",
+        stop_loss_atr_mult=2.5,
+    )
+    assert trig.stop_loss_atr_mult == pytest.approx(2.5)

@@ -151,39 +151,81 @@ HTF STOP AND TARGET ANCHORING:
 LEVEL-ANCHORED STOP/TARGET FIELDS (Runbook 42):
   stop_anchor_type (optional field on TriggerCondition):
     Controls how the stop price is computed when the trigger fires.
-    Values: 'pct' | 'atr' | 'htf_daily_low' | 'htf_prev_daily_low' |
-            'donchian_lower' | 'fib_618' | 'candle_low'
+    Stop must be below entry for longs, above entry for shorts.
+
+    Long-only anchors (stop below support):
+      'htf_daily_low'       — 0.5% below prior session low
+      'htf_prev_daily_low'  — 0.5% below session-before-prior low
+      'donchian_lower'      — 0.5% below Donchian lower band
+      'candle_low'          — 0.2% below trigger bar's low
+    Short-only anchors (stop above resistance):
+      'htf_daily_high'      — 0.5% above prior session high
+      'htf_prev_daily_high' — 0.5% above session-before-prior high
+      'donchian_upper'      — 0.5% above Donchian upper band
+      'candle_high'         — 0.2% above trigger bar's high
+    Direction-auto family (auto-selects support/resistance):
+      'htf_daily_extreme'      — low for longs, high for shorts
+      'htf_prev_daily_extreme' — same, session-before-prior
+      'donchian_extreme'       — Donchian lower/upper
+      'candle_extreme'         — bar low/high
+    Both directions (computed):
+      'pct'     — stop_loss_pct % from entry (required: set stop_loss_pct)
+      'atr'     — stop_loss_atr_mult * ATR(14) from entry (default mult=1.5)
+      'fib_618' — exact 618 retracement level
     Default (null): uses stop_loss_pct percentage calculation.
-    PREFERRED for structure-based strategies: 'htf_daily_low', 'donchian_lower'.
+    PREFERRED for longs: 'htf_daily_extreme' or 'donchian_extreme'.
+
+  stop_loss_atr_mult (optional field on TriggerCondition):
+    ATR multiplier when stop_anchor_type='atr'. Default: 1.5.
+    Example: stop_loss_atr_mult: 2.0 → stop at 2 * ATR from entry.
 
   target_anchor_type (optional field on TriggerCondition):
     Controls how the profit target is computed at fill time.
-    Values: 'measured_move' | 'htf_daily_high' | 'htf_5d_high' |
-            'r_multiple_2' | 'r_multiple_3'
+    Target must be above entry for longs, below entry for shorts.
+
+    Long-only anchors (target at resistance):
+      'htf_daily_high' — 0.2% below prior session high
+      'htf_5d_high'    — 0.2% below 5-day rolling high
+    Short-only anchors (target at support):
+      'htf_daily_low'  — 0.2% above prior session low
+      'htf_5d_low'     — 0.2% above 5-day rolling low
+    Direction-auto family:
+      'htf_daily_extreme' — high for longs, low for shorts
+      'htf_5d_extreme'    — 5d high/low
+    Both directions (computed):
+      'measured_move' — Donchian range height projected from entry
+      'r_multiple_2'  — 2R from entry (requires stop_price_abs)
+      'r_multiple_3'  — 3R from entry
     Default (null): no stored target, exits via exit_rule only.
 
 BUILT-IN IDENTIFIERS available after entry (evaluate to True/False or float):
-  below_stop      — True when current close is below the stored stop_price_abs
-  above_target    — True when current close is above the stored target_price_abs
+  stop_hit    — True when stop is triggered (direction-aware: close < stop for longs,
+                close > stop for shorts). CANONICAL — use this in exit rules.
+  target_hit  — True when target is reached (direction-aware: close > target for longs,
+                close < target for shorts). CANONICAL — use this in exit rules.
+  below_stop      — Alias for stop_hit (backward compat; same value)
+  above_target    — Alias for target_hit (backward compat; same value)
   stop_price      — The resolved stop price (float, 0.0 if no stop set)
   target_price    — The resolved target price (float, 0.0 if no target set)
   stop_distance_pct   — % distance between close and stop_price
   target_distance_pct — % distance between close and target_price
 
 USAGE IN EXIT RULES:
-  Recommended exit pattern for structure-based entries:
-    exit_rule: "not is_flat and (below_stop or above_target)"
+  Recommended exit pattern for structure-based entries (works for long and short):
+    exit_rule: "not is_flat and (stop_hit or target_hit)"
 
   Combined with rule-based exits:
-    exit_rule: "not is_flat and (below_stop or above_target or (rsi_14 > 75 and macd_hist < 0))"
+    exit_rule: "not is_flat and (stop_hit or target_hit or (rsi_14 > 75 and macd_hist < 0))"
 
   Approach-to-target scale-out (risk_reduce):
     exit_rule: "not is_flat and target_distance_pct < 0.3"
     exit_fraction: 0.5
 
 STOP ANCHORING PRIORITY (use the tightest that still makes structural sense):
-  1. candle_low     — tightest (below trigger bar's low); best for high-conviction setups
-  2. donchian_lower — below compression range low; canonical for breakout setups
-  3. htf_daily_low  — below prior session low; gives more room but structurally important
-  4. atr            — 1.5 ATR below entry; volatility-normalized fallback
-  5. pct            — last resort; arbitrary, not structure-based
+  For longs (stop below support):
+    1. candle_extreme  — tightest (below trigger bar's low); best for high-conviction setups
+    2. donchian_extreme — below compression range low; canonical for breakout setups
+    3. htf_daily_extreme — below prior session low; structurally important
+    4. atr              — volatility-normalized fallback
+    5. pct              — last resort; arbitrary, not structure-based
+  For shorts (stop above resistance): same priority, mirrored anchors

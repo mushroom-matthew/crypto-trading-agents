@@ -204,6 +204,13 @@ class TriggerCondition(SerializableModel):
         "Use to prevent premature exits from minor fluctuations. Emergency exits still fire."
     )
     stop_loss_pct: float | None = Field(default=None, ge=0.0)
+    stop_loss_atr_mult: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="ATR multiplier when stop_anchor_type='atr'. Overrides default of 1.5. "
+                    "E.g., 2.0 means stop at 2.0 * ATR(14) from entry. "
+                    "Ignored when stop_anchor_type != 'atr'.",
+    )
     exit_fraction: float | None = Field(
         default=None,
         description="Fraction of position to close (0 < f <= 1.0). "
@@ -218,25 +225,25 @@ class TriggerCondition(SerializableModel):
     )
     stop_anchor_type: Optional[str] = Field(
         default=None,
-        description="How to compute the stop price at entry. Options: "
-                    "'pct' (use stop_loss_pct, default), "
-                    "'atr' (1.5 * ATR below entry), "
-                    "'htf_daily_low' (below prior session's low), "
-                    "'htf_prev_daily_low' (below session before prior), "
-                    "'donchian_lower' (below Donchian lower at time of entry), "
-                    "'fib_618' (at the 618 retracement level), "
-                    "'candle_low' (below the trigger bar's low). "
+        description="How to compute the stop price at entry. "
+                    "Long-only (stop below entry): 'htf_daily_low', 'htf_prev_daily_low', "
+                    "'donchian_lower', 'candle_low'. "
+                    "Short-only (stop above entry): 'htf_daily_high', 'htf_prev_daily_high', "
+                    "'donchian_upper', 'candle_high'. "
+                    "Direction-auto (family): 'htf_daily_extreme', 'htf_prev_daily_extreme', "
+                    "'donchian_extreme', 'candle_extreme' — selects low/high automatically. "
+                    "Both directions: 'pct' (use stop_loss_pct), "
+                    "'atr' (stop_loss_atr_mult * ATR, default 1.5), 'fib_618'. "
                     "Null/absent defaults to 'pct' behavior.",
     )
     target_anchor_type: Optional[str] = Field(
         default=None,
-        description="How to compute the profit target at entry. Options: "
-                    "'measured_move' (range height projected from entry), "
-                    "'htf_daily_high' (prior session high), "
-                    "'htf_5d_high' (5-day rolling high), "
-                    "'r_multiple_2' (2R from entry), "
-                    "'r_multiple_3' (3R from entry), "
-                    "'fib_618_above' (618 extension above entry). "
+        description="How to compute the profit target at entry. "
+                    "Long-only (target above entry): 'htf_daily_high', 'htf_5d_high'. "
+                    "Short-only (target below entry): 'htf_daily_low', 'htf_5d_low'. "
+                    "Direction-auto (family): 'htf_daily_extreme', 'htf_5d_extreme'. "
+                    "Both directions: 'measured_move' (Donchian range height), "
+                    "'r_multiple_2' (2R from entry), 'r_multiple_3' (3R from entry). "
                     "Null/absent means no stored target; exits via exit_rule only.",
     )
 

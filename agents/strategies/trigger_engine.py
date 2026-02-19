@@ -343,10 +343,31 @@ class TriggerEngine:
         active_meta = (position_meta or {}).get(indicator.symbol) or {} if position_meta else {}
         active_stop = active_meta.get("stop_price_abs")
         active_target = active_meta.get("target_price_abs")
+        # entry_side is "long" or "short"; written at position open time
+        pos_direction = active_meta.get("entry_side", "long")
         is_flat = context.get("is_flat", True)
         current_close = indicator.close or 0.0
-        context["below_stop"] = bool(current_close < active_stop) if (active_stop and not is_flat) else False
-        context["above_target"] = bool(current_close > active_target) if (active_target and not is_flat) else False
+
+        # Direction-aware stop_hit / target_hit (canonical — correct for longs AND shorts)
+        if active_stop and not is_flat:
+            if pos_direction == "short":
+                context["stop_hit"] = bool(current_close > active_stop)
+            else:
+                context["stop_hit"] = bool(current_close < active_stop)
+        else:
+            context["stop_hit"] = False
+
+        if active_target and not is_flat:
+            if pos_direction == "short":
+                context["target_hit"] = bool(current_close < active_target)
+            else:
+                context["target_hit"] = bool(current_close > active_target)
+        else:
+            context["target_hit"] = False
+
+        # Backward-compat aliases (same value as stop_hit / target_hit)
+        context["below_stop"] = context["stop_hit"]
+        context["above_target"] = context["target_hit"]
         context["stop_price"] = active_stop or 0.0
         context["target_price"] = active_target or 0.0
         context["stop_distance_pct"] = (
