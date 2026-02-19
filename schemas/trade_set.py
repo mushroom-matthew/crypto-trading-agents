@@ -21,6 +21,48 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, computed_field, model_validator
 
 
+# ---------------------------------------------------------------------------
+# Runbook 45 — Trade management audit events
+# ---------------------------------------------------------------------------
+
+class StopAdjustmentEvent(BaseModel):
+    """Audit event emitted whenever the adaptive trade manager advances a stop level."""
+
+    model_config = {"extra": "forbid"}
+
+    symbol: str
+    timestamp: datetime
+    rung: str                    # "r1_mature" | "r2_extended" | "r3_trail" | "atr_trail"
+    old_stop: Optional[float]
+    new_stop: float
+    current_R: float
+    mfe_r: float
+    mae_r: float
+    position_fraction: float     # Fraction of original qty still open
+    rung_catch: bool = False     # True if this was a jump-catch (multi-rung bar)
+    engine_version: str = "45.0.0"
+
+
+class PartialExitEvent(BaseModel):
+    """Audit event emitted when the adaptive trade manager schedules a partial exit."""
+
+    model_config = {"extra": "forbid"}
+
+    symbol: str
+    timestamp: datetime
+    rung: str                    # "r2_extended" (currently only R2 exits)
+    fraction_exited: float
+    exit_price: float
+    exit_R: float                # R at time of partial exit
+    mfe_r: float
+    initial_risk_abs: float
+    position_fraction_before: float
+    position_fraction_after: float
+    exit_blocked: bool = False   # True if hold constraint prevented execution
+    exit_blocked_by: Optional[str] = None
+    engine_version: str = "45.0.0"
+
+
 class TradeLeg(BaseModel):
     """Individual fill within a position lifecycle.
 
