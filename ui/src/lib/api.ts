@@ -707,6 +707,15 @@ export interface PaperTradingSession {
   plan_interval_hours: number;
 }
 
+export interface CandleBar {
+  time: number;   // ms timestamp
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
 export interface PositionMeta {
   entry_trigger_id: string | null;
   entry_category: string | null;
@@ -897,6 +906,18 @@ export const paperTradingAPI = {
   getActivity: async (sessionId: string, limit = 40): Promise<{ session_id: string; events: PaperTradingActivityEvent[] }> => {
     const response = await api.get(`/paper-trading/sessions/${sessionId}/activity`, {
       params: { limit },
+    });
+    return response.data;
+  },
+
+  getCandles: async (
+    sessionId: string,
+    symbol: string,
+    timeframe = '1m',
+    limit = 120,
+  ): Promise<{ symbol: string; timeframe: string; candles: CandleBar[] }> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/candles`, {
+      params: { symbol, timeframe, limit },
     });
     return response.data;
   },

@@ -682,6 +682,44 @@ async def get_session_activity(session_id: str, limit: int = 40):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/sessions/{session_id}/candles")
+async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str = "1m", limit: int = 120):
+    """Fetch recent OHLCV candles for charting.
+
+    Returns up to `limit` candles in ascending order. Used by the live
+    candlestick chart component. Fetches directly from the exchange (ccxt)
+    so it reflects real market data regardless of session state.
+    """
+    import ccxt.async_support as ccxt  # type: ignore
+
+    # Map friendly pair format to ccxt symbol
+    ccxt_symbol = symbol.replace("-", "/")
+    # Map UI timeframe labels to ccxt timeframe strings
+    tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+    ccxt_tf = tf_map.get(timeframe, "1m")
+
+    try:
+        exchange = ccxt.coinbase({"enableRateLimit": True})
+        ohlcv = await exchange.fetch_ohlcv(ccxt_symbol, ccxt_tf, limit=limit)
+        await exchange.close()
+    except Exception as e:
+        logger.error(f"Failed to fetch candles for {symbol}: {e}")
+        raise HTTPException(status_code=502, detail=f"Exchange error: {e}")
+
+    candles = [
+        {
+            "time": row[0],       # ms timestamp
+            "open": row[1],
+            "high": row[2],
+            "low": row[3],
+            "close": row[4],
+            "volume": row[5],
+        }
+        for row in ohlcv
+    ]
+    return {"symbol": symbol, "timeframe": timeframe, "candles": candles}
+
+
 @router.post("/sessions/{session_id}/symbols")
 async def update_symbols(session_id: str, symbols: List[str]):
     """Update the symbols being traded in a session."""

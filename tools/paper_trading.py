@@ -383,6 +383,26 @@ def evaluate_triggers_activity(
                     },
                 })
 
+            # Emit a lightweight eval_summary so the UI knows all symbols are
+            # being tracked even when no triggers fire or are blocked.
+            symbol_trigger_count = sum(
+                1 for t in plan.triggers
+                if t.symbol == symbol and t.timeframe == timeframe
+            )
+            symbol_orders = sum(1 for o in all_orders if o["symbol"] == symbol)
+            symbol_blocks = sum(1 for e in all_events if e["type"] == "trade_blocked" and e["payload"].get("symbol") == symbol)
+            all_events.append({
+                "type": "eval_summary",
+                "payload": {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "triggers_evaluated": symbol_trigger_count,
+                    "fired": symbol_orders,
+                    "blocked": symbol_blocks,
+                    "price": close_price,
+                },
+            })
+
     return {"orders": all_orders, "events": all_events}
 
 
@@ -913,6 +933,12 @@ class PaperTradingWorkflow:
 
         if not market_data:
             return
+
+        # Push fresh prices to the ledger so unrealized P&L updates each cycle
+        live_prices = {s: float(current_prices.get(s) or 0) for s in self.symbols if current_prices.get(s)}
+        if live_prices:
+            ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
+            await ledger_handle.signal("update_last_prices", live_prices)
 
         # Emit tick event so the UI can show live prices
         await workflow.execute_activity(

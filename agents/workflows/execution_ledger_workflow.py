@@ -162,6 +162,14 @@ class ExecutionLedgerWorkflow:
         workflow.logger.info("Portfolio reset to initial state")
 
     @workflow.signal
+    def update_last_prices(self, prices: Dict[str, float]) -> None:
+        """Update mark prices for all symbols (called on each tick cycle)."""
+        ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+        for symbol, price in prices.items():
+            self.last_price[symbol] = Decimal(str(price))
+            self.last_price_timestamp[symbol] = ts
+
+    @workflow.signal
     def record_fill(self, fill: Dict) -> None:
         sequence = self.fill_count + 1
         if self.wallet_provider is None:
@@ -448,10 +456,11 @@ class ExecutionLedgerWorkflow:
         """Return a consolidated portfolio snapshot for paper trading."""
         positions = {sym: float(q) for sym, q in self.positions.items()}
         entry_prices = {sym: float(p) for sym, p in self.entry_price.items()}
-        last_prices = {
-            sym: float(self.last_price.get(sym, self.entry_price.get(sym, Decimal("0"))))
-            for sym in positions
-        }
+        # Include all tracked symbols, not just those with open positions
+        last_prices = {sym: float(p) for sym, p in self.last_price.items()}
+        for sym in positions:
+            if sym not in last_prices:
+                last_prices[sym] = float(self.entry_price.get(sym, Decimal("0")))
         total_equity = float(self.cash)
         for sym, qty in self.positions.items():
             price = self.last_price.get(sym, self.entry_price.get(sym, Decimal("0")))

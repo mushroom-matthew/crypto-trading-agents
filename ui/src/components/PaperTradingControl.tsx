@@ -1,11 +1,15 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ReferenceLine, ResponsiveContainer, Cell,
+} from 'recharts';
 import {
   PlayCircle, StopCircle, Loader2, RefreshCw, Activity, Zap,
   TrendingUp, TrendingDown, Minus, ChevronDown, ChevronUp,
   ArrowUpRight, Ban, CheckCircle2, Radio, BarChart3,
 } from 'lucide-react';
-import { paperTradingAPI, promptsAPI, type PaperTradingSessionConfig } from '../lib/api';
+import { paperTradingAPI, promptsAPI, type PaperTradingSessionConfig, type CandleBar } from '../lib/api';
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
@@ -108,6 +112,17 @@ export function PaperTradingControl() {
     queryFn: () => paperTradingAPI.getTrades(selectedSessionId!, 50),
     enabled: !!selectedSessionId,
     refetchInterval: 15000,
+  });
+
+  // Chart state
+  const [chartSymbol, setChartSymbol] = useState('BTC-USD');
+  const [chartTimeframe, setChartTimeframe] = useState('1m');
+  const { data: candlesData } = useQuery({
+    queryKey: ['paper-trading-candles', selectedSessionId, chartSymbol, chartTimeframe],
+    queryFn: () => paperTradingAPI.getCandles(selectedSessionId!, chartSymbol, chartTimeframe, 120),
+    enabled: !!selectedSessionId,
+    refetchInterval: session?.status === 'running' ? 30000 : false,
+    staleTime: 25000,
   });
 
   // Start session mutation
@@ -593,6 +608,61 @@ export function PaperTradingControl() {
         </div>
       </div>
 
+      {/* Live Candlestick Chart */}
+      {selectedSessionId && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-blue-500" />
+              Live Chart
+            </h2>
+            <div className="flex gap-2">
+              {/* Instrument toggle */}
+              {(() => {
+                const symbols = session?.symbols ?? ['BTC-USD', 'ETH-USD'];
+                return symbols.map((s: string) => (
+                  <button
+                    key={s}
+                    onClick={() => setChartSymbol(s)}
+                    className={cn(
+                      'px-3 py-1 text-xs font-semibold rounded-full transition-colors',
+                      chartSymbol === s
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300',
+                    )}
+                  >
+                    {s.replace('-USD', '')}
+                  </button>
+                ));
+              })()}
+              {/* Timeframe selector */}
+              <div className="flex gap-1 ml-2">
+                {['1m', '5m', '15m', '1h'].map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => setChartTimeframe(tf)}
+                    className={cn(
+                      'px-2 py-1 text-xs font-mono rounded transition-colors',
+                      chartTimeframe === tf
+                        ? 'bg-gray-800 text-white dark:bg-gray-200 dark:text-gray-900'
+                        : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400',
+                    )}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <CandlestickChart
+            candles={candlesData?.candles ?? []}
+            trades={trades.filter((t) => t.symbol === chartSymbol)}
+            stopPrice={portfolio?.position_meta?.[chartSymbol]?.stop_price_abs ?? null}
+            targetPrice={portfolio?.position_meta?.[chartSymbol]?.target_price_abs ?? null}
+          />
+        </div>
+      )}
+
       {/* Live Activity Feed */}
       {selectedSessionId && (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg">
@@ -609,7 +679,8 @@ export function PaperTradingControl() {
                 No activity yet — waiting for the first evaluation cycle.
               </div>
             ) : (
-              activityEvents.map((ev) => <ActivityRow key={ev.event_id} ev={ev} />)
+              collapseActivityEvents(activityEvents.filter((ev) => ev.type !== 'tick'))
+                .map((ev) => <ActivityRow key={ev.event_id} ev={ev} />)
             )}
           </div>
         </div>
@@ -659,10 +730,211 @@ export function PaperTradingControl() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Activity helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+type ActivityEvent = { event_id: string; type: string; ts: string; payload: Record<string, any> };
+
+/** Collapse consecutive trade_blocked events with same trigger_id+reason into one row with a count.
+ *  Also dedupe consecutive eval_summary events per symbol into the latest one. */
+function collapseActivityEvents(events: ActivityEvent[]): (ActivityEvent & { count?: number })[] {
+  const out: (ActivityEvent & { count?: number })[] = [];
+  for (const ev of events) {
+    const last = out[out.length - 1];
+    if (
+      ev.type === 'trade_blocked' &&
+      last?.type === 'trade_blocked' &&
+      last.payload.trigger_id === ev.payload.trigger_id &&
+      last.payload.reason === ev.payload.reason
+    ) {
+      last.count = (last.count ?? 1) + 1;
+    } else if (
+      ev.type === 'eval_summary' &&
+      last?.type === 'eval_summary' &&
+      last.payload.symbol === ev.payload.symbol
+    ) {
+      // Keep only the latest eval_summary per symbol — replace in place
+      out[out.length - 1] = { ...ev, count: undefined };
+    } else {
+      out.push({ ...ev, count: undefined });
+    }
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Candlestick Chart
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface CandlestickChartProps {
+  candles: CandleBar[];
+  trades: { timestamp: string; side: string; price: number }[];
+  stopPrice: number | null;
+  targetPrice: number | null;
+}
+
+function CandleShape(props: any) {
+  const { x, y, width, height, open, close, high, low, index, payload } = props;
+  if (!payload) return null;
+  const isUp = payload.close >= payload.open;
+  const color = isUp ? '#16a34a' : '#dc2626';
+  const bodyTop = Math.min(y, y + height);
+  const bodyH = Math.max(Math.abs(height), 1);
+  const wickX = x + width / 2;
+  const highY = props.background?.y ?? 0;
+  return (
+    <g>
+      {/* Wick */}
+      <line x1={wickX} x2={wickX} y1={props.high} y2={props.low} stroke={color} strokeWidth={1} />
+      {/* Body */}
+      <rect x={x + 1} y={bodyTop} width={Math.max(width - 2, 1)} height={bodyH} fill={color} fillOpacity={0.85} />
+    </g>
+  );
+}
+
+function CandlestickChart({ candles, trades, stopPrice, targetPrice }: CandlestickChartProps) {
+  if (candles.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
+        Loading candles…
+      </div>
+    );
+  }
+
+  // Build chart data with OHLCV + computed bar range for Recharts Bar
+  const data = candles.map((c) => {
+    const isUp = c.close >= c.open;
+    const bodyLow = Math.min(c.open, c.close);
+    const bodyHigh = Math.max(c.open, c.close);
+    return {
+      ...c,
+      isUp,
+      bodyRange: [bodyLow, bodyHigh] as [number, number],
+      wickRange: [c.low, c.high] as [number, number],
+      label: new Date(c.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+  });
+
+  // Build trade marker positions — map each trade's timestamp to closest candle index
+  const tradeMarkers: { x: number; side: string; price: number }[] = [];
+  for (const trade of trades) {
+    const tradeMs = new Date(trade.timestamp).getTime();
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    data.forEach((d, i) => {
+      const diff = Math.abs(d.time - tradeMs);
+      if (diff < minDiff) { minDiff = diff; closestIdx = i; }
+    });
+    tradeMarkers.push({ x: closestIdx, side: trade.side, price: trade.price });
+  }
+
+  const yMin = Math.min(...candles.map((c) => c.low)) * 0.9995;
+  const yMax = Math.max(...candles.map((c) => c.high)) * 1.0005;
+
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    const d = payload[0]?.payload;
+    if (!d) return null;
+    return (
+      <div className="bg-gray-900 text-white text-xs rounded px-3 py-2 shadow-lg">
+        <p className="font-semibold mb-1">{d.label}</p>
+        <p>O: {d.open?.toFixed(2)}  H: {d.high?.toFixed(2)}</p>
+        <p>L: {d.low?.toFixed(2)}  C: {d.close?.toFixed(2)}</p>
+        <p className="text-gray-400">Vol: {d.volume?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+      </div>
+    );
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={280}>
+      <ComposedChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" strokeOpacity={0.4} />
+        <XAxis
+          dataKey="label"
+          tick={{ fontSize: 10, fill: '#9ca3af' }}
+          interval={Math.floor(data.length / 8)}
+          tickLine={false}
+        />
+        <YAxis
+          domain={[yMin, yMax]}
+          tick={{ fontSize: 10, fill: '#9ca3af' }}
+          tickFormatter={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          width={60}
+          tickLine={false}
+        />
+        <Tooltip content={<CustomTooltip />} />
+
+        {/* Wick line (high-low) */}
+        <Bar dataKey="wickRange" fill="transparent" stroke="transparent" barSize={1}>
+          {data.map((d, i) => (
+            <Cell key={i} fill={d.isUp ? '#16a34a' : '#dc2626'} />
+          ))}
+        </Bar>
+
+        {/* Candle body (open-close) */}
+        <Bar dataKey="bodyRange" barSize={6}>
+          {data.map((d, i) => (
+            <Cell key={i} fill={d.isUp ? '#16a34a' : '#dc2626'} fillOpacity={0.85} />
+          ))}
+        </Bar>
+
+        {/* Close price line overlay */}
+        <Line
+          type="monotone"
+          dataKey="close"
+          stroke="#3b82f6"
+          strokeWidth={1}
+          dot={false}
+          strokeOpacity={0.4}
+        />
+
+        {/* Trade entry markers */}
+        {tradeMarkers.map((m, i) => (
+          <ReferenceLine
+            key={i}
+            x={data[m.x]?.label}
+            stroke={m.side === 'buy' ? '#16a34a' : '#dc2626'}
+            strokeWidth={2}
+            strokeDasharray="4 2"
+            label={{
+              value: m.side === 'buy' ? '▲' : '▼',
+              fill: m.side === 'buy' ? '#16a34a' : '#dc2626',
+              fontSize: 12,
+            }}
+          />
+        ))}
+
+        {/* Stop loss line */}
+        {stopPrice != null && (
+          <ReferenceLine
+            y={stopPrice}
+            stroke="#ef4444"
+            strokeWidth={1.5}
+            strokeDasharray="6 3"
+            label={{ value: `stop ${stopPrice.toFixed(0)}`, fill: '#ef4444', fontSize: 10, position: 'right' }}
+          />
+        )}
+
+        {/* Take profit target line */}
+        {targetPrice != null && (
+          <ReferenceLine
+            y={targetPrice}
+            stroke="#22c55e"
+            strokeWidth={1.5}
+            strokeDasharray="6 3"
+            label={{ value: `target ${targetPrice.toFixed(0)}`, fill: '#22c55e', fontSize: 10, position: 'right' }}
+          />
+        )}
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Activity Feed Row
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ActivityRow({ ev }: { ev: { event_id: string; type: string; ts: string; payload: Record<string, any> } }) {
+function ActivityRow({ ev }: { ev: ActivityEvent & { count?: number } }) {
   const [expanded, setExpanded] = useState(false);
 
   const config = {
@@ -673,6 +945,7 @@ function ActivityRow({ ev }: { ev: { event_id: string; type: string; ts: string;
     plan_generated: { icon: Zap, color: 'text-yellow-500', bg: 'bg-yellow-50 dark:bg-yellow-900/20', label: 'New Plan' },
     session_started: { icon: PlayCircle, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-900/20', label: 'Started' },
     session_stopped: { icon: StopCircle, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-900/20', label: 'Stopped' },
+    eval_summary: { icon: Activity, color: 'text-gray-400', bg: 'bg-gray-50 dark:bg-gray-800', label: 'Watching' },
   } as Record<string, { icon: React.ComponentType<any>; color: string; bg: string; label: string }>;
 
   const cfg = config[ev.type] ?? { icon: Activity, color: 'text-gray-400', bg: 'bg-gray-50 dark:bg-gray-700', label: ev.type };
@@ -699,6 +972,8 @@ function ActivityRow({ ev }: { ev: { event_id: string; type: string; ts: string;
       }
       case 'plan_generated':
         return `${p.trigger_count ?? '?'} triggers · plan #${p.plan_index ?? '?'}`;
+      case 'eval_summary':
+        return `${p.symbol?.replace('-USD', '')} — ${p.triggers_evaluated ?? 0} triggers evaluated @ ${formatCurrency(p.price ?? 0)}${p.fired ? ` · ${p.fired} fired` : ' · none fired'}`;
       default:
         return JSON.stringify(p).substring(0, 80);
     }
@@ -713,6 +988,11 @@ function ActivityRow({ ev }: { ev: { event_id: string; type: string; ts: string;
         <Icon className={cn('w-4 h-4 flex-shrink-0', cfg.color)} />
         <span className={cn('text-xs font-semibold w-24 flex-shrink-0', cfg.color)}>{cfg.label}</span>
         <span className="text-xs text-gray-700 dark:text-gray-300 flex-1 truncate">{summary()}</span>
+        {ev.count != null && ev.count > 1 && (
+          <span className="text-xs bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400 px-1.5 py-0.5 rounded-full font-mono flex-shrink-0">
+            ×{ev.count}
+          </span>
+        )}
         <span className="text-xs text-gray-400 flex-shrink-0">
           {new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
         </span>
