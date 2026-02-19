@@ -124,14 +124,16 @@ async def generate_strategy_plan_activity(
             logger.warning(f"Failed to load cached plan: {e}")
 
     # Build LLM input
+    now = datetime.now(timezone.utc)
     assets = []
     for symbol in symbols:
         ctx = market_context.get(symbol, {})
-        assets.append(AssetState(
+        close = float(ctx.get("price", 0.0) or 0.0)
+        snapshot = IndicatorSnapshot(
             symbol=symbol,
-            price=ctx.get("price", 0.0),
-            trend_state=ctx.get("trend_state", "unknown"),
-            vol_state=ctx.get("vol_state", "normal"),
+            timeframe="1h",
+            as_of=now,
+            close=close,
             rsi_14=ctx.get("rsi_14"),
             sma_short=ctx.get("sma_short"),
             sma_medium=ctx.get("sma_medium"),
@@ -139,23 +141,27 @@ async def generate_strategy_plan_activity(
             atr_14=ctx.get("atr_14"),
             bollinger_upper=ctx.get("bollinger_upper"),
             bollinger_lower=ctx.get("bollinger_lower"),
-        ))
+        )
+        assets.append(build_asset_state(symbol, [snapshot]))
 
+    positions_raw = portfolio_state.get("positions", {})
     portfolio = PortfolioState(
-        cash=portfolio_state.get("cash", 10000.0),
-        total_equity=portfolio_state.get("total_equity", 10000.0),
-        positions={
-            symbol: {"qty": qty, "entry_price": portfolio_state.get("entry_prices", {}).get(symbol, 0)}
-            for symbol, qty in portfolio_state.get("positions", {}).items()
-        },
-        unrealized_pnl=portfolio_state.get("unrealized_pnl", 0.0),
-        realized_pnl=portfolio_state.get("realized_pnl", 0.0),
+        timestamp=now,
+        equity=float(portfolio_state.get("total_equity", portfolio_state.get("equity", 10000.0))),
+        cash=float(portfolio_state.get("cash", 10000.0)),
+        positions={k: float(v) for k, v in positions_raw.items() if isinstance(v, (int, float))},
+        realized_pnl_7d=float(portfolio_state.get("realized_pnl", 0.0)),
+        realized_pnl_30d=float(portfolio_state.get("realized_pnl", 0.0)),
+        sharpe_30d=0.0,
+        max_drawdown_90d=0.0,
+        win_rate_30d=0.0,
+        profit_factor_30d=1.0,
     )
 
     llm_input = LLMInput(
-        timestamp=datetime.now(timezone.utc).isoformat(),
         portfolio=portfolio,
         assets=assets,
+        risk_params={},
     )
 
     # Generate plan
@@ -682,7 +688,7 @@ class PaperTradingWorkflow:
             # In full implementation, would query ComputeFeatureVector workflows
             market_context[symbol] = {
                 "price": portfolio_state.get("last_prices", {}).get(symbol, 0),
-                "trend_state": "unknown",
+                "trend_state": "sideways",  # default; will be computed from indicators when screener is wired
                 "vol_state": "normal",
             }
 
