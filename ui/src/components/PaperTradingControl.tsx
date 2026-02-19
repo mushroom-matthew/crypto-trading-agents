@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { PlayCircle, StopCircle, Loader2, RefreshCw, Activity, Zap } from 'lucide-react';
+import {
+  PlayCircle, StopCircle, Loader2, RefreshCw, Activity, Zap,
+  TrendingUp, TrendingDown, Minus, ChevronDown, ChevronUp,
+  ArrowUpRight, ArrowDownRight, Ban, CheckCircle2, Radio, BarChart3,
+} from 'lucide-react';
 import { paperTradingAPI, promptsAPI, type PaperTradingSessionConfig } from '../lib/api';
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
-import { EventTimeline } from './EventTimeline';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
 import { PlanningSettingsPanel, type PlanningSettings } from './PlanningSettingsPanel';
 
@@ -79,12 +82,25 @@ export function PaperTradingControl() {
     refetchInterval: 10000,
   });
 
-  // Fetch current plan
+  // Fetch current plan (refresh every 30s while running to catch replans)
   const { data: plan } = useQuery({
     queryKey: ['paper-trading-plan', selectedSessionId],
     queryFn: () => paperTradingAPI.getPlan(selectedSessionId!),
     enabled: !!selectedSessionId && session?.has_plan,
+    refetchInterval: session?.status === 'running' ? 30000 : false,
   });
+
+  // Fetch live activity feed
+  const { data: activityData } = useQuery({
+    queryKey: ['paper-trading-activity', selectedSessionId],
+    queryFn: () => paperTradingAPI.getActivity(selectedSessionId!, 40),
+    enabled: !!selectedSessionId,
+    refetchInterval: session?.status === 'running' ? 4000 : 15000,
+  });
+  const activityEvents = activityData?.events ?? [];
+
+  // Track expanded trigger list
+  const [showTriggers, setShowTriggers] = useState(false);
 
   // Fetch trades
   const { data: trades = [] } = useQuery({
@@ -368,39 +384,47 @@ export function PaperTradingControl() {
 
         {/* Status & Portfolio */}
         <div className="space-y-6">
-          {/* Session Status */}
+          {/* Session Status + Live Ticker */}
           {session && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
               <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-                <Zap className={cn('w-5 h-5', isRunning ? 'text-green-500' : 'text-gray-400')} />
-                Session Status
+                <Zap className={cn('w-5 h-5', isRunning ? 'text-green-500 animate-pulse' : 'text-gray-400')} />
+                Session
+                <span className={cn(
+                  'ml-auto text-xs font-mono px-2 py-0.5 rounded-full',
+                  isRunning ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400' : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                )}>
+                  {session.status.toUpperCase()} · cycle {session.cycle_count}
+                </span>
               </h2>
-              <div className="grid grid-cols-2 gap-4">
+
+              {/* Live Price Ticker */}
+              {portfolio && Object.keys(portfolio.last_prices).length > 0 && (
+                <div className="mb-4 flex flex-wrap gap-2">
+                  {Object.entries(portfolio.last_prices).map(([symbol, price]) => (
+                    <div key={symbol} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+                      <BarChart3 className="w-3.5 h-3.5 text-gray-500" />
+                      <span className="font-mono text-xs font-medium text-gray-600 dark:text-gray-400">{symbol.replace('-USD', '')}</span>
+                      <span className="font-mono text-sm font-bold">{formatCurrency(price)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 text-sm">
                 <div>
-                  <p className="text-sm text-gray-500">Status</p>
-                  <p className={cn('font-semibold', isRunning ? 'text-green-600' : 'text-gray-600')}>
-                    {session.status.toUpperCase()}
-                  </p>
+                  <p className="text-gray-500">Symbols</p>
+                  <p className="font-mono">{session.symbols.join(', ')}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Cycle Count</p>
-                  <p className="font-semibold">{session.cycle_count}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Symbols</p>
-                  <p className="font-mono text-sm">{session.symbols.join(', ')}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Last Plan</p>
-                  <p className="text-sm">
-                    {session.last_plan_time ? formatDateTime(session.last_plan_time) : 'None'}
-                  </p>
+                  <p className="text-gray-500">Last Plan</p>
+                  <p>{session.last_plan_time ? formatDateTime(session.last_plan_time) : 'Pending...'}</p>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Portfolio Status */}
+          {/* Portfolio */}
           {portfolio && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
               <h2 className="text-xl font-semibold mb-4">Portfolio</h2>
@@ -426,60 +450,156 @@ export function PaperTradingControl() {
                   </p>
                 </div>
               </div>
-
-              {/* Positions */}
               {Object.keys(portfolio.positions).length > 0 && (
                 <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                  <p className="text-sm font-medium mb-2">Positions</p>
+                  <p className="text-sm font-medium mb-2">Open Positions</p>
                   <div className="space-y-2">
-                    {Object.entries(portfolio.positions).map(([symbol, qty]) => (
-                      <div key={symbol} className="flex justify-between items-center">
-                        <span className="font-mono">{symbol}</span>
-                        <div className="text-right">
-                          <span className="font-semibold">{qty.toFixed(6)}</span>
-                          <span className="text-gray-500 text-sm ml-2">
-                            @ {formatCurrency(portfolio.entry_prices[symbol] || 0)}
-                          </span>
+                    {Object.entries(portfolio.positions).map(([symbol, qty]) => {
+                      const entryPx = portfolio.entry_prices[symbol] || 0;
+                      const lastPx = portfolio.last_prices[symbol] || entryPx;
+                      const pnlPct = entryPx > 0 ? ((lastPx - entryPx) / entryPx) * 100 : 0;
+                      return (
+                        <div key={symbol} className="flex justify-between items-center text-sm">
+                          <span className="font-mono font-medium">{symbol}</span>
+                          <div className="text-right">
+                            <span className="font-semibold">{qty.toFixed(6)}</span>
+                            <span className="text-gray-500 ml-2">@ {formatCurrency(entryPx)}</span>
+                            <span className={cn('ml-2 font-medium', pnlPct >= 0 ? 'text-green-600' : 'text-red-600')}>
+                              {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
             </div>
           )}
 
-          {/* Strategy Plan */}
+          {/* Active Strategy Plan */}
           {plan && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-              <h2 className="text-xl font-semibold mb-4">Current Strategy Plan</h2>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-sm text-gray-500">Triggers</p>
-                  <p className="font-semibold">{plan.trigger_count}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Max Trades/Day</p>
-                  <p className="font-semibold">{plan.max_trades_per_day || 'N/A'}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Valid Until</p>
-                  <p className="text-sm">{plan.valid_until ? formatDateTime(plan.valid_until) : 'N/A'}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Symbols</p>
-                  <p className="font-mono text-sm">{plan.allowed_symbols.join(', ')}</p>
+              <div className="flex items-start justify-between mb-3">
+                <h2 className="text-xl font-semibold">Strategy Plan</h2>
+                <div className="flex gap-2">
+                  {plan.regime && (
+                    <span className={cn(
+                      'text-xs font-medium px-2 py-1 rounded-full',
+                      plan.regime === 'trend' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400' :
+                      plan.regime === 'range' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-400' :
+                      plan.regime === 'volatile' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400' :
+                      'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                    )}>
+                      {plan.regime.toUpperCase()}
+                    </span>
+                  )}
+                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400">
+                    {plan.trigger_count} triggers
+                  </span>
                 </div>
               </div>
+
+              {/* LLM market assessment */}
+              {plan.global_view && (
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-3 italic leading-relaxed">
+                  "{plan.global_view}"
+                </p>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 text-sm mb-3">
+                <div>
+                  <p className="text-gray-500">Max Trades/Day</p>
+                  <p className="font-semibold">{plan.max_trades_per_day ?? 'N/A'}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Valid Until</p>
+                  <p>{plan.valid_until ? formatDateTime(plan.valid_until) : 'N/A'}</p>
+                </div>
+              </div>
+
+              {/* Expandable trigger list */}
+              {plan.triggers.length > 0 && (
+                <div>
+                  <button
+                    onClick={() => setShowTriggers(!showTriggers)}
+                    className="flex items-center gap-1 text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                  >
+                    {showTriggers ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                    {showTriggers ? 'Hide' : 'Show'} trigger conditions
+                  </button>
+                  {showTriggers && (
+                    <div className="mt-3 space-y-2 max-h-64 overflow-y-auto">
+                      {plan.triggers.map((t) => (
+                        <div key={t.id} className="p-2 bg-gray-50 dark:bg-gray-700 rounded text-xs border-l-2 border-l-blue-400">
+                          <div className="flex items-center gap-2 mb-1">
+                            {t.direction === 'long' ? (
+                              <TrendingUp className="w-3 h-3 text-green-500 flex-shrink-0" />
+                            ) : t.direction === 'short' ? (
+                              <TrendingDown className="w-3 h-3 text-red-500 flex-shrink-0" />
+                            ) : (
+                              <Minus className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                            )}
+                            <span className="font-mono font-semibold">{t.id}</span>
+                            <span className="text-gray-500">{t.symbol} · {t.timeframe}</span>
+                            <span className={cn(
+                              'ml-auto px-1.5 py-0.5 rounded text-xs font-medium',
+                              t.category === 'emergency_exit' ? 'bg-red-100 text-red-700' :
+                              t.category === 'risk_off' ? 'bg-orange-100 text-orange-700' :
+                              t.category === 'volatility_breakout' ? 'bg-purple-100 text-purple-700' :
+                              t.category === 'trend_continuation' ? 'bg-blue-100 text-blue-700' :
+                              'bg-gray-100 text-gray-600'
+                            )}>
+                              {t.category}
+                            </span>
+                            {t.confidence && (
+                              <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs font-bold">
+                                {t.confidence}
+                              </span>
+                            )}
+                          </div>
+                          {t.entry_rule && (
+                            <p className="font-mono text-gray-600 dark:text-gray-300 pl-5 truncate" title={t.entry_rule}>
+                              {t.entry_rule}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
 
+      {/* Live Activity Feed */}
+      {selectedSessionId && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg">
+          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+            <h2 className="text-xl font-semibold flex items-center gap-2">
+              <Radio className={cn('w-4 h-4', isRunning ? 'text-green-500 animate-pulse' : 'text-gray-400')} />
+              Live Activity
+            </h2>
+            <span className="text-xs text-gray-500">{isRunning ? 'Refreshing every 4s' : 'Session stopped'}</span>
+          </div>
+          <div className="max-h-80 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700">
+            {activityEvents.length === 0 ? (
+              <div className="p-6 text-center text-gray-500 text-sm">
+                No activity yet — waiting for the first evaluation cycle.
+              </div>
+            ) : (
+              activityEvents.map((ev) => <ActivityRow key={ev.event_id} ev={ev} />)
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Trade History */}
       {trades.length > 0 && (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-          <h2 className="text-xl font-semibold mb-4">Recent Trades</h2>
+          <h2 className="text-xl font-semibold mb-4">Trade History</h2>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -513,16 +633,72 @@ export function PaperTradingControl() {
         </div>
       )}
 
-      {/* Prompt Editor (collapsible) - Same prompts used for backtesting and paper trading */}
+      {/* Prompt Editor */}
       <PromptEditor />
+    </div>
+  );
+}
 
-      {/* Event Timeline - Shows paper trading events */}
-      {selectedSessionId ? (
-        <EventTimeline limit={30} runId={selectedSessionId} />
-      ) : (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 text-sm text-gray-500 dark:text-gray-400">
-          Select a paper trading session to view its event timeline.
-        </div>
+// ─────────────────────────────────────────────────────────────────────────────
+// Activity Feed Row
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ActivityRow({ ev }: { ev: { event_id: string; type: string; ts: string; payload: Record<string, any> } }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const config = {
+    tick: { icon: BarChart3, color: 'text-gray-400', bg: 'bg-gray-50 dark:bg-gray-700', label: 'Prices' },
+    trigger_fired: { icon: ArrowUpRight, color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20', label: 'Trigger Fired' },
+    trade_blocked: { icon: Ban, color: 'text-orange-500', bg: 'bg-orange-50 dark:bg-orange-900/20', label: 'Blocked' },
+    order_executed: { icon: CheckCircle2, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-900/20', label: 'Executed' },
+    plan_generated: { icon: Zap, color: 'text-yellow-500', bg: 'bg-yellow-50 dark:bg-yellow-900/20', label: 'New Plan' },
+    session_started: { icon: PlayCircle, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-900/20', label: 'Started' },
+    session_stopped: { icon: StopCircle, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-900/20', label: 'Stopped' },
+  } as Record<string, { icon: React.ComponentType<any>; color: string; bg: string; label: string }>;
+
+  const cfg = config[ev.type] ?? { icon: Activity, color: 'text-gray-400', bg: 'bg-gray-50 dark:bg-gray-700', label: ev.type };
+  const Icon = cfg.icon;
+
+  function summary() {
+    const p = ev.payload;
+    switch (ev.type) {
+      case 'tick': {
+        const parts = Object.entries(p.prices ?? {})
+          .map(([s, v]) => `${s.replace('-USD', '')} $${Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`)
+          .join(' · ');
+        return parts || 'Prices updated';
+      }
+      case 'trigger_fired':
+        return `${p.symbol} ${p.side?.toUpperCase() ?? ''} — ${p.trigger_id ?? p.category ?? ''} @ ${formatCurrency(p.price ?? 0)}`;
+      case 'trade_blocked':
+        return `${p.symbol} ${p.trigger_id ?? ''} — ${p.reason ?? 'blocked'}${p.detail ? ': ' + String(p.detail).substring(0, 60) : ''}`;
+      case 'order_executed':
+        return `${p.side?.toUpperCase()} ${Number(p.quantity ?? 0).toFixed(6)} ${p.symbol} @ ${formatCurrency(p.price ?? 0)}`;
+      case 'plan_generated':
+        return `${p.trigger_count ?? '?'} triggers · plan #${p.plan_index ?? '?'}`;
+      default:
+        return JSON.stringify(p).substring(0, 80);
+    }
+  }
+
+  return (
+    <div
+      className={cn('px-4 py-2.5 hover:opacity-90 cursor-pointer transition-opacity', cfg.bg)}
+      onClick={() => setExpanded(!expanded)}
+    >
+      <div className="flex items-center gap-2.5">
+        <Icon className={cn('w-4 h-4 flex-shrink-0', cfg.color)} />
+        <span className={cn('text-xs font-semibold w-24 flex-shrink-0', cfg.color)}>{cfg.label}</span>
+        <span className="text-xs text-gray-700 dark:text-gray-300 flex-1 truncate">{summary()}</span>
+        <span className="text-xs text-gray-400 flex-shrink-0">
+          {new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+        </span>
+        {expanded ? <ChevronUp className="w-3 h-3 text-gray-400" /> : <ChevronDown className="w-3 h-3 text-gray-400" />}
+      </div>
+      {expanded && (
+        <pre className="mt-2 ml-6 text-xs font-mono text-gray-600 dark:text-gray-400 overflow-x-auto whitespace-pre-wrap">
+          {JSON.stringify(ev.payload, null, 2)}
+        </pre>
       )}
     </div>
   );

@@ -198,16 +198,17 @@ def evaluate_triggers_activity(
     portfolio_state: Dict[str, Any],
     exit_binding_mode: str = "category",
     conflicting_signal_policy: str = "reverse",
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """Evaluate strategy triggers against current market data.
 
-    Returns a list of orders to execute.
+    Returns {"orders": [...], "events": [...]} where events contains
+    trigger_fired and trade_blocked entries for the activity feed.
     """
     try:
         plan = StrategyPlan.model_validate(plan_dict)
     except Exception as e:
         logger.error(f"Failed to validate plan: {e}")
-        return []
+        return {"orders": [], "events": []}
 
     # Build risk engine
     risk_engine = RiskEngine(
@@ -226,6 +227,7 @@ def evaluate_triggers_activity(
     )
 
     all_orders: List[Dict[str, Any]] = []
+    all_events: List[Dict[str, Any]] = []
 
     def _parse_timestamp(value: Any) -> datetime:
         if isinstance(value, datetime):
@@ -300,23 +302,36 @@ def evaluate_triggers_activity(
                 volume=volume,
             )
 
-            indicator = IndicatorSnapshot(
-                symbol=symbol,
-                timeframe=timeframe,
-                as_of=bar_ts,
-                close=close_price,
-                volume=volume,
-                rsi_14=data.get("rsi_14"),
-                sma_short=sma_short,
-                sma_medium=sma_medium,
-                sma_long=sma_long,
-                atr_14=data.get("atr_14"),
-                bollinger_upper=data.get("bollinger_upper"),
-                bollinger_lower=data.get("bollinger_lower"),
-                vwap=data.get("vwap"),
-            )
+            # Build full indicator snapshot — data may contain a complete
+            # indicator dict from fetch_indicator_snapshots_activity.
+            snap_init = {k: v for k, v in data.items()
+                         if k not in ("trend_state", "vol_state", "price",
+                                      "timestamp", "open", "high", "low", "volume")}
+            snap_init.update({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "as_of": bar_ts,
+                "close": close_price,
+                "volume": volume,
+                "sma_short": snap_init.get("sma_short") or sma_short,
+                "sma_medium": snap_init.get("sma_medium") or sma_medium,
+                "sma_long": snap_init.get("sma_long") or sma_long,
+            })
+            try:
+                indicator = IndicatorSnapshot.model_validate(snap_init)
+            except Exception:
+                indicator = IndicatorSnapshot(
+                    symbol=symbol, timeframe=timeframe, as_of=bar_ts,
+                    close=close_price, volume=volume,
+                    rsi_14=data.get("rsi_14"),
+                    sma_short=sma_short, sma_medium=sma_medium, sma_long=sma_long,
+                    atr_14=data.get("atr_14"),
+                    bollinger_upper=data.get("bollinger_upper"),
+                    bollinger_lower=data.get("bollinger_lower"),
+                    vwap=data.get("vwap"),
+                )
 
-            orders, _ = trigger_engine.on_bar(
+            orders, block_entries = trigger_engine.on_bar(
                 bar,
                 indicator,
                 portfolio_snapshot,
@@ -326,7 +341,7 @@ def evaluate_triggers_activity(
             )
 
             for order in orders:
-                all_orders.append({
+                order_dict = {
                     "symbol": order.symbol,
                     "side": order.side,
                     "quantity": order.quantity,
@@ -336,9 +351,32 @@ def evaluate_triggers_activity(
                     "trigger_category": order.trigger_category,
                     "intent": order.intent,
                     "reason": order.reason,
+                }
+                all_orders.append(order_dict)
+                all_events.append({
+                    "type": "trigger_fired",
+                    "payload": {
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "trigger_id": order.reason,
+                        "category": order.trigger_category,
+                        "price": order.price,
+                        "timeframe": timeframe,
+                    },
                 })
 
-    return all_orders
+            for block in block_entries:
+                all_events.append({
+                    "type": "trade_blocked",
+                    "payload": {
+                        "trigger_id": block.get("trigger_id", ""),
+                        "symbol": block.get("symbol", symbol),
+                        "reason": block.get("reason", ""),
+                        "detail": block.get("detail", ""),
+                    },
+                })
+
+    return {"orders": all_orders, "events": all_events}
 
 
 @activity.defn
@@ -529,6 +567,8 @@ class PaperTradingWorkflow:
         self.last_equity_snapshot: Optional[datetime] = None
         self.exit_binding_mode: Literal["none", "category"] = "category"
         self.conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
+        # Indicator snapshots from last plan generation (used in trigger evaluation)
+        self.last_indicators: Dict[str, Any] = {}
 
     # -------------------------------------------------------------------------
     # Signals
@@ -764,6 +804,9 @@ class PaperTradingWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
+        # Store snapshots for use in trigger evaluation between plan cycles
+        self.last_indicators = indicator_snapshots
+
         # Build market context from full snapshots; fall back to ledger price
         # for any symbol that failed indicator computation.
         market_context = {}
@@ -830,26 +873,49 @@ class PaperTradingWorkflow:
             schedule_to_close_timeout=timedelta(seconds=10),
         )
 
-        # Build market data from latest prices
+        # Fetch fresh prices for this evaluation cycle
+        current_prices = await workflow.execute_activity(
+            fetch_current_prices_activity,
+            args=[self.symbols],
+            schedule_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+
+        # Build market data: merge last indicator snapshot (from plan generation)
+        # with fresh current price so trigger conditions see real indicator values.
         market_data = {}
         for symbol in self.symbols:
-            price = portfolio_state.get("last_prices", {}).get(symbol, 0)
-            if price > 0:
-                market_data[symbol] = {
-                    "timestamp": workflow.now().isoformat(),
-                    "price": price,
-                    "close": price,
-                    "open": price,
-                    "high": price,
-                    "low": price,
-                    "volume": 0,
-                }
+            price = (current_prices.get(symbol)
+                     or portfolio_state.get("last_prices", {}).get(symbol, 0))
+            if not price:
+                continue
+            base = dict(self.last_indicators.get(symbol, {}))
+            base.update({
+                "timestamp": workflow.now().isoformat(),
+                "price": price,
+                "close": price,  # fresh price overrides stale snapshot close
+                "open": price,
+                "high": price,
+                "low": price,
+                "volume": 0,
+            })
+            market_data[symbol] = base
 
         if not market_data:
             return
 
-        # Evaluate triggers
-        orders = await workflow.execute_activity(
+        # Emit tick event so the UI can show live prices
+        await workflow.execute_activity(
+            emit_paper_trading_event_activity,
+            args=[self.session_id, "tick", {
+                "prices": {s: float(current_prices.get(s) or 0) for s in self.symbols},
+                "cycle": self.cycle_count,
+            }],
+            schedule_to_close_timeout=timedelta(seconds=10),
+        )
+
+        # Evaluate triggers — returns {"orders": [...], "events": [...]}
+        result = await workflow.execute_activity(
             evaluate_triggers_activity,
             args=[
                 self.current_plan,
@@ -861,12 +927,25 @@ class PaperTradingWorkflow:
             schedule_to_close_timeout=timedelta(seconds=30),
         )
 
+        orders = result.get("orders", []) if isinstance(result, dict) else list(result)
+        trigger_events = result.get("events", []) if isinstance(result, dict) else []
+
+        # Emit trigger_fired / trade_blocked events for the activity feed
+        for ev in trigger_events:
+            await workflow.execute_activity(
+                emit_paper_trading_event_activity,
+                args=[self.session_id, ev["type"], ev["payload"]],
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
+
         # Execute orders
         for order in orders:
-            await self._execute_order(order, ledger_handle)
+            await self._execute_order(order)
 
-    async def _execute_order(self, order: Dict[str, Any], ledger_handle) -> None:
+    async def _execute_order(self, order: Dict[str, Any]) -> None:
         """Execute a single order."""
+        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+        ledger_handle = workflow.get_external_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
         # Record fill in ledger
         fill_price = float(order.get("price", 0.0) or 0.0)
         quantity = float(order.get("quantity", 0.0) or 0.0)

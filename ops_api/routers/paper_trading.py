@@ -229,6 +229,17 @@ class PortfolioStatus(BaseModel):
     realized_pnl: float
 
 
+class TriggerSummary(BaseModel):
+    """Lightweight summary of a single trigger for the UI."""
+    id: str
+    symbol: str
+    category: str
+    direction: str
+    timeframe: str
+    confidence: Optional[str] = None
+    entry_rule: Optional[str] = None  # truncated to 150 chars
+
+
 class StrategyPlanSummary(BaseModel):
     """Summary of a strategy plan."""
 
@@ -237,6 +248,10 @@ class StrategyPlanSummary(BaseModel):
     trigger_count: int
     allowed_symbols: List[str]
     max_trades_per_day: Optional[int]
+    # Enriched fields for the activity UI
+    global_view: Optional[str] = None
+    regime: Optional[str] = None
+    triggers: List[TriggerSummary] = []
 
 
 class TradeRecord(BaseModel):
@@ -506,12 +521,29 @@ async def get_current_plan(session_id: str):
         if not plan:
             raise HTTPException(status_code=404, detail="No strategy plan generated yet")
 
+        raw_triggers = plan.get("triggers", [])
+        trigger_summaries = [
+            TriggerSummary(
+                id=t.get("id", ""),
+                symbol=t.get("symbol", ""),
+                category=t.get("category", ""),
+                direction=t.get("direction", ""),
+                timeframe=t.get("timeframe", ""),
+                confidence=t.get("confidence"),
+                entry_rule=(t.get("entry_rule") or "")[:150] or None,
+            )
+            for t in raw_triggers
+            if isinstance(t, dict)
+        ]
         return StrategyPlanSummary(
             generated_at=plan.get("generated_at"),
             valid_until=plan.get("valid_until"),
-            trigger_count=len(plan.get("triggers", [])),
+            trigger_count=len(raw_triggers),
             allowed_symbols=plan.get("allowed_symbols", []),
             max_trades_per_day=plan.get("max_trades_per_day"),
+            global_view=plan.get("global_view"),
+            regime=plan.get("regime"),
+            triggers=trigger_summaries,
         )
 
     except HTTPException:
@@ -589,6 +621,41 @@ async def get_trades(session_id: str, limit: int = 100):
         raise
     except Exception as e:
         logger.error(f"Failed to get trades: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sessions/{session_id}/activity")
+async def get_session_activity(session_id: str, limit: int = 40):
+    """Get recent activity events for a paper trading session.
+
+    Returns tick events (live prices), trigger_fired, trade_blocked,
+    order_executed, plan_generated, session_started events — everything
+    needed to power the live activity feed in the UI.
+    """
+    from ops_api.event_store import EventStore
+
+    try:
+        store = EventStore()
+        events = store.list_events_filtered(
+            limit=limit,
+            run_id=session_id,
+            order="desc",
+        )
+        return {
+            "session_id": session_id,
+            "events": [
+                {
+                    "event_id": e.event_id,
+                    "type": e.type,
+                    "ts": e.ts.isoformat(),
+                    "payload": e.payload,
+                    "source": e.source,
+                }
+                for e in events
+            ],
+        }
+    except Exception as e:
+        logger.error(f"Failed to get activity: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

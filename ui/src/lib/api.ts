@@ -717,12 +717,33 @@ export interface PaperTradingPortfolio {
   realized_pnl: number;
 }
 
+export interface PaperTradingTrigger {
+  id: string;
+  symbol: string;
+  category: string;
+  direction: string;
+  timeframe: string;
+  confidence: string | null;
+  entry_rule: string | null;
+}
+
 export interface PaperTradingPlan {
   generated_at: string | null;
   valid_until: string | null;
   trigger_count: number;
   allowed_symbols: string[];
   max_trades_per_day: number | null;
+  global_view: string | null;
+  regime: string | null;
+  triggers: PaperTradingTrigger[];
+}
+
+export interface PaperTradingActivityEvent {
+  event_id: string;
+  type: string;
+  ts: string;
+  payload: Record<string, any>;
+  source: string;
 }
 
 export interface PaperTradingTrade {
@@ -858,6 +879,14 @@ export const paperTradingAPI = {
   updateStrategy: async (sessionId: string, strategyPrompt: string): Promise<{ session_id: string; status: string; message: string }> => {
     const response = await api.put(`/paper-trading/sessions/${sessionId}/strategy`, {
       strategy_prompt: strategyPrompt,
+    });
+    return response.data;
+  },
+
+  // Get recent activity events for a session (ticks, trigger_fired, trade_blocked, order_executed)
+  getActivity: async (sessionId: string, limit = 40): Promise<{ session_id: string; events: PaperTradingActivityEvent[] }> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/activity`, {
+      params: { limit },
     });
     return response.data;
   },
