@@ -39,6 +39,7 @@ from agents.strategies.trade_risk import TradeRiskEvaluator
 from agents.strategies.trigger_engine import Bar, ConflictResolution, ExitBindingMode, Order, TriggerEngine
 from agents.strategies.policy_trigger_integration import PolicyTriggerIntegration
 from schemas.policy import PolicyConfig, PolicyDecisionRecord, get_policy_config_from_plan
+from schemas.trade_set import StopAdjustmentEvent, PartialExitEvent
 from backtesting.dataset import load_ohlcv, load_with_htf
 from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_transport
 from services.judge_feedback_service import JudgeFeedbackService
@@ -379,6 +380,36 @@ class ExecutionModelSettings:
     allow_same_bar_exit: bool = False
 
 
+@dataclass(frozen=True)
+class TradeManagementConfig:
+    """R-multiple-based trade state progression rules (Runbook 45).
+
+    All thresholds and offsets are in R-multiples relative to initial_risk_abs.
+    See docs/branching/45-adaptive-trade-management.md for design rationale.
+    """
+
+    enabled: bool = True
+
+    # MATURE: stop to entry - r1_stop_offset * initial_risk (not break-even)
+    r1_threshold: float = 1.0
+    r1_stop_offset: float = 0.25       # Applied as negative for longs (below entry)
+
+    # EXTENDED: partial exit + stop lock
+    r2_threshold: float = 2.0
+    r2_partial_fraction: float = 0.50  # Fraction of current qty to exit
+    r2_stop_r_lock: float = 0.50       # Stop → entry + 0.5R (already profitable)
+
+    # TRAIL: tighten on remainder
+    r3_threshold: float = 3.0
+    r3_stop_r_lock: float = 1.50       # Stop → entry + 1.5R
+
+    # Wick buffer: extra cushion below/above the rung stop (fraction of initial_risk_abs)
+    wick_buffer_r: float = 0.0         # Default: no buffer
+
+    # ATR trail interaction: allow existing ATR trail to tighten beyond rung stop
+    allow_atr_tighten: bool = True
+
+
 @dataclass
 class PendingOrder:
     order: Order
@@ -400,6 +431,15 @@ class PositionRiskState:
     target_price: float | None = None
     trail_price: float | None = None
     trail_active: bool = False
+    # Runbook 45 — R tracking (all optional, initialized at entry fill time)
+    initial_risk_abs: float | None = None  # Computed once; never changed after entry
+    position_fraction: float = 1.0         # current_qty / entry_qty
+    trade_state: str = "EARLY"             # EARLY | MATURE | EXTENDED | TRAIL
+    mfe_r: float = 0.0                     # Peak R since entry
+    mae_r: float = 0.0                     # Worst R since entry (min, often negative)
+    r1_triggered: bool = False
+    r2_triggered: bool = False
+    r3_triggered: bool = False
 
 
 @dataclass
@@ -858,6 +898,7 @@ class StrategistBacktestResult:
     trade_log: List[Dict[str, Any]] = field(default_factory=list)
     intraday_judge_history: List[Dict[str, Any]] = field(default_factory=list)
     judge_triggered_replans: List[Dict[str, Any]] = field(default_factory=list)
+    trade_mgmt_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class LLMStrategistBacktester:
@@ -912,6 +953,7 @@ class LLMStrategistBacktester:
         exit_binding_mode: ExitBindingMode = "category",
         conflicting_signal_policy: ConflictResolution = "reverse",
         execution_settings: ExecutionModelSettings | None = None,
+        trade_mgmt_config: "TradeManagementConfig | None" = None,
         force_flatten_at_end: bool = False,
         market_structure_refresh_bars: int = 4,
     ) -> None:
@@ -1093,6 +1135,8 @@ class LLMStrategistBacktester:
         self.exit_binding_mode = exit_binding_mode
         self.conflicting_signal_policy = conflicting_signal_policy
         self.execution_settings = execution_settings or ExecutionModelSettings()
+        self.trade_mgmt_config: TradeManagementConfig = trade_mgmt_config or TradeManagementConfig()
+        self._trade_mgmt_events: List[Dict[str, Any]] = []
         self.pending_orders: Dict[tuple[str, str], PendingOrder] = {}
         self.position_risk_state: Dict[str, PositionRiskState] = {}
         if self.priority_skip_confidence_threshold is None and self.is_scalp_profile:
@@ -2377,6 +2421,169 @@ class LLMStrategistBacktester:
                     meta["stop_anchor_type"] = stop_anchor
                     meta["target_anchor_type"] = target_anchor
             self.portfolio.position_meta[symbol] = meta
+            # Runbook 45: compute initial_risk_abs once at entry (never overwrite)
+            stop_abs_for_r = meta.get("stop_price_abs")
+            state_for_r = self.position_risk_state.get(symbol)
+            if state_for_r is not None and stop_abs_for_r is not None and state_for_r.initial_risk_abs is None:
+                risk = abs(order.price - stop_abs_for_r)
+                if risk > 1e-9:
+                    state_for_r.initial_risk_abs = risk
+
+    # ------------------------------------------------------------------
+    # Runbook 45: R-multiple trade management
+    # ------------------------------------------------------------------
+
+    def _apply_stop_adjustment(
+        self,
+        state: PositionRiskState,
+        symbol: str,
+        rung_r_offset: float,
+        rung_name: str,
+        current_R: float,
+        timestamp: datetime,
+        config: "TradeManagementConfig",
+        rung_catch: bool = False,
+    ) -> None:
+        """Move stop to entry + rung_r_offset * initial_risk. Advance-only, direction-aware."""
+        if state.initial_risk_abs is None or state.entry_price is None:
+            return
+        meta = self.portfolio.position_meta.get(symbol, {})
+        direction = meta.get("entry_side", state.direction or "long")
+        ir = state.initial_risk_abs
+
+        if direction == "long":
+            candidate = state.entry_price + rung_r_offset * ir
+            if config.wick_buffer_r > 0:
+                candidate -= config.wick_buffer_r * ir
+            if config.allow_atr_tighten and state.trail_active and state.trail_price is not None:
+                candidate = max(candidate, state.trail_price)
+            current_stop = state.stop_price
+            if current_stop is not None and candidate <= current_stop:
+                return
+        else:
+            candidate = state.entry_price - rung_r_offset * ir
+            if config.wick_buffer_r > 0:
+                candidate += config.wick_buffer_r * ir
+            if config.allow_atr_tighten and state.trail_active and state.trail_price is not None:
+                candidate = min(candidate, state.trail_price)
+            current_stop = state.stop_price
+            if current_stop is not None and candidate >= current_stop:
+                return
+
+        old_stop = state.stop_price
+        state.stop_price = candidate
+        meta["stop_price_abs"] = candidate
+        self.portfolio.position_meta[symbol] = meta
+
+        event = StopAdjustmentEvent(
+            symbol=symbol,
+            timestamp=timestamp,
+            rung=rung_name,
+            old_stop=old_stop,
+            new_stop=candidate,
+            current_R=current_R,
+            mfe_r=state.mfe_r,
+            mae_r=state.mae_r,
+            position_fraction=state.position_fraction,
+            rung_catch=rung_catch,
+        )
+        self._trade_mgmt_events.append(event.model_dump())
+
+    def _advance_trade_state(self, bar: Bar) -> List[Order]:
+        """Evaluate R-multiple rungs for an open position and emit stops/partials."""
+        symbol = bar.symbol
+        if bar.timeframe != self.base_timeframe:
+            return []
+        state = self.position_risk_state.get(symbol)
+        if state is None or state.initial_risk_abs is None:
+            return []
+        config = self.trade_mgmt_config
+        if not config.enabled:
+            return []
+        meta = self.portfolio.position_meta.get(symbol, {})
+        direction = meta.get("entry_side", state.direction or "long")
+        entry_price = state.entry_price
+        if entry_price is None:
+            return []
+
+        close = bar.close
+        ir = state.initial_risk_abs
+        current_R = (close - entry_price) / ir if direction == "long" else (entry_price - close) / ir
+
+        state.mfe_r = max(state.mfe_r, current_R)
+        state.mae_r = min(state.mae_r, current_R)
+        meta["current_R"] = current_R
+        meta["mfe_r"] = state.mfe_r
+        meta["mae_r"] = state.mae_r
+        meta["trade_state"] = state.trade_state
+        meta["position_fraction"] = state.position_fraction
+        self.portfolio.position_meta[symbol] = meta
+
+        r1_fires = not state.r1_triggered and current_R >= config.r1_threshold
+        r2_fires = not state.r2_triggered and current_R >= config.r2_threshold
+        r3_fires = not state.r3_triggered and current_R >= config.r3_threshold
+        rung_catch = sum([r1_fires, r2_fires, r3_fires]) > 1
+
+        partial_orders: List[Order] = []
+
+        if r1_fires:
+            self._apply_stop_adjustment(
+                state, symbol, -config.r1_stop_offset, "r1_mature",
+                current_R, bar.timestamp, config, rung_catch=rung_catch,
+            )
+            state.r1_triggered = True
+            state.trade_state = "MATURE"
+
+        if r2_fires:
+            current_qty = self.portfolio.positions.get(symbol, 0.0)
+            if abs(current_qty) > 1e-9:
+                exit_qty = abs(current_qty) * config.r2_partial_fraction
+                if exit_qty > 1e-9:
+                    side: Literal["buy", "sell"] = "sell" if current_qty > 0 else "buy"
+                    partial_orders.append(
+                        Order(
+                            symbol=symbol,
+                            side=side,
+                            quantity=exit_qty,
+                            price=close,
+                            timeframe=bar.timeframe,
+                            reason="r2_partial_exit",
+                            timestamp=bar.timestamp,
+                            intent="exit",
+                            exit_fraction=config.r2_partial_fraction,
+                        )
+                    )
+                    fraction_before = state.position_fraction
+                    state.position_fraction *= 1.0 - config.r2_partial_fraction
+                    ev = PartialExitEvent(
+                        symbol=symbol,
+                        timestamp=bar.timestamp,
+                        rung="r2_extended",
+                        fraction_exited=config.r2_partial_fraction,
+                        exit_price=close,
+                        exit_R=current_R,
+                        mfe_r=state.mfe_r,
+                        initial_risk_abs=ir,
+                        position_fraction_before=fraction_before,
+                        position_fraction_after=state.position_fraction,
+                    )
+                    self._trade_mgmt_events.append(ev.model_dump())
+            self._apply_stop_adjustment(
+                state, symbol, config.r2_stop_r_lock, "r2_extended",
+                current_R, bar.timestamp, config, rung_catch=rung_catch,
+            )
+            state.r2_triggered = True
+            state.trade_state = "EXTENDED"
+
+        if r3_fires:
+            self._apply_stop_adjustment(
+                state, symbol, config.r3_stop_r_lock, "r3_trail",
+                current_R, bar.timestamp, config, rung_catch=rung_catch,
+            )
+            state.r3_triggered = True
+            state.trade_state = "TRAIL"
+
+        return partial_orders
 
     def _coerce_timestamp(self, value: Any) -> datetime | None:
         if isinstance(value, datetime):
@@ -3507,6 +3714,7 @@ class LLMStrategistBacktester:
         )
         self.pending_orders.clear()
         self.position_risk_state.clear()
+        self._trade_mgmt_events.clear()
         self._ensure_strategy_run(run_id)
         all_timestamps = sorted(
             {ts for pair in self.market_data.values() for df in pair.values() for ts in df.index if self.start <= ts <= self.end}
@@ -4246,6 +4454,10 @@ class LLMStrategistBacktester:
                     )
                     structure_snapshot = market_structure_briefs.get(pair)
 
+                    # Runbook 45: advance R-based stops before trigger evaluation so
+                    # updated stop_price_abs is visible to stop_hit in _context()
+                    r45_partial_orders = self._advance_trade_state(bar)
+
                     # Use policy integration if available, otherwise direct trigger engine
                     if self.policy_integration is not None:
                         policy_result = self.policy_integration.on_bar(
@@ -4272,6 +4484,10 @@ class LLMStrategistBacktester:
                             market_structure=structure_snapshot,
                             position_meta=self.portfolio.position_meta,
                         )
+
+                    # Prepend Runbook 45 partial exits so they execute before new entries
+                    if r45_partial_orders:
+                        orders = r45_partial_orders + list(orders)
 
                     current_load = len(orders) + (len(blocked_entries) if blocked_entries else 0)
                     if self._use_next_open_execution():
@@ -4492,6 +4708,7 @@ class LLMStrategistBacktester:
             trade_log=serialized_trade_log,
             intraday_judge_history=list(self.intraday_judge_history),
             judge_triggered_replans=list(self.judge_triggered_replans),
+            trade_mgmt_events=list(self._trade_mgmt_events),
         )
 
     def _indicator_briefs(self, asset_states: Dict[str, AssetState]) -> Dict[str, Dict[str, Any]]:

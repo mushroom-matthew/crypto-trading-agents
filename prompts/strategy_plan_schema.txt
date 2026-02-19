@@ -229,3 +229,37 @@ STOP ANCHORING PRIORITY (use the tightest that still makes structural sense):
     4. atr              — volatility-normalized fallback
     5. pct              — last resort; arbitrary, not structure-based
   For shorts (stop above resistance): same priority, mirrored anchors
+
+R-TRACKING IDENTIFIERS (Runbook 45 — adaptive trade management):
+  These are populated automatically once a position is open and initial_risk_abs is set.
+  Use them in exit_rule, hold_rule, or risk_reduce conditions.
+
+  current_R       — (float) Current unrealized gain/loss as a multiple of initial risk.
+                    Positive = in profit, negative = drawdown. E.g. 1.5 = up 1.5× initial risk.
+  mfe_r           — (float) Maximum favourable excursion in R since entry (peak current_R).
+  mae_r           — (float) Maximum adverse excursion in R since entry (most negative current_R seen).
+  trade_state     — (str)  "EARLY" | "MATURE" | "EXTENDED" | "TRAIL"
+                    EARLY: 0–1R, no automatic action taken.
+                    MATURE: stop moved to −0.25R breakeven zone after R1 trigger.
+                    EXTENDED: 50% partial taken + stop at +0.5R after R2 trigger.
+                    TRAIL: stop at +1.5R after R3 trigger.
+  position_fraction — (float) Remaining position size as a fraction of entry (1.0 = full).
+                    Decreases after partial exits.
+  r1_reached      — (bool) True once current_R >= 1.0
+  r2_reached      — (bool) True once current_R >= 2.0
+  r3_reached      — (bool) True once current_R >= 3.0
+
+USAGE IN EXIT/HOLD RULES:
+  Trail or exit on R regression:
+    exit_rule: "not is_flat and (stop_hit or (r2_reached and current_R < 1.0))"
+
+  Hold minimum until trade is mature:
+    hold_rule: "not is_flat and trade_state == 'EARLY'"
+
+  Scale out at target approach when already mature:
+    exit_rule: "not is_flat and r2_reached and target_distance_pct < 0.3"
+    exit_fraction: 0.5
+
+NOTE: Do NOT set exit_fraction targets for R2 exits yourself — the engine automatically
+takes a 50% partial at +2R and advances the stop. Only use position_fraction in rules
+to react to the new reduced position size (e.g. after partial).

@@ -380,6 +380,18 @@ class TriggerEngine:
             if (active_target and current_close)
             else 0.0
         )
+
+        # Runbook 45: R-tracking identifiers (written by _advance_trade_state into position_meta)
+        r_current = active_meta.get("current_R", 0.0) or 0.0
+        context["current_R"] = r_current
+        context["mfe_r"] = active_meta.get("mfe_r", 0.0) or 0.0
+        context["mae_r"] = active_meta.get("mae_r", 0.0) or 0.0
+        context["trade_state"] = active_meta.get("trade_state", "EARLY") or "EARLY"
+        context["position_fraction"] = active_meta.get("position_fraction", 1.0) if active_meta.get("position_fraction") is not None else 1.0
+        context["r1_reached"] = r_current >= 1.0
+        context["r2_reached"] = r_current >= 2.0
+        context["r3_reached"] = r_current >= 3.0
+
         return context
 
     def _trend_state_from_snapshot(self, snapshot: IndicatorSnapshot) -> str:

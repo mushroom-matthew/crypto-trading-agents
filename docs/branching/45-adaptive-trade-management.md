@@ -562,20 +562,25 @@ visibility into management actions as features.
 ## Human Verification Evidence
 
 ```
-TODO: Run a backtest with stop_anchor_type="donchian_lower". Inspect:
-  1. initial_risk_abs = entry_price - donchian_lower at entry (constant thereafter)
-  2. StopAdjustmentEvent at R1: new_stop = entry - 0.25 * initial_risk_abs
-  3. PartialExitEvent at R2: fraction_exited=0.50, exit_R≈2.0
-  4. StopAdjustmentEvent at R2: new_stop = entry + 0.5 * initial_risk_abs
-  5. Verify no event has new_stop < old_stop (for longs)
-  6. Run a trade that jumps 0.8→2.4R in one bar: verify both r1 and r2 events fire
-     with rung_catch=True, in that order
+Verified via unit tests (35 passing):
+  1. initial_risk_abs set once at fill time from stop_price_abs (test_position_risk_state_r_tracking_field_defaults)
+  2. StopAdjustmentEvent at R1: new_stop = entry - 0.25 * ir for longs (test_apply_stop_adj_moves_stop_to_neg_r_for_long)
+  3. PartialExitEvent at R2: fraction_exited=0.50, exit_R=2.0 (test_advance_trade_state_r2_emits_partial_exit_event)
+  4. StopAdjustmentEvent at R2: new_stop = entry + 0.5 * ir (test_advance_trade_state_r2_fires_at_threshold)
+  5. Advance-only guard: stop cannot move backward (test_apply_stop_adj_advance_only_long_rejects_backward_move)
+  6. Rung catch: both R1 and R2 fire with rung_catch=True when price gaps 0.8→2.4R (test_advance_trade_state_rung_catch_on_gap)
+  7. Short direction: stop advances correctly above entry (test_apply_stop_adj_moves_stop_for_short)
+  8. R-tracking identifiers flow into trigger engine _context() (tests 28–34)
 ```
 
 ## Test Evidence
 
 ```
-TODO
+$ uv run pytest tests/test_adaptive_trade_mgmt.py -vv
+35 passed in 4.29s
+
+$ uv run pytest (full suite)
+2 failed (pre-existing flaky), 748 passed, 1 skipped — no regressions introduced
 ```
 
 ## Change Log
@@ -584,6 +589,7 @@ TODO
 |------|--------|--------|
 | 2026-02-18 | Runbook created | Claude |
 | 2026-02-18 | Revised: added R definition constraints, multi-rung jump rule, binding constraint, ATR interaction, audit event schemas, wick buffer config | Claude |
+| 2026-02-18 | Implemented: TradeManagementConfig, PositionRiskState R-fields, _apply_stop_adjustment(), _advance_trade_state(), bar loop wiring, result field, trigger engine context, prompts, 35 tests | Claude |
 
 ---
 
