@@ -18,7 +18,7 @@ from trading_core.execution_engine import BlockReason
 
 from .risk_engine import RiskEngine
 from .rule_dsl import EvaluationTrace, MissingIndicatorError, RuleEvaluator, RuleSyntaxError
-
+from .plan_validator import check_exit_rule_for_tautology
 
 from .trade_risk import TradeRiskEvaluator
 
@@ -725,6 +725,30 @@ class TriggerEngine:
                         extra={"cooldown_recommendation_bars": self._emergency_cooldown_bars()},
                     )
                     continue
+                # Runtime failsafe: detect cross-timeframe ATR tautologies that would
+                # cause the emergency exit to fire on every bar regardless of market
+                # conditions.  This is belt-and-suspenders: the compile-time validator
+                # in _generate_plan() should have already rejected such a plan, but this
+                # prevents churn if a bad plan was persisted before the validator existed.
+                if trigger.category == "emergency_exit" and trigger.exit_rule:
+                    _tautologies = check_exit_rule_for_tautology(
+                        trigger.exit_rule, trigger.timeframe
+                    )
+                    if _tautologies:
+                        frags = "; ".join(t.fragment for t in _tautologies)
+                        detail = (
+                            f"Emergency exit suppressed: exit_rule contains ATR "
+                            f"tautology (always-true cross-TF comparison). "
+                            f"Flagged: {frags}"
+                        )
+                        self._record_block(
+                            block_entries,
+                            trigger,
+                            "emergency_exit_tautology",
+                            detail,
+                            bar,
+                        )
+                        continue
                 exit_fired = bool(trigger.exit_rule and self.evaluator.evaluate(trigger.exit_rule, context))
                 # Debug sampling for exit rule
                 self._maybe_sample_evaluation(

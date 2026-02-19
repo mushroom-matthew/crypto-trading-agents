@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -773,25 +773,6 @@ interface CandlestickChartProps {
   targetPrice: number | null;
 }
 
-function CandleShape(props: any) {
-  const { x, y, width, height, open, close, high, low, index, payload } = props;
-  if (!payload) return null;
-  const isUp = payload.close >= payload.open;
-  const color = isUp ? '#16a34a' : '#dc2626';
-  const bodyTop = Math.min(y, y + height);
-  const bodyH = Math.max(Math.abs(height), 1);
-  const wickX = x + width / 2;
-  const highY = props.background?.y ?? 0;
-  return (
-    <g>
-      {/* Wick */}
-      <line x1={wickX} x2={wickX} y1={props.high} y2={props.low} stroke={color} strokeWidth={1} />
-      {/* Body */}
-      <rect x={x + 1} y={bodyTop} width={Math.max(width - 2, 1)} height={bodyH} fill={color} fillOpacity={0.85} />
-    </g>
-  );
-}
-
 function CandlestickChart({ candles, trades, stopPrice, targetPrice }: CandlestickChartProps) {
   if (candles.length === 0) {
     return (
@@ -831,7 +812,7 @@ function CandlestickChart({ candles, trades, stopPrice, targetPrice }: Candlesti
   const yMin = Math.min(...candles.map((c) => c.low)) * 0.9995;
   const yMax = Math.max(...candles.map((c) => c.high)) * 1.0005;
 
-  const CustomTooltip = ({ active, payload, label }: any) => {
+  const CustomTooltip = ({ active, payload }: any) => {
     if (!active || !payload?.length) return null;
     const d = payload[0]?.payload;
     if (!d) return null;

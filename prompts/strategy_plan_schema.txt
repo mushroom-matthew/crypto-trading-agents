@@ -34,19 +34,38 @@ Trigger schema (each item in triggers MUST include these keys):
 - direction (long | short | exit)
 - timeframe (e.g., "1h")
 - entry_rule (string expression - NO subscript syntax like indicator[-1])
-- exit_rule (string expression - NO subscript syntax like indicator[-1], can be empty for emergency exit)
+- exit_rule (string expression - NO subscript syntax like indicator[-1]; REQUIRED and non-empty for emergency_exit triggers)
 - stop_loss_pct (REQUIRED for short entries): percentage-based stop distance (e.g., 2.0 means 2% stop)
 
 IMPORTANT - Short entries:
 - All short triggers MUST include stop_loss_pct. Short entries without stop_loss_pct will be BLOCKED.
 - Example short trigger: {"direction": "short", "stop_loss_pct": 2.5, ...}
 
-IMPORTANT - Cross-Timeframe ATR Tautology:
-- Comparing ATR across timeframes directly (e.g., tf_1d_atr > tf_4h_atr) is ALWAYS TRUE because higher-timeframe ATR aggregates more price movement. This is a tautology that causes emergency exits to fire on every bar.
-- CORRECT: Use ratio comparisons: tf_1d_atr > 2.5 * tf_4h_atr (checks if daily ATR is 2.5x larger than expected)
-- CORRECT: Use same-timeframe comparisons: atr_14 > sma_medium * 0.03 (checks volatility relative to price)
-- WRONG: tf_1d_atr > tf_4h_atr (always true — will be flagged as compile-time warning)
-- WRONG: tf_4h_atr > tf_1h_atr (always true)
+IMPORTANT - Cross-Timeframe ATR Tautology (PLAN WILL BE REJECTED if violated):
+- ATR scales naturally as sqrt(T_high / T_low) across timeframes. Any comparison where
+  the multiplier k is below this natural ratio is a TAUTOLOGY — always True regardless of
+  market conditions. Emergency exits containing tautologies will fire on EVERY bar and
+  cause constant buy-exit churn. The plan validator REJECTS plans with these patterns.
+
+  Minimum required k values (k must be STRICTLY GREATER than these):
+    1D vs 1H:  sqrt(1440/60)  = 4.9x → require k ≥ 6.4   (e.g. htf_daily_atr > 6.4 * atr_14)
+    1D vs 4H:  sqrt(1440/240) = 2.4x → require k ≥ 3.2   (e.g. tf_1d_atr > 3.2 * tf_4h_atr)
+    4H vs 1H:  sqrt(240/60)   = 2.0x → require k ≥ 2.6   (e.g. tf_4h_atr > 2.6 * atr_14)
+    1D vs 15m: sqrt(1440/15)  = 9.8x → require k ≥ 12.7
+
+- WRONG: htf_daily_atr > 3 * atr_14     (k=3 < 6.4 → always true → REJECTED)
+- WRONG: tf_1d_atr > 2.5 * tf_4h_atr   (k=2.5 < 3.2 → always true → REJECTED)
+- WRONG: tf_4h_atr > tf_1h_atr          (k=1 < 2.6 → always true → REJECTED)
+
+PREFERRED: Use deterministic regime labels instead of raw ATR math for emergency exits:
+- BEST: vol_state == 'extreme'           (your own classifier, calibrated, never tautological)
+- GOOD: htf_daily_range_pct > 6.0       (prior session was extreme range — absolute, not relative)
+- GOOD: unrealized_pnl_pct < -5.0       (hard dollar-loss emergency — position-specific)
+- GOOD: close < nearest_support * 0.97  (structural break with 3% buffer)
+- GOOD: rsi_14 < 12                     (genuine crash RSI, not just oversold)
+
+If you MUST use ATR ratios: verify k exceeds the minimum above by a comfortable margin.
+A typical correct emergency exit: "not is_flat and (vol_state == 'extreme' or unrealized_pnl_pct < -6.0)"
 
 IMPORTANT - Exit Binding Constraint:
 - Exit rules only close positions opened by triggers in the SAME category.

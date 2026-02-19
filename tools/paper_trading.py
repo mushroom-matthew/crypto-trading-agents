@@ -25,6 +25,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from agents.strategies.llm_client import LLMClient
     from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
+    from agents.strategies.plan_validator import validate_trigger_plan
     from agents.strategies.risk_engine import RiskEngine, RiskProfile
     from agents.strategies.trade_risk import TradeRiskEvaluator
     from agents.analytics import (
@@ -105,10 +106,13 @@ async def generate_strategy_plan_activity(
     market_context: Dict[str, Any],
     llm_model: Optional[str] = None,
     session_id: Optional[str] = None,
+    repair_instructions: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate a strategy plan using the LLM client.
 
     Caches plans based on input hash to reduce LLM costs.
+    When repair_instructions is provided (after a failed validation), the cache
+    is bypassed and the repair prompt is injected into the LLM call.
     """
     # Build cache key from inputs
     cache_key_data = {
@@ -119,16 +123,17 @@ async def generate_strategy_plan_activity(
     }
     cache_key = hashlib.sha256(json.dumps(cache_key_data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
-    # Check cache
-    PLAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = PLAN_CACHE_DIR / f"plan_{cache_key}.json"
-    if cache_file.exists():
-        try:
-            cached = json.loads(cache_file.read_text())
-            logger.info(f"Using cached strategy plan: {cache_key}")
-            return cached
-        except Exception as e:
-            logger.warning(f"Failed to load cached plan: {e}")
+    # Check cache — skip when repair_instructions are provided (plan was rejected)
+    if not repair_instructions:
+        PLAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file = PLAN_CACHE_DIR / f"plan_{cache_key}.json"
+        if cache_file.exists():
+            try:
+                cached = json.loads(cache_file.read_text())
+                logger.info(f"Using cached strategy plan: {cache_key}")
+                return cached
+            except Exception as e:
+                logger.warning(f"Failed to load cached plan: {e}")
 
     # Build LLM input
     now = datetime.now(timezone.utc)
@@ -176,21 +181,30 @@ async def generate_strategy_plan_activity(
         risk_params={},
     )
 
-    # Generate plan
+    # Generate plan — inject repair instructions into the prompt if provided
+    effective_prompt = strategy_prompt
+    if repair_instructions:
+        logger.warning(f"Generating repair plan with validation error context")
+        effective_prompt = f"{repair_instructions}\n\n{strategy_prompt or ''}"
+
     llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
     plan = llm_client.generate_plan(
         llm_input,
-        prompt_template=strategy_prompt,
+        prompt_template=effective_prompt,
         run_id=session_id,
         plan_id=str(uuid4()),
     )
 
     plan_dict = plan.model_dump()
 
-    # Cache the plan
+    # Cache the plan (only when not a repair pass — repair plans are one-shot)
+    if not repair_instructions:
+        PLAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file = PLAN_CACHE_DIR / f"plan_{cache_key}.json"
     try:
-        cache_file.write_text(json.dumps(plan_dict, default=str))
-        logger.info(f"Cached strategy plan: {cache_key}")
+        if not repair_instructions:
+            cache_file.write_text(json.dumps(plan_dict, default=str))
+        logger.info(f"{'Repair plan generated' if repair_instructions else 'Cached strategy plan'}: {cache_key}")
     except Exception as e:
         logger.warning(f"Failed to cache plan: {e}")
 
@@ -866,6 +880,42 @@ class PaperTradingWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
+        # Compile-time validation: detect hazardous patterns (e.g. ATR tautologies
+        # in emergency_exit rules) before the plan is stored.  If hard errors are
+        # found, attempt one repair pass with the error context injected into the
+        # prompt.  The runtime failsafe in trigger_engine handles anything that slips
+        # through (e.g. plans persisted before this validator existed).
+        _validation = validate_trigger_plan(plan_dict, base_tf_minutes=60)
+        if not _validation.is_valid:
+            workflow.logger.warning(
+                f"Plan validation failed — attempting repair pass:\n{_validation.summary()}"
+            )
+            _repair_dict = await workflow.execute_activity(
+                generate_strategy_plan_activity,
+                args=[
+                    self.symbols,
+                    portfolio_state,
+                    self.strategy_prompt,
+                    market_context,
+                    None,  # llm_model
+                    self.session_id,
+                    _validation.repair_prompt(),  # repair_instructions
+                ],
+                schedule_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            _recheck = validate_trigger_plan(_repair_dict, base_tf_minutes=60)
+            if _recheck.is_valid:
+                workflow.logger.info("Repair plan passed validation — using repaired plan.")
+                plan_dict = _repair_dict
+            else:
+                workflow.logger.error(
+                    f"Repair plan still has validation errors. "
+                    f"Runtime failsafe in trigger_engine will suppress tautological "
+                    f"emergency exits:\n{_recheck.summary()}"
+                )
+                # Proceed with original plan — runtime failsafe is the last line of defence
+
         self.current_plan = plan_dict
         self.last_plan_time = workflow.now()
 
@@ -883,11 +933,16 @@ class PaperTradingWorkflow:
         self.plan_history.append(plan_record)
 
         # Emit event
+        validation_errors = [
+            {"trigger_id": e.trigger_id, "code": e.code, "message": e.message}
+            for e in _validation.hard_errors
+        ]
         await workflow.execute_activity(
             emit_paper_trading_event_activity,
             args=[self.session_id, "plan_generated", {
                 "trigger_count": len(plan_dict.get("triggers", [])),
                 "plan_index": len(self.plan_history) - 1,
+                "validation_errors": validation_errors,
             }],
             schedule_to_close_timeout=timedelta(seconds=10),
         )
