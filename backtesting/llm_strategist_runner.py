@@ -137,7 +137,15 @@ def _resolve_stop_price_anchored(
 ) -> tuple[float | None, str | None]:
     """Compute absolute stop price from anchor type and current snapshot.
 
+    Stop must be BELOW entry for longs, ABOVE entry for shorts.
     Returns (stop_price, anchor_type_used) or (None, None) if unresolvable.
+
+    Anchor families:
+      Long-only:  htf_daily_low, htf_prev_daily_low, donchian_lower, candle_low
+      Short-only: htf_daily_high, htf_prev_daily_high, donchian_upper, candle_high
+      Both (auto-select by direction): htf_daily_extreme, htf_prev_daily_extreme,
+                                       donchian_extreme, candle_extreme
+      Both (computed): pct, atr, fib_618
     """
     anchor = getattr(trigger, "stop_anchor_type", None) or "pct"
 
@@ -148,38 +156,118 @@ def _resolve_stop_price_anchored(
             return price, "pct"
         return None, None
 
-    if anchor == "atr":
+    elif anchor == "atr":
         atr = getattr(snapshot, "atr_14", None)
         if atr:
-            mult = 1.5
+            mult = getattr(trigger, "stop_loss_atr_mult", None) or 1.5
             offset = atr * mult
             price = fill_price - offset if direction == "long" else fill_price + offset
             return price, "atr"
 
+    # Long-only structural anchors (support below price) --------------------
     elif anchor == "htf_daily_low":
+        if direction != "long":
+            return None, None  # Use htf_daily_high or htf_daily_extreme for shorts
         level = getattr(snapshot, "htf_daily_low", None)
         if level:
             return level * 0.995, "htf_daily_low"
 
     elif anchor == "htf_prev_daily_low":
+        if direction != "long":
+            return None, None
         level = getattr(snapshot, "htf_prev_daily_low", None)
         if level:
             return level * 0.995, "htf_prev_daily_low"
 
     elif anchor == "donchian_lower":
+        if direction != "long":
+            return None, None
         level = getattr(snapshot, "donchian_lower_short", None)
         if level:
             return level * 0.995, "donchian_lower"
 
+    elif anchor == "candle_low":
+        if direction != "long":
+            return None, None
+        level = getattr(snapshot, "low", None)
+        if level:
+            return level * 0.998, "candle_low"
+
+    # Short-only structural anchors (resistance above price) ----------------
+    elif anchor == "htf_daily_high":
+        if direction != "short":
+            return None, None  # Use htf_daily_low or htf_daily_extreme for longs
+        level = getattr(snapshot, "htf_daily_high", None)
+        if level:
+            return level * 1.005, "htf_daily_high"
+
+    elif anchor == "htf_prev_daily_high":
+        if direction != "short":
+            return None, None
+        level = getattr(snapshot, "htf_prev_daily_high", None)
+        if level:
+            return level * 1.005, "htf_prev_daily_high"
+
+    elif anchor == "donchian_upper":
+        if direction != "short":
+            return None, None
+        level = getattr(snapshot, "donchian_upper_short", None)
+        if level:
+            return level * 1.005, "donchian_upper"
+
+    elif anchor == "candle_high":
+        if direction != "short":
+            return None, None
+        level = getattr(snapshot, "high", None)
+        if level:
+            return level * 1.002, "candle_high"
+
+    # Anchor families: auto-select support/resistance based on direction ----
+    elif anchor == "htf_daily_extreme":
+        if direction == "long":
+            level = getattr(snapshot, "htf_daily_low", None)
+            if level:
+                return level * 0.995, "htf_daily_extreme"
+        else:
+            level = getattr(snapshot, "htf_daily_high", None)
+            if level:
+                return level * 1.005, "htf_daily_extreme"
+
+    elif anchor == "htf_prev_daily_extreme":
+        if direction == "long":
+            level = getattr(snapshot, "htf_prev_daily_low", None)
+            if level:
+                return level * 0.995, "htf_prev_daily_extreme"
+        else:
+            level = getattr(snapshot, "htf_prev_daily_high", None)
+            if level:
+                return level * 1.005, "htf_prev_daily_extreme"
+
+    elif anchor == "donchian_extreme":
+        if direction == "long":
+            level = getattr(snapshot, "donchian_lower_short", None)
+            if level:
+                return level * 0.995, "donchian_extreme"
+        else:
+            level = getattr(snapshot, "donchian_upper_short", None)
+            if level:
+                return level * 1.005, "donchian_extreme"
+
+    elif anchor == "candle_extreme":
+        if direction == "long":
+            level = getattr(snapshot, "low", None)
+            if level:
+                return level * 0.998, "candle_extreme"
+        else:
+            level = getattr(snapshot, "high", None)
+            if level:
+                return level * 1.002, "candle_extreme"
+
+    # Price-level agnostic (valid for both directions) ----------------------
     elif anchor == "fib_618":
         level = getattr(snapshot, "fib_618", None)
         if level:
             return level, "fib_618"
-
-    elif anchor == "candle_low":
-        level = getattr(snapshot, "low", None)
-        if level:
-            return level * 0.998, "candle_low"
 
     return None, None
 
@@ -193,22 +281,71 @@ def _resolve_target_price_anchored(
 ) -> tuple[float | None, str | None]:
     """Compute absolute target price from anchor type.
 
+    Target must be ABOVE entry for longs, BELOW entry for shorts.
     Returns (target_price, anchor_type_used) or (None, None) if unresolvable.
+
+    Anchor families:
+      Long-only:  htf_daily_high, htf_5d_high
+      Short-only: htf_daily_low, htf_5d_low
+      Both (auto-select): htf_daily_extreme, htf_5d_extreme
+      Both (computed):    measured_move, r_multiple_2, r_multiple_3
     """
     anchor = getattr(trigger, "target_anchor_type", None)
     if not anchor:
         return None, None
 
+    # Long-only level targets (resistance above price) ----------------------
     if anchor == "htf_daily_high":
+        if direction != "long":
+            return None, None  # Use htf_daily_low or htf_daily_extreme for shorts
         level = getattr(snapshot, "htf_daily_high", None)
         if level:
             return level * 0.998, "htf_daily_high"
 
     elif anchor == "htf_5d_high":
+        if direction != "long":
+            return None, None
         level = getattr(snapshot, "htf_5d_high", None)
         if level:
             return level * 0.998, "htf_5d_high"
 
+    # Short-only level targets (support below price) ------------------------
+    elif anchor == "htf_daily_low":
+        if direction != "short":
+            return None, None
+        level = getattr(snapshot, "htf_daily_low", None)
+        if level:
+            return level * 1.002, "htf_daily_low"
+
+    elif anchor == "htf_5d_low":
+        if direction != "short":
+            return None, None
+        level = getattr(snapshot, "htf_5d_low", None)
+        if level:
+            return level * 1.002, "htf_5d_low"
+
+    # Anchor families: auto-select resistance/support based on direction ----
+    elif anchor == "htf_daily_extreme":
+        if direction == "long":
+            level = getattr(snapshot, "htf_daily_high", None)
+            if level:
+                return level * 0.998, "htf_daily_extreme"
+        else:
+            level = getattr(snapshot, "htf_daily_low", None)
+            if level:
+                return level * 1.002, "htf_daily_extreme"
+
+    elif anchor == "htf_5d_extreme":
+        if direction == "long":
+            level = getattr(snapshot, "htf_5d_high", None)
+            if level:
+                return level * 0.998, "htf_5d_extreme"
+        else:
+            level = getattr(snapshot, "htf_5d_low", None)
+            if level:
+                return level * 1.002, "htf_5d_extreme"
+
+    # Direction-aware computed targets --------------------------------------
     elif anchor == "measured_move":
         upper = getattr(snapshot, "donchian_upper_short", None)
         lower = getattr(snapshot, "donchian_lower_short", None)
