@@ -18,6 +18,11 @@ router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])
 TASK_QUEUE = os.environ.get("TASK_QUEUE", "mcp-tools")
 
 
+def _paper_ledger_workflow_id(session_id: str) -> str:
+    """Return the dedicated ledger workflow id for a paper-trading session."""
+    return f"{session_id}-ledger"
+
+
 # ============================================================================
 # Request/Response Models
 # ============================================================================
@@ -331,9 +336,12 @@ async def start_session(config: PaperTradingSessionConfig):
         if config.max_triggers_per_symbol_per_day is not None:
             risk_params["max_triggers_per_symbol_per_day"] = config.max_triggers_per_symbol_per_day
 
+        ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+
         # Build workflow config
         workflow_config = {
             "session_id": session_id,
+            "ledger_workflow_id": ledger_workflow_id,
             "symbols": symbols,
             "initial_cash": config.initial_cash,
             "initial_allocations": initial_allocations,
@@ -371,22 +379,21 @@ async def start_session(config: PaperTradingSessionConfig):
         # Start workflow
         client = await get_temporal_client()
 
-        # Ensure the shared execution ledger workflow is running
-        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+        # Ensure the session-scoped execution ledger workflow is running
         from agents.workflows.execution_ledger_workflow import ExecutionLedgerWorkflow
         from temporalio.service import RPCError, RPCStatusCode
 
-        ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+        ledger_handle = client.get_workflow_handle(ledger_workflow_id)
         try:
             await ledger_handle.describe()
         except RPCError as err:
             if err.status == RPCStatusCode.NOT_FOUND:
                 await client.start_workflow(
                     ExecutionLedgerWorkflow.run,
-                    id=MOCK_LEDGER_WORKFLOW_ID,
+                    id=ledger_workflow_id,
                     task_queue=TASK_QUEUE,
                 )
-                logger.info("Started ledger workflow %s", MOCK_LEDGER_WORKFLOW_ID)
+                logger.info("Started ledger workflow %s", ledger_workflow_id)
             else:
                 raise
 
@@ -471,7 +478,7 @@ async def get_portfolio(session_id: str):
     """Get current portfolio status for a paper trading session."""
     from ops_api.temporal_client import get_temporal_client
     from agents.constants import MOCK_LEDGER_WORKFLOW_ID
-    from temporalio.service import RPCError
+    from temporalio.service import RPCError, RPCStatusCode
 
     try:
         client = await get_temporal_client()
@@ -485,9 +492,16 @@ async def get_portfolio(session_id: str):
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             raise
 
-        # Query the shared ledger workflow
-        ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
-        portfolio = await ledger_handle.query("get_portfolio_status")
+        # Query the session-scoped ledger workflow, fallback to legacy shared ledger for older sessions.
+        ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+        ledger_handle = client.get_workflow_handle(ledger_workflow_id)
+        try:
+            portfolio = await ledger_handle.query("get_portfolio_status")
+        except RPCError as err:
+            if err.status != RPCStatusCode.NOT_FOUND:
+                raise
+            legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+            portfolio = await legacy_ledger_handle.query("get_portfolio_status")
 
         return PortfolioStatus(
             cash=float(portfolio.get("cash", 0)),
@@ -585,7 +599,7 @@ async def get_trades(session_id: str, limit: int = 100):
     """Get trade history for a session."""
     from ops_api.temporal_client import get_temporal_client
     from agents.constants import MOCK_LEDGER_WORKFLOW_ID
-    from temporalio.service import RPCError
+    from temporalio.service import RPCError, RPCStatusCode
 
     try:
         client = await get_temporal_client()
@@ -599,9 +613,16 @@ async def get_trades(session_id: str, limit: int = 100):
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             raise
 
-        # Query ledger for transaction history
-        ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
-        transactions = await ledger_handle.query("get_transaction_history", {"limit": limit})
+        # Query session-scoped ledger, fallback to legacy shared ledger for older sessions.
+        ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+        ledger_handle = client.get_workflow_handle(ledger_workflow_id)
+        try:
+            transactions = await ledger_handle.query("get_transaction_history", {"limit": limit})
+        except RPCError as err:
+            if err.status != RPCStatusCode.NOT_FOUND:
+                raise
+            legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+            transactions = await legacy_ledger_handle.query("get_transaction_history", {"limit": limit})
 
         trades = []
         for tx in transactions:

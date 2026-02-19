@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from decimal import Decimal
 from typing import Dict, List, Any
@@ -181,7 +182,7 @@ class ExecutionLedgerWorkflow:
                     "trading_wallet_name": self.trading_wallet_name,
                     "equity_wallet_name": self.equity_wallet_name,
                 }
-                workflow.create_task(self._persist_fill(payload))
+                asyncio.create_task(self._persist_fill(payload))
 
         side = fill["side"]
         symbol = fill["symbol"]
@@ -295,7 +296,7 @@ class ExecutionLedgerWorkflow:
             # Paper wallet snapshot for visibility; live provider would integrate real balances.
             if isinstance(self.wallet_provider, PaperWalletProvider):
                 payload["paper_balance_cash"] = float(self.wallet_provider.get_balance("CASH"))
-            workflow.create_task(
+            asyncio.create_task(
                 emit_event(
                     "position_update",
                     payload,

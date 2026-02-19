@@ -18,7 +18,11 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from agents.constants import STREAM_CONTINUE_EVERY, STREAM_HISTORY_LIMIT
+    from agents.constants import (
+        MOCK_LEDGER_WORKFLOW_ID,
+        STREAM_CONTINUE_EVERY,
+        STREAM_HISTORY_LIMIT,
+    )
     from agents.strategies.llm_client import LLMClient
     from agents.strategies.trigger_engine import Bar, Order, TriggerEngine
     from agents.strategies.risk_engine import RiskEngine, RiskProfile
@@ -54,6 +58,7 @@ class PaperTradingConfig(BaseModel):
     """Configuration for a paper trading session."""
 
     session_id: str
+    ledger_workflow_id: Optional[str] = None
     symbols: List[str]
     initial_cash: float = 10000.0
     initial_allocations: Optional[Dict[str, float]] = None
@@ -71,6 +76,7 @@ class SessionState(BaseModel):
     """Serializable session state for continue-as-new."""
 
     session_id: str
+    ledger_workflow_id: Optional[str] = None
     symbols: List[str]
     strategy_prompt: Optional[str]
     plan_interval_hours: float
@@ -331,11 +337,12 @@ def evaluate_triggers_activity(
                     vwap=data.get("vwap"),
                 )
 
+            asset_state = build_asset_state(symbol, [indicator])
             orders, block_entries = trigger_engine.on_bar(
                 bar,
                 indicator,
                 portfolio_snapshot,
-                asset_state=None,
+                asset_state=asset_state,
                 market_structure=None,
                 position_meta=position_meta,
             )
@@ -510,15 +517,14 @@ async def fetch_indicator_snapshots_activity(
 
 
 @activity.defn
-async def query_ledger_portfolio_activity() -> Dict[str, Any]:
+async def query_ledger_portfolio_activity(ledger_workflow_id: str) -> Dict[str, Any]:
     """Query the execution ledger for current portfolio status (must run as activity for Temporal client access)."""
-    from agents.constants import MOCK_LEDGER_WORKFLOW_ID
     from temporalio.client import Client
 
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
     client = await Client.connect(address, namespace=namespace)
-    handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+    handle = client.get_workflow_handle(ledger_workflow_id)
     return await handle.query("get_portfolio_status")
 
 
@@ -551,6 +557,7 @@ class PaperTradingWorkflow:
 
     def __init__(self) -> None:
         self.session_id: str = ""
+        self.ledger_workflow_id: str = ""
         self.symbols: List[str] = []
         self.strategy_prompt: Optional[str] = None
         self.plan_interval_hours: float = DEFAULT_PLAN_INTERVAL_HOURS
@@ -659,6 +666,9 @@ class PaperTradingWorkflow:
         elif config:
             parsed_config = PaperTradingConfig.model_validate(config)
             self.session_id = parsed_config.session_id
+            self.ledger_workflow_id = (
+                parsed_config.ledger_workflow_id or MOCK_LEDGER_WORKFLOW_ID
+            )
             self.symbols = list(parsed_config.symbols)
             self.strategy_prompt = parsed_config.strategy_prompt
             self.plan_interval_hours = parsed_config.plan_interval_hours
@@ -669,11 +679,10 @@ class PaperTradingWorkflow:
             self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
 
             # Initialize portfolio with starting allocations
-            if parsed_config.initial_allocations:
-                await self._initialize_portfolio(
-                    parsed_config.initial_cash,
-                    parsed_config.initial_allocations,
-                )
+            await self._initialize_portfolio(
+                parsed_config.initial_cash,
+                parsed_config.initial_allocations or {},
+            )
 
             # Emit session started event
             await workflow.execute_activity(
@@ -762,7 +771,6 @@ class PaperTradingWorkflow:
         initial_allocations: Dict[str, float],
     ) -> None:
         """Initialize the execution ledger with starting portfolio."""
-        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
 
         # Fetch current prices for position initialization
         prices = await workflow.execute_activity(
@@ -773,7 +781,7 @@ class PaperTradingWorkflow:
         )
 
         # Signal the execution ledger to initialize
-        ledger_handle = workflow.get_external_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+        ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
         await ledger_handle.signal("initialize_portfolio", {
             "cash": initial_allocations.get("cash", initial_cash),
             "positions": {
@@ -791,6 +799,7 @@ class PaperTradingWorkflow:
         # Get portfolio state from ledger (via activity — external handles can't query)
         portfolio_state = await workflow.execute_activity(
             query_ledger_portfolio_activity,
+            args=[self.ledger_workflow_id],
             schedule_to_close_timeout=timedelta(seconds=10),
         )
 
@@ -870,6 +879,7 @@ class PaperTradingWorkflow:
         # Get current portfolio state (via activity — external handles can't query)
         portfolio_state = await workflow.execute_activity(
             query_ledger_portfolio_activity,
+            args=[self.ledger_workflow_id],
             schedule_to_close_timeout=timedelta(seconds=10),
         )
 
@@ -944,8 +954,7 @@ class PaperTradingWorkflow:
 
     async def _execute_order(self, order: Dict[str, Any]) -> None:
         """Execute a single order."""
-        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
-        ledger_handle = workflow.get_external_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+        ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
         # Record fill in ledger
         fill_price = float(order.get("price", 0.0) or 0.0)
         quantity = float(order.get("quantity", 0.0) or 0.0)
@@ -1001,6 +1010,7 @@ class PaperTradingWorkflow:
         try:
             portfolio_state = await workflow.execute_activity(
                 query_ledger_portfolio_activity,
+                args=[self.ledger_workflow_id],
                 schedule_to_close_timeout=timedelta(seconds=10),
             )
 
@@ -1026,6 +1036,7 @@ class PaperTradingWorkflow:
         """Create state snapshot for continue-as-new."""
         return SessionState(
             session_id=self.session_id,
+            ledger_workflow_id=self.ledger_workflow_id,
             symbols=self.symbols,
             strategy_prompt=self.strategy_prompt,
             plan_interval_hours=self.plan_interval_hours,
@@ -1046,6 +1057,7 @@ class PaperTradingWorkflow:
         """Restore state from continue-as-new snapshot."""
         parsed = SessionState.model_validate(state)
         self.session_id = parsed.session_id
+        self.ledger_workflow_id = parsed.ledger_workflow_id or MOCK_LEDGER_WORKFLOW_ID
         self.symbols = parsed.symbols
         self.strategy_prompt = parsed.strategy_prompt
         self.plan_interval_hours = parsed.plan_interval_hours

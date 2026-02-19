@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   PlayCircle, StopCircle, Loader2, RefreshCw, Activity, Zap,
   TrendingUp, TrendingDown, Minus, ChevronDown, ChevronUp,
-  ArrowUpRight, ArrowDownRight, Ban, CheckCircle2, Radio, BarChart3,
+  ArrowUpRight, Ban, CheckCircle2, Radio, BarChart3,
 } from 'lucide-react';
 import { paperTradingAPI, promptsAPI, type PaperTradingSessionConfig } from '../lib/api';
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
