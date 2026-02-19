@@ -26,6 +26,7 @@ EventType = Literal[
     "session_stopped",
     "order_executed",
     "symbols_discovered",
+    "eval_summary",
 ]
 
 
