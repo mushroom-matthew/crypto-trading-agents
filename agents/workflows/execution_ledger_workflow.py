@@ -267,7 +267,7 @@ class ExecutionLedgerWorkflow:
         else:
             self.positions[symbol] = new_qty
             if symbol not in self.position_meta or current_qty == 0 or (current_qty > 0) != (new_qty > 0):
-                self.position_meta[symbol] = {
+                meta = {
                     "entry_trigger_id": trigger_id,
                     "entry_category": trigger_category,
                     "reason": trigger_id,
@@ -275,6 +275,11 @@ class ExecutionLedgerWorkflow:
                     "opened_at": opened_at,
                     "entry_side": "long" if new_qty > 0 else "short",
                 }
+                if fill.get("stop_price_abs") is not None:
+                    meta["stop_price_abs"] = float(fill["stop_price_abs"])
+                if fill.get("target_price_abs") is not None:
+                    meta["target_price_abs"] = float(fill["target_price_abs"])
+                self.position_meta[symbol] = meta
         self.fill_count += 1
 
         # Emit position update event for ops telemetry

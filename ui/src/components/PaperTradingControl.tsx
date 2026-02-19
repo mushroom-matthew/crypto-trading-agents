@@ -458,16 +458,35 @@ export function PaperTradingControl() {
                       const entryPx = portfolio.entry_prices[symbol] || 0;
                       const lastPx = portfolio.last_prices[symbol] || entryPx;
                       const pnlPct = entryPx > 0 ? ((lastPx - entryPx) / entryPx) * 100 : 0;
+                      const meta = portfolio.position_meta?.[symbol];
+                      const stopPx = meta?.stop_price_abs ?? null;
+                      const targetPx = meta?.target_price_abs ?? null;
                       return (
-                        <div key={symbol} className="flex justify-between items-center text-sm">
-                          <span className="font-mono font-medium">{symbol}</span>
-                          <div className="text-right">
-                            <span className="font-semibold">{qty.toFixed(6)}</span>
-                            <span className="text-gray-500 ml-2">@ {formatCurrency(entryPx)}</span>
-                            <span className={cn('ml-2 font-medium', pnlPct >= 0 ? 'text-green-600' : 'text-red-600')}>
-                              {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
-                            </span>
+                        <div key={symbol} className="text-sm space-y-0.5">
+                          <div className="flex justify-between items-center">
+                            <span className="font-mono font-medium">{symbol}</span>
+                            <div className="text-right">
+                              <span className="font-semibold">{qty.toFixed(6)}</span>
+                              <span className="text-gray-500 ml-2">@ {formatCurrency(entryPx)}</span>
+                              <span className={cn('ml-2 font-medium', pnlPct >= 0 ? 'text-green-600' : 'text-red-600')}>
+                                {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                              </span>
+                            </div>
                           </div>
+                          {(stopPx !== null || targetPx !== null) && (
+                            <div className="flex gap-4 text-xs pl-1">
+                              {stopPx !== null && (
+                                <span className="text-red-500 font-mono">
+                                  ↓ stop {formatCurrency(stopPx)}
+                                </span>
+                              )}
+                              {targetPx !== null && (
+                                <span className="text-green-500 font-mono">
+                                  ↑ target {formatCurrency(targetPx)}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -672,8 +691,12 @@ function ActivityRow({ ev }: { ev: { event_id: string; type: string; ts: string;
         return `${p.symbol} ${p.side?.toUpperCase() ?? ''} — ${p.trigger_id ?? p.category ?? ''} @ ${formatCurrency(p.price ?? 0)}`;
       case 'trade_blocked':
         return `${p.symbol} ${p.trigger_id ?? ''} — ${p.reason ?? 'blocked'}${p.detail ? ': ' + String(p.detail).substring(0, 60) : ''}`;
-      case 'order_executed':
-        return `${p.side?.toUpperCase()} ${Number(p.quantity ?? 0).toFixed(6)} ${p.symbol} @ ${formatCurrency(p.price ?? 0)}`;
+      case 'order_executed': {
+        let s = `${p.side?.toUpperCase()} ${Number(p.quantity ?? 0).toFixed(6)} ${p.symbol} @ ${formatCurrency(p.price ?? 0)}`;
+        if (p.stop_price != null) s += ` · stop ${formatCurrency(p.stop_price)}`;
+        if (p.target_price != null) s += ` · target ${formatCurrency(p.target_price)}`;
+        return s;
+      }
       case 'plan_generated':
         return `${p.trigger_count ?? '?'} triggers · plan #${p.plan_index ?? '?'}`;
       default:

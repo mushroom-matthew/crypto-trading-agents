@@ -707,6 +707,15 @@ export interface PaperTradingSession {
   plan_interval_hours: number;
 }
 
+export interface PositionMeta {
+  entry_trigger_id: string | null;
+  entry_category: string | null;
+  entry_side: string | null;
+  opened_at: string | null;
+  stop_price_abs: number | null;
+  target_price_abs: number | null;
+}
+
 export interface PaperTradingPortfolio {
   cash: number;
   positions: Record<string, number>;
@@ -715,6 +724,7 @@ export interface PaperTradingPortfolio {
   total_equity: number;
   unrealized_pnl: number;
   realized_pnl: number;
+  position_meta: Record<string, PositionMeta>;
 }
 
 export interface PaperTradingTrigger {

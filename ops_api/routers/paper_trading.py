@@ -232,6 +232,7 @@ class PortfolioStatus(BaseModel):
     total_equity: float
     unrealized_pnl: float
     realized_pnl: float
+    position_meta: Dict[str, Any] = {}
 
 
 class TriggerSummary(BaseModel):
@@ -511,6 +512,7 @@ async def get_portfolio(session_id: str):
             total_equity=float(portfolio.get("total_equity", 0)),
             unrealized_pnl=float(portfolio.get("unrealized_pnl", 0)),
             realized_pnl=float(portfolio.get("realized_pnl", 0)),
+            position_meta=portfolio.get("position_meta") or {},
         )
 
     except HTTPException:

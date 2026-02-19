@@ -952,6 +952,56 @@ class PaperTradingWorkflow:
         for order in orders:
             await self._execute_order(order)
 
+    def _resolve_order_stop_target(
+        self, order: Dict[str, Any], fill_price: float
+    ) -> tuple[float | None, float | None]:
+        """Resolve stop and target prices for a filled entry order.
+
+        Uses the trigger's anchor configuration and the most recent indicator
+        snapshot (self.last_indicators) to compute absolute price levels.
+        Returns (stop_price_abs, target_price_abs) — either may be None.
+        """
+        if not self.current_plan or order.get("intent") != "entry":
+            return None, None
+
+        trigger_id = order.get("trigger_id") or order.get("reason")
+        symbol = order["symbol"]
+        direction = "long" if order.get("side", "").lower() == "buy" else "short"
+
+        # Find the trigger definition in the current plan
+        triggers = (self.current_plan or {}).get("triggers", [])
+        trigger_dict = next((t for t in triggers if t.get("id") == trigger_id), None)
+        if not trigger_dict:
+            return None, None
+
+        # Get the indicator snapshot for this symbol
+        snap_dict = self.last_indicators.get(symbol)
+        if not snap_dict:
+            return None, None
+
+        try:
+            from backtesting.llm_strategist_runner import (
+                _resolve_stop_price_anchored,
+                _resolve_target_price_anchored,
+            )
+            from schemas.llm_strategist import TriggerCondition
+            from agents.analytics.indicator_snapshots import IndicatorSnapshot
+            import datetime as _dt
+
+            trigger = TriggerCondition.model_validate(trigger_dict)
+            snap = IndicatorSnapshot.model_validate({
+                **snap_dict,
+                "symbol": symbol,
+                "timeframe": trigger_dict.get("timeframe", "1h"),
+                "as_of": _dt.datetime.now(_dt.timezone.utc),
+            })
+            stop_abs, _ = _resolve_stop_price_anchored(trigger, fill_price, snap, direction)
+            target_abs, _ = _resolve_target_price_anchored(trigger, fill_price, snap, direction)
+            return stop_abs, target_abs
+        except Exception as e:
+            workflow.logger.warning(f"Could not resolve stop/target for {trigger_id}: {e}")
+            return None, None
+
     async def _execute_order(self, order: Dict[str, Any]) -> None:
         """Execute a single order."""
         ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
@@ -960,7 +1010,11 @@ class PaperTradingWorkflow:
         quantity = float(order.get("quantity", 0.0) or 0.0)
         cost = fill_price * quantity
         fee = cost * 0.001
-        await ledger_handle.signal("record_fill", {
+
+        # Resolve stop/target for entry orders
+        stop_price_abs, target_price_abs = self._resolve_order_stop_target(order, fill_price)
+
+        fill_payload: Dict[str, Any] = {
             "symbol": order["symbol"],
             "side": order["side"].upper(),
             "qty": quantity,
@@ -971,12 +1025,22 @@ class PaperTradingWorkflow:
             "trigger_id": order.get("trigger_id") or order.get("reason"),
             "trigger_category": order.get("trigger_category"),
             "intent": order.get("intent"),
-        })
+        }
+        if stop_price_abs is not None:
+            fill_payload["stop_price_abs"] = stop_price_abs
+        if target_price_abs is not None:
+            fill_payload["target_price_abs"] = target_price_abs
+        await ledger_handle.signal("record_fill", fill_payload)
 
-        # Emit event
+        # Emit event with stop/target for activity feed
+        event_payload = dict(order)
+        if stop_price_abs is not None:
+            event_payload["stop_price"] = stop_price_abs
+        if target_price_abs is not None:
+            event_payload["target_price"] = target_price_abs
         await workflow.execute_activity(
             emit_paper_trading_event_activity,
-            args=[self.session_id, "order_executed", order],
+            args=[self.session_id, "order_executed", event_payload],
             schedule_to_close_timeout=timedelta(seconds=10),
         )
 
