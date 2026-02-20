@@ -291,3 +291,20 @@ USAGE IN EXIT/HOLD RULES:
 NOTE: Do NOT set exit_fraction targets for R2 exits yourself — the engine automatically
 takes a 50% partial at +2R and advances the stop. Only use position_fraction in rules
 to react to the new reduced position size (e.g. after partial).
+
+COMPRESSION / BREAKOUT IDENTIFIERS (Runbook 40):
+  bb_bandwidth_pct_rank   — Percentile rank of BB bandwidth in 50-bar rolling window
+                            (0.0 = most compressed, 1.0 = most expanded)
+  compression_flag        — 1.0 if bb_bandwidth_pct_rank < 0.20 (consolidation phase)
+  expansion_flag          — 1.0 if bb_bandwidth_pct_rank > 0.80 AND bandwidth growing (expansion phase)
+  breakout_confirmed      — 1.0 if close is outside Donchian range AND vol_burst == true
+
+USAGE IN ENTRY/EXIT RULES:
+  Wait for compression before entering breakout trades:
+    entry_rule: "is_flat and compression_flag > 0.5 and breakout_confirmed > 0.5 and is_impulse_candle > 0.5"
+
+  Exit if false breakout (price returns inside range):
+    exit_rule: "not is_flat and below_stop"
+
+  Hold while expansion continues:
+    hold_rule: "expansion_flag > 0.5 and volume_multiple > 0.9"

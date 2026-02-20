@@ -66,6 +66,11 @@ class IndicatorSnapshot(SerializableModel):
     bollinger_upper: float | None = None
     bollinger_lower: float | None = None
     bollinger_middle: float | None = None
+    # Compression and breakout detection (Runbook 40)
+    bb_bandwidth_pct_rank: float | None = None   # Percentile rank of BB bandwidth in 50-bar window (0=compressed, 1=expanded)
+    compression_flag: float | None = None         # 1.0 if bb_bandwidth_pct_rank < COMPRESSION_THRESHOLD
+    expansion_flag: float | None = None           # 1.0 if bb_bandwidth_pct_rank > EXPANSION_THRESHOLD and bandwidth growing
+    breakout_confirmed: float | None = None       # 1.0 if close outside Donchian range + vol_burst
     # Cycle indicators (200-bar window for cyclical analysis)
     cycle_high_200: float | None = None
     cycle_low_200: float | None = None

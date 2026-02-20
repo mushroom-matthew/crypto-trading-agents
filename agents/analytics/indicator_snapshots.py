@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
+
+# Compression/expansion threshold env-vars (Runbook 40)
+_COMPRESSION_THRESHOLD = float(os.environ.get("COMPRESSION_THRESHOLD", "0.20"))
+_EXPANSION_THRESHOLD = float(os.environ.get("EXPANSION_THRESHOLD", "0.80"))
 
 from metrics import technical as tech
 from metrics import candlestick as cs
@@ -483,6 +488,42 @@ def compute_indicator_snapshot(
     # Volume burst detection
     vol_burst_flag = _vol_burst(volume_multiple, window.vol_burst_threshold)
 
+    # Compression and breakout detection (Runbook 40)
+    _bw_upper_s = boll.series_list[1].series
+    _bw_lower_s = boll.series_list[2].series
+    _bw_middle_s = boll.series_list[0].series
+    _bandwidth_s = (_bw_upper_s - _bw_lower_s) / _bw_middle_s.replace(0, float("nan"))
+    _bandwidth_rank_s = _bandwidth_s.rolling(50, min_periods=20).rank(pct=True)
+    bb_bandwidth_pct_rank = (
+        float(_bandwidth_rank_s.iloc[-1])
+        if not _bandwidth_rank_s.empty and not pd.isna(_bandwidth_rank_s.iloc[-1])
+        else None
+    )
+    compression_flag = (
+        1.0 if (bb_bandwidth_pct_rank is not None and bb_bandwidth_pct_rank < _COMPRESSION_THRESHOLD)
+        else 0.0
+    )
+    if bb_bandwidth_pct_rank is not None and bb_bandwidth_pct_rank > _EXPANSION_THRESHOLD:
+        _bw_last = _bandwidth_s.iloc[-1]
+        _bw_prev = _bandwidth_s.iloc[-2] if len(_bandwidth_s) >= 2 else _bw_last
+        expansion_flag = (
+            1.0 if (not pd.isna(_bw_last) and not pd.isna(_bw_prev) and _bw_last > _bw_prev)
+            else 0.0
+        )
+    else:
+        expansion_flag = 0.0
+    # Compare close against the PRIOR bar's Donchian range (exclude current bar's high/low).
+    # This is the standard TA interpretation: the current close breaks OUT of the previous N-bar range.
+    _close_val = float(close.iloc[-1])
+    _n = window.short_window
+    _prev_high_max = float(high.iloc[:-1].tail(_n).max()) if len(high) > 1 else None
+    _prev_low_min = float(low.iloc[:-1].tail(_n).min()) if len(low) > 1 else None
+    if _prev_high_max is not None and _prev_low_min is not None:
+        _outside_range = (_close_val > _prev_high_max) or (_close_val < _prev_low_min)
+        breakout_confirmed = 1.0 if (_outside_range and vol_burst_flag) else 0.0
+    else:
+        breakout_confirmed = 0.0
+
     def _prev_value(series: pd.Series, offset: int) -> float | None:
         if len(series) <= offset:
             return None
@@ -583,6 +624,11 @@ def compute_indicator_snapshot(
         vwap=vwap_val,
         vwap_distance_pct=vwap_dist,
         vol_burst=vol_burst_flag,
+        # Compression and breakout detection (Runbook 40)
+        bb_bandwidth_pct_rank=bb_bandwidth_pct_rank,
+        compression_flag=compression_flag,
+        expansion_flag=expansion_flag,
+        breakout_confirmed=breakout_confirmed,
         # Candlestick morphology (Runbook 38)
         candle_body_pct=float(_cf["candle_body_pct"]),
         candle_upper_wick_pct=float(_cf["candle_upper_wick_pct"]),
@@ -685,6 +731,17 @@ def precompute_indicator_frame(
     # Volume burst detection
     vol_burst = volume_multiple >= window.vol_burst_threshold
 
+    # Compression and breakout detection (Runbook 40)
+    _bw_series = (boll_upper - boll_lower) / boll_middle.replace(0, float("nan"))
+    bb_bandwidth_pct_rank = _bw_series.rolling(50, min_periods=20).rank(pct=True)
+    compression_flag_series = (_bw_series.rolling(50, min_periods=20).rank(pct=True) < _COMPRESSION_THRESHOLD).astype(float)
+    _in_expansion = bb_bandwidth_pct_rank > _EXPANSION_THRESHOLD
+    _bandwidth_growing = _bw_series > _bw_series.shift(1)
+    expansion_flag_series = (_in_expansion & _bandwidth_growing).astype(float)
+    # Use prior bar's Donchian (shift(1)) so current close can genuinely exceed the previous range.
+    _outside_donchian = (close > donchian_upper.shift(1)) | (close < donchian_lower.shift(1))
+    breakout_confirmed_series = (_outside_donchian & (volume_multiple >= window.vol_burst_threshold)).astype(float)
+
     # Candlestick morphology features (Runbook 38)
     candle_feats_frame = cs.compute_candlestick_features(prepared, atr_val)
 
@@ -762,6 +819,11 @@ def precompute_indicator_frame(
             "vwap": vwap_series,
             "vwap_distance_pct": vwap_distance_pct,
             "vol_burst": vol_burst,
+            # Compression and breakout detection (Runbook 40)
+            "bb_bandwidth_pct_rank": bb_bandwidth_pct_rank,
+            "compression_flag": compression_flag_series,
+            "expansion_flag": expansion_flag_series,
+            "breakout_confirmed": breakout_confirmed_series,
             # Candlestick morphology (Runbook 38)
             "candle_body_pct": candle_feats_frame["candle_body_pct"],
             "candle_upper_wick_pct": candle_feats_frame["candle_upper_wick_pct"],
@@ -905,6 +967,11 @@ def snapshot_from_frame(
         is_inside_bar=_optional_float(row.get("is_inside_bar")),
         is_outside_bar=_optional_float(row.get("is_outside_bar")),
         is_impulse_candle=_optional_float(row.get("is_impulse_candle")),
+        # Compression and breakout detection (Runbook 40)
+        bb_bandwidth_pct_rank=_optional_float(row.get("bb_bandwidth_pct_rank")),
+        compression_flag=_optional_float(row.get("compression_flag")),
+        expansion_flag=_optional_float(row.get("expansion_flag")),
+        breakout_confirmed=_optional_float(row.get("breakout_confirmed")),
         # HTF structural anchors (Runbook 41) — not precomputed; always None from frame
         # Applied by the runner via model_copy after snapshot_from_frame returns.
     )

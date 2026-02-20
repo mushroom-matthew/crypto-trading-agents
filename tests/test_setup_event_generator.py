@@ -86,8 +86,8 @@ def _make_generator(**kwargs) -> SetupEventGenerator:
 
 class TestSetupEventSchema:
     def test_feature_schema_version_constant(self):
-        """FEATURE_SCHEMA_VERSION is '1.2.0'."""
-        assert FEATURE_SCHEMA_VERSION == "1.2.0"
+        """FEATURE_SCHEMA_VERSION is '1.3.0' (bumped for R40 compression/breakout indicators)."""
+        assert FEATURE_SCHEMA_VERSION == "1.3.0"
 
     def test_setup_event_schema_valid(self):
         """SetupEvent accepts all required fields."""

@@ -9,8 +9,9 @@ Training data MUST be stratified by feature_schema_version before fitting.
 Never pool events across major versions.
 """
 
-FEATURE_SCHEMA_VERSION = "1.2.0"
+FEATURE_SCHEMA_VERSION = "1.3.0"
 # History:
 #   1.0.0 — initial IndicatorSnapshot (base indicators through scalper fields)
 #   1.1.0 — added Fibonacci + expansion/contraction ratios
 #   1.2.0 — added 15 candlestick fields (R38) + 13 htf_* fields (R41)
+#   1.3.0 — added 4 compression/breakout indicators (R40)
