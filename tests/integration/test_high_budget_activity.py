@@ -20,13 +20,17 @@ from tests.helpers.stub_plan_provider import AlwaysLongPlanProvider
 
 
 def _wiggle(start: datetime, periods: int) -> pd.DataFrame:
-    """Sideways/oscillating price path to generate both wins and losses."""
+    """Structured candles designed to create reliable stop-hit exit/re-entry cycles.
 
+    Pattern [91, 91, 91, 86] repeating:
+    - Entry fires at close=91 (entry_rule="True" with direction=long)
+    - Stop hits at close=86 (86 < 91 * 0.95 = 86.45 with stop_loss_pct=5%)
+    - The 3-bar hold + 1-bar stop-hit creates consistent cycles that consume the
+      risk budget across multiple trades without triggering the daily loss cap.
+    """
     idx = pd.date_range(start, periods=periods, freq="1h", tz="UTC")
-    base = 1000 + 10 * np.sin(np.linspace(0, 4 * np.pi, periods))
-    noise = np.linspace(0, 5, periods)
-    prices = pd.Series(base - noise, index=idx)
-    return pd.DataFrame({"open": prices, "high": prices + 2, "low": prices - 2, "close": prices, "volume": 1}, index=idx)
+    prices = pd.Series([91.0 if i % 4 != 3 else 86.0 for i in range(periods)], index=idx)
+    return pd.DataFrame({"open": prices, "high": prices + 1, "low": prices - 1, "close": prices, "volume": 1}, index=idx)
 
 
 def test_high_budget_activity_consumes_budget(tmp_path: Path) -> None:

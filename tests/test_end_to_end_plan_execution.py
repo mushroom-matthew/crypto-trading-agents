@@ -45,6 +45,31 @@ def _build_candles() -> dict[str, dict[str, pd.DataFrame]]:
     return {"BTC-USD": {"1h": data}}
 
 
+def _build_budget_candles() -> dict[str, dict[str, pd.DataFrame]]:
+    """Candles designed to create multiple entry/exit cycles via stop hits.
+
+    Pattern [91, 91, 91, 86] * 6 (24 bars):
+    - Entry fires at close=91 (satisfies 'close < 100')
+    - Stop hits at close=86 (86 < 91*0.95=86.45 with stop_loss_pct=5%)
+    - 3-bar hold then 1-bar exit lets entries re-occur consistently at close=91
+    - Each cycle commits ~$2.50 stop-distance risk to the budget; 4 cycles fill
+      the 1%-budget ($10), so the 5th entry attempt is blocked by risk budget.
+    """
+    timestamps = pd.date_range("2024-01-01", periods=24, freq="h", tz=timezone.utc)
+    closes = [91.0 if i % 4 != 3 else 86.0 for i in range(24)]
+    data = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": closes,
+            "high": [price + 1 for price in closes],
+            "low": [price - 1 for price in closes],
+            "close": closes,
+            "volume": [1000 for _ in closes],
+        }
+    ).set_index("timestamp")
+    return {"BTC-USD": {"1h": data}}
+
+
 def _simple_plan() -> StrategyPlan:
     now = datetime(2024, 1, 1, tzinfo=timezone.utc)
     trigger = TriggerCondition(
@@ -162,8 +187,10 @@ def test_logs_risk_block_details(tmp_path, monkeypatch):
 def test_daily_risk_budget_blocks_orders(tmp_path, monkeypatch):
     plan = _simple_plan()
     plan.max_trades_per_day = 10
-    plan.triggers[0].exit_rule = "True"
-    market_data = _build_candles()
+    # Use a 5% stop so stop_price_abs is set; alternating candles will cross below the stop
+    plan.triggers[0].stop_loss_pct = 5.0
+    plan.triggers[0].exit_rule = "not is_flat and (stop_hit or target_hit)"
+    market_data = _build_budget_candles()  # [91,91,91,86]*6: consistent entries at 91, stop hits at 86
     run_registry = StrategyRunRegistry(tmp_path / "runs")
     monkeypatch.setattr(execution_tools, "registry", run_registry)
     monkeypatch.setattr(execution_tools, "engine", ExecutionEngine())
@@ -187,7 +214,7 @@ def test_daily_risk_budget_blocks_orders(tmp_path, monkeypatch):
         market_data=market_data,
         run_registry=run_registry,
         min_hold_hours=0.0,
-        min_flat_hours=0.0,
+        min_flat_hours=0.1,  # prevent same-bar re-entry after stop hit; next bar (1h later) is fine
     )
     result = backtester.run(run_id="budget-test")
     report = next(entry for entry in result.daily_reports if entry["date"] == "2024-01-01")

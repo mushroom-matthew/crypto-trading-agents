@@ -58,7 +58,7 @@ class AlwaysLongPlanProvider:
                     direction="long",
                     timeframe=self.timeframe,
                     entry_rule="True",
-                    exit_rule="position!='flat'",
+                    exit_rule="not is_flat and (stop_hit or target_hit)",
                     category="mean_reversion",
                     stop_loss_pct=self.stop_loss_pct,
                 )

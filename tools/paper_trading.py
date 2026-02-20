@@ -92,6 +92,10 @@ class SessionState(BaseModel):
     equity_history: List[Dict[str, Any]] = []
     exit_binding_mode: Literal["none", "category"] = "category"
     conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
+    trigger_rule_edits: List[Dict[str, Any]] = []
+    # Candle-clock: track last evaluated candle floor per timeframe to avoid
+    # re-evaluating the same candle on every 30-second tick.
+    last_eval_candle_by_tf: Dict[str, str] = {}
 
 
 # ============================================================================
@@ -608,8 +612,13 @@ class PaperTradingWorkflow:
         self.last_equity_snapshot: Optional[datetime] = None
         self.exit_binding_mode: Literal["none", "category"] = "category"
         self.conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
+        self.trigger_rule_edits: List[Dict[str, Any]] = []
         # Indicator snapshots from last plan generation (used in trigger evaluation)
         self.last_indicators: Dict[str, Any] = {}
+        # Candle-clock: tracks the last candle floor we ran trigger evaluation on,
+        # keyed by timeframe string (e.g. "1h").  Prevents re-evaluating within the
+        # same candle and enforces at least one-candle separation between entry and exit.
+        self.last_eval_candle_by_tf: Dict[str, str] = {}
 
     # -------------------------------------------------------------------------
     # Signals
@@ -639,6 +648,140 @@ class PaperTradingWorkflow:
         self.strategy_prompt = prompt
         self.last_plan_time = None  # Force replan
         workflow.logger.info("Updated strategy prompt, forcing replan")
+
+    def _append_trigger_rule_edit(self, entry: Dict[str, Any]) -> None:
+        """Append a trigger-rule edit record and keep bounded history."""
+        self.trigger_rule_edits.append(entry)
+        if len(self.trigger_rule_edits) > 500:
+            self.trigger_rule_edits = self.trigger_rule_edits[-500:]
+
+    @workflow.signal
+    def update_trigger_rule(self, update: Dict[str, Any]) -> None:
+        """Edit trigger rules in the active plan with deterministic validation.
+
+        Expected payload:
+            {
+                "request_id": str,
+                "trigger_id": str,
+                "entry_rule": Optional[str],
+                "exit_rule": Optional[str],
+                "hold_rule": Optional[str],
+                "source": str,
+                "reason": str,
+            }
+        """
+        request_id = str(update.get("request_id") or f"edit_{len(self.trigger_rule_edits) + 1}")
+        trigger_id = str(update.get("trigger_id") or "").strip()
+        source = str(update.get("source") or "unknown")
+        reason = str(update.get("reason") or "manual_edit")
+        changed_fields = [k for k in ("entry_rule", "exit_rule", "hold_rule") if k in update]
+
+        base_record = {
+            "request_id": request_id,
+            "timestamp": workflow.now().isoformat(),
+            "trigger_id": trigger_id,
+            "source": source,
+            "reason": reason,
+            "changed_fields": changed_fields,
+        }
+
+        if not self.current_plan:
+            self._append_trigger_rule_edit({
+                **base_record,
+                "status": "rejected",
+                "error": "No active plan to edit",
+            })
+            return
+        if not trigger_id:
+            self._append_trigger_rule_edit({
+                **base_record,
+                "status": "rejected",
+                "error": "trigger_id is required",
+            })
+            return
+        if not changed_fields:
+            self._append_trigger_rule_edit({
+                **base_record,
+                "status": "rejected",
+                "error": "No rule fields provided (entry_rule/exit_rule/hold_rule)",
+            })
+            return
+
+        raw_triggers = self.current_plan.get("triggers", []) if isinstance(self.current_plan, dict) else []
+        if not isinstance(raw_triggers, list):
+            self._append_trigger_rule_edit({
+                **base_record,
+                "status": "rejected",
+                "error": "Malformed plan.triggers payload",
+            })
+            return
+
+        trigger_index = -1
+        for idx, trig in enumerate(raw_triggers):
+            if isinstance(trig, dict) and str(trig.get("id", "")).strip() == trigger_id:
+                trigger_index = idx
+                break
+        if trigger_index < 0:
+            self._append_trigger_rule_edit({
+                **base_record,
+                "status": "rejected",
+                "error": f"Trigger '{trigger_id}' not found in current plan",
+            })
+            return
+
+        trigger_before = dict(raw_triggers[trigger_index])
+        trigger_after = dict(trigger_before)
+        for field_name in changed_fields:
+            value = update.get(field_name)
+            trigger_after[field_name] = "" if value is None else str(value).strip()
+
+        candidate_plan = dict(self.current_plan)
+        candidate_triggers = list(raw_triggers)
+        candidate_triggers[trigger_index] = trigger_after
+        candidate_plan["triggers"] = candidate_triggers
+
+        try:
+            validated_plan = StrategyPlan.model_validate(candidate_plan)
+            # Compile validates identifier/syntax safety before accepting the edit.
+            compile_plan(validated_plan)
+        except Exception as exc:
+            self._append_trigger_rule_edit({
+                **base_record,
+                "status": "rejected",
+                "before": {
+                    "entry_rule": trigger_before.get("entry_rule", ""),
+                    "exit_rule": trigger_before.get("exit_rule", ""),
+                    "hold_rule": trigger_before.get("hold_rule", ""),
+                },
+                "after": {
+                    "entry_rule": trigger_after.get("entry_rule", ""),
+                    "exit_rule": trigger_after.get("exit_rule", ""),
+                    "hold_rule": trigger_after.get("hold_rule", ""),
+                },
+                "error": str(exc),
+            })
+            workflow.logger.warning("Rejected trigger rule edit request_id=%s trigger_id=%s: %s", request_id, trigger_id, exc)
+            return
+
+        self.current_plan = validated_plan.model_dump()
+        if self.plan_history:
+            self.plan_history[-1]["triggers"] = self.current_plan.get("triggers", [])
+
+        self._append_trigger_rule_edit({
+            **base_record,
+            "status": "applied",
+            "before": {
+                "entry_rule": trigger_before.get("entry_rule", ""),
+                "exit_rule": trigger_before.get("exit_rule", ""),
+                "hold_rule": trigger_before.get("hold_rule", ""),
+            },
+            "after": {
+                "entry_rule": trigger_after.get("entry_rule", ""),
+                "exit_rule": trigger_after.get("exit_rule", ""),
+                "hold_rule": trigger_after.get("hold_rule", ""),
+            },
+        })
+        workflow.logger.info("Applied trigger rule edit request_id=%s trigger_id=%s", request_id, trigger_id)
 
     # -------------------------------------------------------------------------
     # Queries
@@ -671,6 +814,13 @@ class PaperTradingWorkflow:
     def get_plan_history(self) -> List[Dict[str, Any]]:
         """Get history of all strategy plans generated for this session."""
         return list(self.plan_history)
+
+    @workflow.query
+    def get_trigger_rule_edits(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get manual trigger-rule edit history (newest first)."""
+        edits = list(self.trigger_rule_edits)
+        edits.sort(key=lambda e: str(e.get("timestamp", "")), reverse=True)
+        return edits[:limit]
 
     @workflow.query
     def get_equity_history(self) -> List[Dict[str, Any]]:
@@ -949,16 +1099,68 @@ class PaperTradingWorkflow:
 
         workflow.logger.info(f"Generated strategy plan with {len(plan_dict.get('triggers', []))} triggers")
 
-    async def _evaluate_and_execute(self) -> None:
-        """Evaluate triggers and execute orders."""
-        # Get current portfolio state (via activity — external handles can't query)
-        portfolio_state = await workflow.execute_activity(
-            query_ledger_portfolio_activity,
-            args=[self.ledger_workflow_id],
-            schedule_to_close_timeout=timedelta(seconds=10),
+    @staticmethod
+    def _candle_floor(dt: datetime, tf_minutes: int) -> str:
+        """Return the ISO timestamp of the candle that started at or before *dt*."""
+        total_minutes = dt.hour * 60 + dt.minute
+        floor_minutes = (total_minutes // tf_minutes) * tf_minutes
+        floored = dt.replace(
+            hour=floor_minutes // 60,
+            minute=floor_minutes % 60,
+            second=0,
+            microsecond=0,
         )
+        return floored.isoformat()
 
-        # Fetch fresh prices for this evaluation cycle
+    async def _evaluate_and_execute(self) -> None:
+        """Evaluate triggers and execute orders using a two-tier model:
+
+        Tier 1 — every 30-second tick (price-based, time-critical):
+          * Fetch fresh prices and push to ledger for live P&L.
+          * Check if any open position has crossed its stop or target level.
+            Stop-losses and take-profits trigger immediately, regardless of
+            whether a new candle has closed.
+
+        Tier 2 — on new candle close only (indicator-based):
+          * Evaluate the full trigger engine: entry signals, indicator-based
+            exit rules, risk constraints, etc.
+          * Only fires when a new candle of the strategy timeframe has started.
+            For 1h strategies this means at most once per hour, which prevents
+            the whipsaw pattern where an exit fires on the very next 30-second
+            tick after entry (stale indicator values looked identical every tick).
+        """
+        if not self.current_plan:
+            return
+
+        # ── Candle-clock ──────────────────────────────────────────────────────
+        TF_MINUTES: Dict[str, int] = {
+            "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+            "1h": 60, "4h": 240, "1d": 1440,
+        }
+        plan_timeframes = {
+            t.get("timeframe", "1h")
+            for t in self.current_plan.get("triggers", [])
+            if isinstance(t, dict)
+        }
+        if not plan_timeframes:
+            plan_timeframes = {"1h"}
+
+        now = workflow.now()
+        current_candles = {
+            tf: self._candle_floor(now, TF_MINUTES.get(tf, 60))
+            for tf in plan_timeframes
+        }
+        new_candle_tfs = {
+            tf for tf, floor in current_candles.items()
+            if self.last_eval_candle_by_tf.get(tf) != floor
+        }
+        if new_candle_tfs:
+            self.last_eval_candle_by_tf.update(
+                {tf: current_candles[tf] for tf in new_candle_tfs}
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Tier 1: always runs every tick ───────────────────────────────────
         current_prices = await workflow.execute_activity(
             fetch_current_prices_activity,
             args=[self.symbols],
@@ -966,8 +1168,39 @@ class PaperTradingWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
-        # Build market data: merge last indicator snapshot (from plan generation)
-        # with fresh current price so trigger conditions see real indicator values.
+        # Push prices to ledger for unrealized P&L display
+        live_prices = {s: float(current_prices.get(s) or 0) for s in self.symbols if current_prices.get(s)}
+        if live_prices:
+            ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
+            await ledger_handle.signal("update_last_prices", live_prices)
+
+        # Emit tick for UI
+        await workflow.execute_activity(
+            emit_paper_trading_event_activity,
+            args=[self.session_id, "tick", {
+                "prices": {s: float(current_prices.get(s) or 0) for s in self.symbols},
+                "cycle": self.cycle_count,
+            }],
+            schedule_to_close_timeout=timedelta(seconds=10),
+        )
+
+        # Query portfolio once — used by both the stop/target sweep and (if
+        # a new candle) the full indicator evaluation below.
+        portfolio_state = await workflow.execute_activity(
+            query_ledger_portfolio_activity,
+            args=[self.ledger_workflow_id],
+            schedule_to_close_timeout=timedelta(seconds=10),
+        )
+
+        # Stop/target price sweep — exits any position that has crossed its
+        # absolute stop or target level since the last tick.
+        await self._sweep_stop_target(current_prices, portfolio_state)
+
+        # ── Tier 2: only on new candle close ─────────────────────────────────
+        if not new_candle_tfs:
+            return
+
+        # Build market data: stale indicators + fresh close price
         market_data = {}
         for symbol in self.symbols:
             price = (current_prices.get(symbol)
@@ -989,23 +1222,6 @@ class PaperTradingWorkflow:
         if not market_data:
             return
 
-        # Push fresh prices to the ledger so unrealized P&L updates each cycle
-        live_prices = {s: float(current_prices.get(s) or 0) for s in self.symbols if current_prices.get(s)}
-        if live_prices:
-            ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
-            await ledger_handle.signal("update_last_prices", live_prices)
-
-        # Emit tick event so the UI can show live prices
-        await workflow.execute_activity(
-            emit_paper_trading_event_activity,
-            args=[self.session_id, "tick", {
-                "prices": {s: float(current_prices.get(s) or 0) for s in self.symbols},
-                "cycle": self.cycle_count,
-            }],
-            schedule_to_close_timeout=timedelta(seconds=10),
-        )
-
-        # Evaluate triggers — returns {"orders": [...], "events": [...]}
         result = await workflow.execute_activity(
             evaluate_triggers_activity,
             args=[
@@ -1021,7 +1237,6 @@ class PaperTradingWorkflow:
         orders = result.get("orders", []) if isinstance(result, dict) else list(result)
         trigger_events = result.get("events", []) if isinstance(result, dict) else []
 
-        # Emit trigger_fired / trade_blocked events for the activity feed
         for ev in trigger_events:
             await workflow.execute_activity(
                 emit_paper_trading_event_activity,
@@ -1029,9 +1244,87 @@ class PaperTradingWorkflow:
                 schedule_to_close_timeout=timedelta(seconds=10),
             )
 
-        # Execute orders
         for order in orders:
             await self._execute_order(order)
+
+    async def _sweep_stop_target(
+        self,
+        current_prices: Dict[str, float],
+        portfolio_state: Dict[str, Any],
+    ) -> None:
+        """Check open positions for stop/target level crosses and exit immediately.
+
+        This runs on every 30-second tick so stop-losses and take-profits
+        trigger as soon as price crosses the level, even mid-candle.  It reads
+        the absolute stop/target prices that were stored in position_meta when
+        the position was opened (Runbook 42 anchors).
+        """
+        positions = portfolio_state.get("positions") or {}
+        position_meta = portfolio_state.get("position_meta") or {}
+
+        for symbol, qty in positions.items():
+            if not qty or qty <= 0:
+                continue
+
+            price = current_prices.get(symbol, 0)
+            if not price:
+                continue
+
+            meta = position_meta.get(symbol) or {}
+            stop_px: Optional[float] = meta.get("stop_price_abs")
+            target_px: Optional[float] = meta.get("target_price_abs")
+            direction: str = meta.get("entry_side", "long")
+
+            hit: Optional[str] = None
+            if direction == "long":
+                if stop_px is not None and price <= stop_px:
+                    hit = "stop"
+                elif target_px is not None and price >= target_px:
+                    hit = "target"
+            else:  # short
+                if stop_px is not None and price >= stop_px:
+                    hit = "stop"
+                elif target_px is not None and price <= target_px:
+                    hit = "target"
+
+            if hit is None:
+                continue
+
+            category = "stop_loss" if hit == "stop" else "take_profit"
+            trigger_id = f"{symbol.lower().replace('-', '_')}_{hit}_hit"
+            exit_side = "sell" if direction == "long" else "buy"
+
+            workflow.logger.info(
+                f"Price sweep: {symbol} {hit} hit @ {price:.4f} "
+                f"(stop={stop_px}, target={target_px})"
+            )
+
+            # Emit trigger_fired event
+            await workflow.execute_activity(
+                emit_paper_trading_event_activity,
+                args=[self.session_id, "trigger_fired", {
+                    "symbol": symbol,
+                    "side": exit_side,
+                    "trigger_id": trigger_id,
+                    "category": category,
+                    "price": price,
+                    "timeframe": "1h",
+                }],
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
+
+            # Execute the exit order
+            await self._execute_order({
+                "symbol": symbol,
+                "side": exit_side,
+                "quantity": float(qty),
+                "price": price,
+                "timeframe": "1h",
+                "trigger_id": trigger_id,
+                "trigger_category": category,
+                "intent": "exit",
+                "reason": trigger_id,
+            })
 
     def _resolve_order_stop_target(
         self, order: Dict[str, Any], fill_price: float
@@ -1196,6 +1489,8 @@ class PaperTradingWorkflow:
             equity_history=self.equity_history[-500:],  # Keep last 500 snapshots across continue-as-new
             exit_binding_mode=self.exit_binding_mode,
             conflicting_signal_policy=self.conflicting_signal_policy,
+            trigger_rule_edits=self.trigger_rule_edits,
+            last_eval_candle_by_tf=dict(self.last_eval_candle_by_tf),
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -1217,3 +1512,5 @@ class PaperTradingWorkflow:
         self.equity_history = parsed.equity_history
         self.exit_binding_mode = parsed.exit_binding_mode
         self.conflicting_signal_policy = parsed.conflicting_signal_policy
+        self.trigger_rule_edits = parsed.trigger_rule_edits
+        self.last_eval_candle_by_tf = dict(parsed.last_eval_candle_by_tf)

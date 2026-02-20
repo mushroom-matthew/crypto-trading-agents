@@ -7,7 +7,7 @@ import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Literal, Optional, Set, Tuple
 
 from data_loader.utils import timeframe_to_seconds
 from schemas.llm_strategist import IndicatorSnapshot, StrategyPlan, TriggerCondition
@@ -210,6 +210,25 @@ def build_allowed_identifiers(available_timeframes: Iterable[str]) -> Set[str]:
         "distance_to_resistance_pct",
         "trend",
         "recent_tests",
+        # Structural exit / stop-target identifiers (runtime context, not indicator snapshot)
+        "stop_hit",
+        "target_hit",
+        "force_flatten",
+        "below_stop",
+        "above_target",
+        "stop_price",
+        "target_price",
+        "stop_distance_pct",
+        "target_distance_pct",
+        # R-tracking identifiers (Runbook 45 — adaptive trade management)
+        "current_R",
+        "mfe_r",
+        "mae_r",
+        "r1_reached",
+        "r2_reached",
+        "r3_reached",
+        "trade_state",
+        "position_fraction",
     }
 
     allowed = set(indicator_fields) | indicator_aliases | derived_fields
@@ -712,11 +731,22 @@ class IdentifierCorrection:
 
 
 @dataclass
+class ExitRuleSanitization:
+    """Record of an exit_rule that failed the normal-form check and was replaced."""
+    trigger_id: str
+    original_rule: str
+    sanitized_rule: str
+    reason: str  # 'invalid_grammar' | 'unparseable'
+    stripped_identifiers: List[str]  # non-terminal identifiers found (may be empty for structure violations)
+
+
+@dataclass
 class PlanEnforcementResult:
     """Summary of all corrections applied by enforce_plan_quality."""
     exit_binding_corrections: List[ExitBindingCorrection] = field(default_factory=list)
     hold_rules_stripped: List[HoldRuleStripped] = field(default_factory=list)
     identifier_corrections: List[IdentifierCorrection] = field(default_factory=list)
+    exit_rule_sanitizations: List[ExitRuleSanitization] = field(default_factory=list)
 
     @property
     def total_corrections(self) -> int:
@@ -724,6 +754,7 @@ class PlanEnforcementResult:
             len(self.exit_binding_corrections)
             + len(self.hold_rules_stripped)
             + len(self.identifier_corrections)
+            + len(self.exit_rule_sanitizations)
         )
 
 
@@ -745,6 +776,102 @@ KNOWN_TYPOS: dict[str, str] = {
     "roc_fast": "roc_short",
     "roc_slow": "roc_medium",
 }
+
+# ---------------------------------------------------------------------------
+# Hard invariant: exit_rule must match a strict normal form.
+#
+# Because exit_rule = ONLY close_position(), the grammar is:
+#
+#   exit_rule  ::= "not is_flat and" "(" disjunction ")"
+#   disjunction ::= terminal | terminal "or" disjunction
+#   terminal    ::= stop_hit | target_hit | force_flatten | below_stop | above_target
+#
+# Anything outside this grammar — including indicator comparisons, R-multiple
+# thresholds, time gates, nested Ands, function calls — is *illegal* and will
+# be replaced with the canonical safe form at compile time.
+#
+# In strict mode (CI / backtest pipelines) the compiler raises instead of
+# silently replacing, making violations loud during development.
+# ---------------------------------------------------------------------------
+
+# The only leaf-node names permitted on the RHS of a valid exit_rule.
+_EXIT_RULE_TERMINALS: frozenset[str] = frozenset({
+    "stop_hit",
+    "target_hit",
+    "force_flatten",
+    "below_stop",   # backward-compat alias for stop_hit
+    "above_target",  # backward-compat alias for target_hit
+})
+
+# Broader set used by autocorrect / identifier validation (allowed anywhere in rule).
+# Kept as a named export for downstream tooling.
+EXIT_RULE_ALLOWLIST: frozenset[str] = frozenset({
+    # Structural closure triggers — the ONLY identifiers that may gate EXIT
+    "stop_hit", "target_hit", "force_flatten",
+    # Backward-compat aliases
+    "below_stop", "above_target",
+    # Structural price levels
+    "stop_price", "target_price",
+    "stop_distance_pct", "target_distance_pct",
+    # R-tracking (Runbook 45 — adaptive trade management)
+    "current_R", "mfe_r", "mae_r",
+    "r1_reached", "r2_reached", "r3_reached",
+    "trade_state", "position_fraction",
+    # Position state guards (always needed in exit_rule guard expressions)
+    "is_flat", "is_long", "is_short",
+    "position", "position_qty",
+    # Time-based holds (structural — e.g., max hold bars, EOD window)
+    "position_age_minutes", "position_age_hours",
+    "holding_minutes", "holding_hours",
+    "time_in_trade_min", "time_in_trade_hours",
+})
+
+# Canonical safe exit rule applied whenever a rule fails the normal-form check.
+_CANONICAL_EXIT_RULE = "not is_flat and (stop_hit or target_hit)"
+
+
+def _is_valid_exit_rhs(node: ast.expr) -> bool:
+    """Return True iff *node* is a valid exit-rule RHS: a terminal or Or of terminals."""
+    if isinstance(node, ast.Name):
+        return node.id in _EXIT_RULE_TERMINALS
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return all(_is_valid_exit_rhs(v) for v in node.values)
+    return False
+
+
+def _is_exit_rule_normal_form(expr: str) -> bool:
+    """Return True iff *expr* matches the canonical exit-rule grammar.
+
+    Valid forms::
+
+        not is_flat and (stop_hit or target_hit)
+        not is_flat and (stop_hit or target_hit or force_flatten)
+        not is_flat and stop_hit          # single terminal — unusual but valid
+        not is_flat and target_hit
+
+    Any comparison operator, attribute access, function call, or non-terminal
+    Name node causes this to return False.
+    """
+    if not expr:
+        return False
+    try:
+        tree = ast.parse(_normalize_expression(expr), mode="eval")
+    except SyntaxError:
+        return False
+    body = tree.body
+    # Top-level must be BoolOp(And, [lhs, rhs]) with exactly two operands
+    if not isinstance(body, ast.BoolOp) or not isinstance(body.op, ast.And):
+        return False
+    if len(body.values) != 2:
+        return False
+    lhs, rhs = body.values
+    # LHS must be: not is_flat
+    if not (isinstance(lhs, ast.UnaryOp) and isinstance(lhs.op, ast.Not)):
+        return False
+    if not (isinstance(lhs.operand, ast.Name) and lhs.operand.id == "is_flat"):
+        return False
+    # RHS must be a terminal or Or of terminals — no comparisons, no nested Ands
+    return _is_valid_exit_rhs(rhs)
 
 
 def enforce_exit_binding(triggers: List[TriggerCondition]) -> List[ExitBindingCorrection]:
@@ -818,6 +945,117 @@ def strip_degenerate_hold_rules(triggers: List[TriggerCondition]) -> List[HoldRu
     return stripped
 
 
+def sanitize_exit_rules(
+    triggers: List[TriggerCondition],
+    strict: bool = False,
+) -> List[ExitRuleSanitization]:
+    """Enforce the exit-rule normal-form constraint (hard invariant).
+
+    Because ``exit_rule`` *only* calls ``close_position()``, the valid grammar is::
+
+        not is_flat and (stop_hit or target_hit [or force_flatten])
+
+    Any rule that does not match this grammar — including:
+
+    * indicator conditions (``rsi_14 > 75``, ``macd_hist < 0``)
+    * comparison expressions on allowed identifiers (``position_age_minutes > 5``,
+      ``current_R < 0.1``, ``stop_distance_pct < 0.001``)
+    * nested boolean structures (``stop_hit and position_qty > 0``)
+    * function calls, attribute access, subscripts
+
+    will be replaced with the canonical safe form::
+
+        "not is_flat and (stop_hit or target_hit)"
+
+    Emergency exits are exempt (safety-critical; bypass all enforcement).
+
+    Advisory indicator logic (MACD weakening → tighten stop, etc.) belongs in
+    ``hold_rule`` or ``risk_reduce_rule``, NOT ``exit_rule``.
+
+    Args:
+        triggers: List of triggers to sanitize in-place.
+        strict: If ``True``, raise :exc:`TriggerCompilationError` instead of
+                silently replacing.  Intended for CI / backtest pipelines where
+                violations should fail the build.
+
+    Returns:
+        List of :class:`ExitRuleSanitization` records (one per sanitized rule).
+    """
+    sanitizations: List[ExitRuleSanitization] = []
+
+    for trigger in triggers:
+        if not trigger.exit_rule:
+            continue
+        # Emergency exits bypass all enforcement (safety critical)
+        if trigger.category == "emergency_exit":
+            continue
+
+        expr = trigger.exit_rule
+
+        # Check AST parseability first
+        try:
+            ast.parse(_normalize_expression(expr), mode="eval")
+            parseable = True
+        except SyntaxError:
+            parseable = False
+
+        if parseable and _is_exit_rule_normal_form(expr):
+            # Rule is already in canonical form — nothing to do.
+            continue
+
+        # Rule fails normal-form check.  Collect non-terminal identifiers for telemetry.
+        all_ids = _collect_identifiers(expr)
+        non_terminals = sorted(
+            name for name in all_ids
+            if name not in _EXIT_RULE_TERMINALS and name != "is_flat"
+        )
+        reason = "unparseable" if not parseable else "invalid_grammar"
+        sanitized = _CANONICAL_EXIT_RULE
+
+        if strict:
+            raise TriggerCompilationError(
+                f"Trigger '{trigger.id}' exit_rule fails normal-form constraint "
+                f"({reason}). "
+                f"Only 'not is_flat and (stop_hit or target_hit [or force_flatten])' "
+                f"is permitted. Original rule: {expr!r}"
+            )
+
+        sanitizations.append(ExitRuleSanitization(
+            trigger_id=trigger.id,
+            original_rule=expr,
+            sanitized_rule=sanitized,
+            reason=reason,
+            stripped_identifiers=non_terminals,
+        ))
+        trigger.exit_rule = sanitized
+
+    return sanitizations
+
+
+def tighten_stop_only(
+    current_stop: float,
+    proposed_stop: float,
+    side: Literal["long", "short"],
+) -> float:
+    """Enforce monotonic stop advancement — stops may only tighten, never widen.
+
+    For longs: stop may only move UP (raises the protective floor).
+    For shorts: stop may only move DOWN (lowers the protective ceiling).
+
+    Args:
+        current_stop: The current stop price.
+        proposed_stop: The proposed new stop price from an advisory action.
+        side: Trade direction — ``'long'`` or ``'short'``.
+
+    Returns:
+        The tighter of *current_stop* and *proposed_stop*.
+    """
+    if side == "long":
+        return max(current_stop, proposed_stop)
+    else:
+        return min(current_stop, proposed_stop)
+
+
 def autocorrect_identifiers(
     plan: StrategyPlan,
     available_timeframes: Set[str],
@@ -886,10 +1124,19 @@ def autocorrect_identifiers(
 def enforce_plan_quality(
     plan: StrategyPlan,
     available_timeframes: Set[str],
+    strict: bool = False,
 ) -> PlanEnforcementResult:
     """Run all compile-time enforcement checks before compile_plan.
 
     Mutates triggers in-place and returns a summary of corrections.
+
+    Args:
+        plan: The strategy plan to enforce.
+        available_timeframes: Timeframes present in the loaded data.
+        strict: If ``True``, raise :exc:`TriggerCompilationError` on any
+                exit_rule that fails the normal-form constraint instead of
+                silently sanitizing it.  Use this in CI / backtest pipelines
+                to make violations loud during development.
     """
     result = PlanEnforcementResult()
 
@@ -928,13 +1175,30 @@ def enforce_plan_quality(
             h.trigger_id, h.reason,
         )
 
+    # Exit-rule sanitizer runs LAST — after autocorrect so it sees clean identifiers.
+    # This is the hard invariant: only stop/target/force_flatten may close a position.
+    result.exit_rule_sanitizations = sanitize_exit_rules(plan.triggers, strict=strict)
+    for s in result.exit_rule_sanitizations:
+        extra = f" (non-terminal identifiers: {', '.join(s.stripped_identifiers)})" if s.stripped_identifiers else ""
+        logger.warning(
+            "Trigger '%s' exit_rule SANITIZED [%s]%s. "
+            "Original: %r → Canonical: %r",
+            s.trigger_id,
+            s.reason,
+            extra,
+            s.original_rule,
+            s.sanitized_rule,
+        )
+
     if result.total_corrections:
         logger.info(
-            "Plan enforcement: %d corrections applied (%d exit-binding, %d hold-rule, %d identifier)",
+            "Plan enforcement: %d corrections applied "
+            "(%d exit-binding, %d hold-rule, %d identifier, %d exit-sanitized)",
             result.total_corrections,
             len(result.exit_binding_corrections),
             len(result.hold_rules_stripped),
             len(result.identifier_corrections),
+            len(result.exit_rule_sanitizations),
         )
 
     return result

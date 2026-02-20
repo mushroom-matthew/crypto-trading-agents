@@ -313,8 +313,8 @@ class TestExecutionLedgerWorkflowEnhancements:
         tx = workflow.transaction_history[0]
         assert tx["side"] == "BUY"
         assert tx["symbol"] == "BTC/USD"
-        assert tx["quantity"] == 0.1
-        assert tx["fill_price"] == 50000.0
+        assert tx["qty"] == 0.1
+        assert tx["price"] == 50000.0
         assert tx["cost"] == 5000.0
         assert "timestamp" in tx
         assert "cash_before" in tx

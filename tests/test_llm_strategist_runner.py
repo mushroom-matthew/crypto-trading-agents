@@ -134,8 +134,15 @@ def test_rules_refresh_without_replan(monkeypatch, tmp_path):
                 symbol="BTC-USD",
                 direction="long",
                 timeframe="1h",
+                category="trend_continuation",
                 entry_rule="tf_4h_ema_50 > tf_4h_ema_200 and position == 'flat'",
-                exit_rule="tf_4h_ema_50 <= tf_4h_ema_200 and position == 'long'",
+                exit_rule="not is_flat and (stop_hit or target_hit)",
+                # Use price-based stop/target so canonical exit rule can fire.
+                # Entry ~hour 6 at close=106; stop=103.88, target=110.24 (2R).
+                # Target fires at hour 11 (close=111 > 110.24) — within 18-bar window.
+                stop_anchor_type="pct",
+                stop_loss_pct=2.0,
+                target_anchor_type="r_multiple_2",
             )
         ],
         risk_constraints=RiskConstraint(
@@ -430,8 +437,13 @@ def test_exit_orders_map_to_plan_triggers(monkeypatch, tmp_path):
                 direction="long",
                 timeframe="1h",
                 entry_rule="timeframe=='1h'",
-                exit_rule="True",
+                exit_rule="not is_flat and (stop_hit or target_hit)",
                 category="trend_continuation",
+                # Entry at close=100; stop=98 (2%), target=104 (2R).
+                # Target fires at close=105 (candle 6) so exit routing is exercised.
+                stop_anchor_type="pct",
+                stop_loss_pct=2.0,
+                target_anchor_type="r_multiple_2",
             )
         ],
         risk_constraints=RiskConstraint(

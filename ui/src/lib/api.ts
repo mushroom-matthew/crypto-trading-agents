@@ -744,6 +744,52 @@ export interface PaperTradingTrigger {
   timeframe: string;
   confidence: string | null;
   entry_rule: string | null;
+  exit_rule: string | null;
+  hold_rule: string | null;
+}
+
+export interface TriggerRuleUpdateRequest {
+  entry_rule?: string;
+  exit_rule?: string;
+  hold_rule?: string;
+  reason?: string;
+  source?: string;
+}
+
+export interface TriggerRuleUpdateResponse {
+  session_id: string;
+  trigger_id: string;
+  request_id: string;
+  status: string;
+  changed_fields: string[];
+  message: string;
+}
+
+export interface TriggerRuleEditRecord {
+  request_id: string;
+  timestamp: string;
+  trigger_id: string;
+  source: string;
+  reason: string;
+  changed_fields: string[];
+  status: 'applied' | 'rejected';
+  before?: {
+    entry_rule?: string;
+    exit_rule?: string;
+    hold_rule?: string;
+  };
+  after?: {
+    entry_rule?: string;
+    exit_rule?: string;
+    hold_rule?: string;
+  };
+  error?: string;
+}
+
+export interface TriggerRuleEditHistoryResponse {
+  session_id: string;
+  count: number;
+  edits: TriggerRuleEditRecord[];
 }
 
 export interface PaperTradingPlan {
@@ -773,6 +819,33 @@ export interface PaperTradingTrade {
   price: number;
   fee: number | null;
   pnl: number | null;
+}
+
+export interface PaperTradingTradeSet {
+  symbol: string;
+  entry_time: string;
+  exit_time: string;
+  hold_minutes: number;
+  direction: string;
+  entry_price: number;
+  exit_price: number;
+  qty: number;
+  gross_pnl: number;
+  fee: number;
+  net_pnl: number;
+  pnl_pct: number;
+  entry_trigger: string | null;
+  exit_trigger: string | null;
+  category: string | null;
+  winner: boolean;
+}
+
+export interface PaperTradingTradeSetsResponse {
+  session_id: string;
+  total_completed_trades: number;
+  win_rate_pct: number;
+  total_net_pnl: number;
+  trade_sets: PaperTradingTradeSet[];
 }
 
 export interface SessionListItem {
@@ -850,6 +923,27 @@ export const paperTradingAPI = {
     return response.data;
   },
 
+  // Update trigger rules in active plan (compile-gated in workflow)
+  updateTriggerRule: async (
+    sessionId: string,
+    triggerId: string,
+    payload: TriggerRuleUpdateRequest
+  ): Promise<TriggerRuleUpdateResponse> => {
+    const response = await api.patch(`/paper-trading/sessions/${sessionId}/triggers/${triggerId}`, payload);
+    return response.data;
+  },
+
+  // Get manual trigger-rule edit audit history
+  getTriggerRuleEdits: async (
+    sessionId: string,
+    limit = 100
+  ): Promise<TriggerRuleEditHistoryResponse> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/trigger-rule-edits`, {
+      params: { limit },
+    });
+    return response.data;
+  },
+
   // Force regeneration of strategy plan
   forceReplan: async (sessionId: string): Promise<{ session_id: string; status: string; message: string }> => {
     const response = await api.post(`/paper-trading/sessions/${sessionId}/replan`);
@@ -859,6 +953,14 @@ export const paperTradingAPI = {
   // Get trade history
   getTrades: async (sessionId: string, limit = 100): Promise<PaperTradingTrade[]> => {
     const response = await api.get(`/paper-trading/sessions/${sessionId}/trades`, {
+      params: { limit },
+    });
+    return response.data;
+  },
+
+  // Get paired entry/exit trade sets
+  getTradeSets: async (sessionId: string, limit = 50): Promise<PaperTradingTradeSetsResponse> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/trade_sets`, {
       params: { limit },
     });
     return response.data;

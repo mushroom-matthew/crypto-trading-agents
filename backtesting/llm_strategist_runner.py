@@ -2347,8 +2347,6 @@ class LLMStrategistBacktester:
         ]
 
     def _update_position_risk_state(self, order: Order, pre_qty: float, post_qty: float) -> None:
-        if not self._use_next_open_execution():
-            return
         def _sign(qty: float) -> int:
             if qty > 1e-9:
                 return 1

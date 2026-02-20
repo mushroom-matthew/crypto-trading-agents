@@ -10,17 +10,21 @@ from tools import strategy_run_tools
 from trading_core.trigger_compiler import (
     AtrTautologyWarning,
     ExitBindingCorrection,
+    ExitRuleSanitization,
     HoldRuleStripped,
     IdentifierCorrection,
     PlanEnforcementResult,
     TriggerCompilationError,
+    _is_exit_rule_normal_form,
     autocorrect_identifiers,
     compile_plan,
     detect_atr_tautologies,
     detect_plan_atr_tautologies,
     enforce_exit_binding,
     enforce_plan_quality,
+    sanitize_exit_rules,
     strip_degenerate_hold_rules,
+    tighten_stop_only,
     warn_cross_category_exits,
     detect_degenerate_hold_rules,
 )
@@ -655,3 +659,305 @@ def test_exit_binding_exempt_reset_on_external_input():
         exit_binding_exempt=True,  # Externally supplied — should be reset
     )
     assert trigger.exit_binding_exempt is False
+
+
+# =============================================================================
+# _is_exit_rule_normal_form — grammar validator unit tests
+# =============================================================================
+
+def test_normal_form_canonical_two_terminals():
+    assert _is_exit_rule_normal_form("not is_flat and (stop_hit or target_hit)")
+
+
+def test_normal_form_canonical_three_terminals():
+    assert _is_exit_rule_normal_form("not is_flat and (stop_hit or target_hit or force_flatten)")
+
+
+def test_normal_form_single_terminal():
+    assert _is_exit_rule_normal_form("not is_flat and stop_hit")
+    assert _is_exit_rule_normal_form("not is_flat and target_hit")
+
+
+def test_normal_form_backward_compat_aliases():
+    assert _is_exit_rule_normal_form("not is_flat and (below_stop or above_target)")
+
+
+def test_normal_form_rejects_comparison_on_allowed_id():
+    """position_age_minutes > 5 uses a Compare node — not a terminal."""
+    assert not _is_exit_rule_normal_form("not is_flat and (stop_hit or (position_age_minutes > 5))")
+
+
+def test_normal_form_rejects_r_tracking_comparison():
+    """current_R < 1.0 is a Compare node — advisory, not a valid exit terminal."""
+    assert not _is_exit_rule_normal_form("not is_flat and (stop_hit or (r2_reached and current_R < 1.0))")
+
+
+def test_normal_form_rejects_indicator_condition():
+    assert not _is_exit_rule_normal_form("not is_flat and (stop_hit or target_hit or (rsi_14 > 75 and macd_hist < 0))")
+
+
+def test_normal_form_rejects_nested_and_in_rhs():
+    """Boolean obfuscation: nested And inside an Or-of-terminals."""
+    assert not _is_exit_rule_normal_form("not is_flat and (stop_hit or (target_hit and position_qty > 0))")
+
+
+def test_normal_form_rejects_stop_distance_comparison():
+    assert not _is_exit_rule_normal_form("not is_flat and stop_distance_pct < 0.001")
+
+
+def test_normal_form_rejects_churn_rule():
+    assert not _is_exit_rule_normal_form("not is_flat and current_R < 0.1")
+
+
+def test_normal_form_rejects_unparseable():
+    assert not _is_exit_rule_normal_form("not is_flat and (stop_hit or ???)")
+
+
+def test_normal_form_rejects_empty():
+    assert not _is_exit_rule_normal_form("")
+
+
+def test_normal_form_rejects_missing_guard():
+    """RHS only, no 'not is_flat' guard."""
+    assert not _is_exit_rule_normal_form("stop_hit or target_hit")
+
+
+# =============================================================================
+# sanitize_exit_rules — hard invariant tests
+# =============================================================================
+
+def _make_trigger(
+    id: str = "t1",
+    category: str = "reversal",
+    direction: str = "long",
+    entry_rule: str = "close > 0",
+    exit_rule: str = "",
+) -> TriggerCondition:
+    return TriggerCondition(
+        id=id,
+        symbol="ETH-USD",
+        timeframe="1h",
+        direction=direction,
+        category=category,
+        entry_rule=entry_rule,
+        exit_rule=exit_rule,
+    )
+
+
+def test_sanitize_exit_rules_strips_indicator_conditions():
+    """exit_rule with RSI/MACD indicator conditions is replaced with canonical rule."""
+    t = _make_trigger(
+        exit_rule="not is_flat and (stop_hit or target_hit or (rsi_14 > 75 and macd_hist < 0))",
+    )
+    results = sanitize_exit_rules([t])
+    assert len(results) == 1
+    s = results[0]
+    assert s.trigger_id == "t1"
+    assert s.reason == "invalid_grammar"
+    assert "rsi_14" in s.stripped_identifiers
+    assert "macd_hist" in s.stripped_identifiers
+    assert t.exit_rule == "not is_flat and (stop_hit or target_hit)"
+
+
+def test_sanitize_exit_rules_clean_rule_untouched():
+    """Canonical exit_rule with only stop_hit/target_hit is not modified."""
+    t = _make_trigger(exit_rule="not is_flat and (stop_hit or target_hit)")
+    results = sanitize_exit_rules([t])
+    assert results == []
+    assert t.exit_rule == "not is_flat and (stop_hit or target_hit)"
+
+
+def test_sanitize_exit_rules_r_tracking_comparison_rejected():
+    """R-tracking comparisons (current_R < 1.0) are NOT valid exit-rule grammar.
+
+    R-tracking is advisory — it belongs in hold_rule for stop advancement,
+    not in exit_rule to close a position.  The grammar rejects any Compare node.
+    """
+    t = _make_trigger(exit_rule="not is_flat and (stop_hit or (r2_reached and current_R < 1.0))")
+    results = sanitize_exit_rules([t])
+    assert len(results) == 1
+    assert results[0].reason == "invalid_grammar"
+    assert t.exit_rule == "not is_flat and (stop_hit or target_hit)"
+
+
+def test_sanitize_exit_rules_emergency_exit_exempt():
+    """Emergency exit triggers bypass exit_rule sanitization."""
+    t = _make_trigger(
+        category="emergency_exit",
+        direction="exit",
+        exit_rule="not is_flat and (stop_hit or rsi_14 > 80)",
+    )
+    results = sanitize_exit_rules([t])
+    assert results == []
+    # Rule unchanged
+    assert "rsi_14" in t.exit_rule
+
+
+def test_sanitize_exit_rules_no_exit_rule_skipped():
+    """Triggers without an exit_rule are skipped cleanly."""
+    t = _make_trigger(exit_rule="")
+    results = sanitize_exit_rules([t])
+    assert results == []
+
+
+def test_sanitize_exit_rules_multiple_triggers():
+    """Sanitizer processes all triggers; only those failing the grammar are corrected."""
+    t_bad = _make_trigger("bad", exit_rule="not is_flat and (stop_hit or sma_short > close)")
+    t_ok = _make_trigger("ok", exit_rule="not is_flat and (stop_hit or target_hit)")
+    results = sanitize_exit_rules([t_bad, t_ok])
+    assert len(results) == 1
+    assert results[0].trigger_id == "bad"
+    assert t_bad.exit_rule == "not is_flat and (stop_hit or target_hit)"
+    assert t_ok.exit_rule == "not is_flat and (stop_hit or target_hit)"  # unchanged
+
+
+def test_sanitize_exit_rules_volume_stripped():
+    """volume comparison is invalid exit grammar (Compare node)."""
+    t = _make_trigger(exit_rule="not is_flat and (stop_hit or volume > 1000000)")
+    results = sanitize_exit_rules([t])
+    assert len(results) == 1
+    assert results[0].reason == "invalid_grammar"
+    assert "volume" in results[0].stripped_identifiers
+
+
+# --- Adversarial patterns ---
+
+def test_sanitize_adversarial_time_gate():
+    """position_age_minutes > 5 exits every trade after 5 min — invalid grammar."""
+    t = _make_trigger(exit_rule="not is_flat and (stop_hit or (position_age_minutes > 5))")
+    results = sanitize_exit_rules([t])
+    assert len(results) == 1
+    assert results[0].reason == "invalid_grammar"
+    assert t.exit_rule == "not is_flat and (stop_hit or target_hit)"
+
+
+def test_sanitize_adversarial_churn_r_threshold():
+    """current_R < 0.1 exits nearly flat positions — invalid Compare in grammar."""
+    t = _make_trigger(exit_rule="not is_flat and (stop_hit or current_R < 0.1)")
+    results = sanitize_exit_rules([t])
+    assert len(results) == 1
+    assert results[0].reason == "invalid_grammar"
+
+
+def test_sanitize_adversarial_stop_distance_nonsense():
+    """stop_distance_pct < 0.001 is semantically nonsense as an exit trigger."""
+    t = _make_trigger(exit_rule="not is_flat and stop_distance_pct < 0.001")
+    results = sanitize_exit_rules([t])
+    assert len(results) == 1
+    assert results[0].reason == "invalid_grammar"
+
+
+def test_sanitize_adversarial_boolean_obfuscation():
+    """stop_hit or (target_hit and position_qty > 0) hides a comparison in nested And."""
+    t = _make_trigger(exit_rule="not is_flat and (stop_hit or (target_hit and position_qty > 0))")
+    results = sanitize_exit_rules([t])
+    assert len(results) == 1
+    assert results[0].reason == "invalid_grammar"
+
+
+def test_sanitize_strict_mode_raises():
+    """In strict mode, a rule failing normal-form raises TriggerCompilationError."""
+    t = _make_trigger(exit_rule="not is_flat and (stop_hit or rsi_14 > 70)")
+    with pytest.raises(TriggerCompilationError, match="normal-form"):
+        sanitize_exit_rules([t], strict=True)
+    # Trigger rule is NOT mutated when strict mode raises
+    assert "rsi_14" in t.exit_rule
+
+
+def test_enforce_plan_quality_includes_sanitization(run_id="sanitize_test"):
+    """enforce_plan_quality() integrates sanitize_exit_rules and counts them in total_corrections."""
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trigger = TriggerCondition(
+        id="eth_reversal",
+        symbol="ETH-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="rsi_14 < 35",
+        exit_rule="not is_flat and (stop_hit or target_hit or macd_hist < 0)",
+        category="reversal",
+    )
+    plan = StrategyPlan(
+        plan_id="plan_sanitize",
+        run_id=run_id,
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[trigger],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=1.0,
+            max_symbol_exposure_pct=25.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="ETH-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=5,
+    )
+    result = enforce_plan_quality(plan, available_timeframes={"1h"})
+    assert len(result.exit_rule_sanitizations) == 1
+    assert result.exit_rule_sanitizations[0].trigger_id == "eth_reversal"
+    assert result.exit_rule_sanitizations[0].reason == "invalid_grammar"
+    assert result.total_corrections >= 1
+
+
+def test_enforce_plan_quality_strict_mode_raises():
+    """enforce_plan_quality(strict=True) raises on any exit_rule grammar violation."""
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trigger = TriggerCondition(
+        id="bad_trigger",
+        symbol="ETH-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="close > 0",
+        exit_rule="not is_flat and (stop_hit or position_age_minutes > 60)",
+        category="reversal",
+    )
+    plan = StrategyPlan(
+        plan_id="plan_strict",
+        run_id="strict_test",
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        global_view="test",
+        regime="range",
+        triggers=[trigger],
+        risk_constraints=RiskConstraint(
+            max_position_risk_pct=1.0,
+            max_symbol_exposure_pct=25.0,
+            max_portfolio_exposure_pct=80.0,
+            max_daily_loss_pct=3.0,
+        ),
+        sizing_rules=[PositionSizingRule(symbol="ETH-USD", sizing_mode="fixed_fraction", target_risk_pct=1.0)],
+        max_trades_per_day=5,
+    )
+    with pytest.raises(TriggerCompilationError, match="normal-form"):
+        enforce_plan_quality(plan, available_timeframes={"1h"}, strict=True)
+
+
+# =============================================================================
+# tighten_stop_only — monotonic stop enforcement tests
+# =============================================================================
+
+def test_tighten_stop_only_long_advances_stop():
+    """For a long, a higher proposed stop is accepted (tightens the floor)."""
+    assert tighten_stop_only(100.0, 105.0, "long") == 105.0
+
+
+def test_tighten_stop_only_long_rejects_lower_stop():
+    """For a long, a lower proposed stop is rejected (would widen, not tighten)."""
+    assert tighten_stop_only(100.0, 95.0, "long") == 100.0
+
+
+def test_tighten_stop_only_short_advances_stop():
+    """For a short, a lower proposed stop is accepted (tightens the ceiling)."""
+    assert tighten_stop_only(200.0, 195.0, "short") == 195.0
+
+
+def test_tighten_stop_only_short_rejects_higher_stop():
+    """For a short, a higher proposed stop is rejected (would widen, not tighten)."""
+    assert tighten_stop_only(200.0, 205.0, "short") == 200.0
+
+
+def test_tighten_stop_only_equal_is_idempotent():
+    """Proposing the same stop as current is a no-op."""
+    assert tighten_stop_only(150.0, 150.0, "long") == 150.0
+    assert tighten_stop_only(150.0, 150.0, "short") == 150.0

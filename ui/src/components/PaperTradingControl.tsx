@@ -9,7 +9,13 @@ import {
   TrendingUp, TrendingDown, Minus, ChevronDown, ChevronUp,
   ArrowUpRight, Ban, CheckCircle2, Radio, BarChart3,
 } from 'lucide-react';
-import { paperTradingAPI, promptsAPI, type PaperTradingSessionConfig, type CandleBar } from '../lib/api';
+import {
+  paperTradingAPI,
+  promptsAPI,
+  type PaperTradingSessionConfig,
+  type CandleBar,
+  type PaperTradingTradeSet,
+} from '../lib/api';
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
@@ -105,6 +111,7 @@ export function PaperTradingControl() {
 
   // Track expanded trigger list
   const [showTriggers, setShowTriggers] = useState(false);
+  const [expandedTriggers, setExpandedTriggers] = useState<Record<string, boolean>>({});
 
   // Fetch trades
   const { data: trades = [] } = useQuery({
@@ -113,6 +120,15 @@ export function PaperTradingControl() {
     enabled: !!selectedSessionId,
     refetchInterval: 15000,
   });
+
+  // Fetch trade sets (paired round-trip trades)
+  const { data: tradeSetsData } = useQuery({
+    queryKey: ['paper-trading-trade-sets', selectedSessionId],
+    queryFn: () => paperTradingAPI.getTradeSets(selectedSessionId!, 50),
+    enabled: !!selectedSessionId,
+    refetchInterval: 15000,
+  });
+  const tradeSets = tradeSetsData?.trade_sets ?? [];
 
   // Chart state
   const [chartSymbol, setChartSymbol] = useState('BTC-USD');
@@ -201,6 +217,7 @@ export function PaperTradingControl() {
 
   const isRunning = session?.status === 'running';
   const isStarting = startSession.isPending;
+  const isLiteralFalseRule = (rule?: string | null) => (rule || '').trim().toLowerCase() === 'false';
 
   return (
     <div className="space-y-6">
@@ -563,10 +580,13 @@ export function PaperTradingControl() {
                     {showTriggers ? 'Hide' : 'Show'} trigger conditions
                   </button>
                   {showTriggers && (
-                    <div className="mt-3 space-y-2 max-h-64 overflow-y-auto">
+                    <div className="mt-3 space-y-2 max-h-96 overflow-y-auto">
                       {plan.triggers.map((t) => (
                         <div key={t.id} className="p-2 bg-gray-50 dark:bg-gray-700 rounded text-xs border-l-2 border-l-blue-400">
-                          <div className="flex items-center gap-2 mb-1">
+                          <button
+                            onClick={() => setExpandedTriggers((prev) => ({ ...prev, [t.id]: !prev[t.id] }))}
+                            className="w-full flex items-center gap-2 text-left"
+                          >
                             {t.direction === 'long' ? (
                               <TrendingUp className="w-3 h-3 text-green-500 flex-shrink-0" />
                             ) : t.direction === 'short' ? (
@@ -591,11 +611,41 @@ export function PaperTradingControl() {
                                 {t.confidence}
                               </span>
                             )}
-                          </div>
-                          {t.entry_rule && (
-                            <p className="font-mono text-gray-600 dark:text-gray-300 pl-5 truncate" title={t.entry_rule}>
-                              {t.entry_rule}
-                            </p>
+                            {expandedTriggers[t.id] ? (
+                              <ChevronUp className="w-4 h-4 text-gray-500" />
+                            ) : (
+                              <ChevronDown className="w-4 h-4 text-gray-500" />
+                            )}
+                          </button>
+
+                          {expandedTriggers[t.id] && (
+                            <div className="mt-3 pl-5 space-y-2">
+                              {(t.entry_rule && !isLiteralFalseRule(t.entry_rule)) && (
+                                <div>
+                                  <p className="text-[11px] font-semibold text-gray-500">ENTRY</p>
+                                  <pre className="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-200">{t.entry_rule}</pre>
+                                </div>
+                              )}
+                              {(t.exit_rule && !isLiteralFalseRule(t.exit_rule)) && (
+                                <div>
+                                  <p className="text-[11px] font-semibold text-gray-500">EXIT</p>
+                                  <pre className="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-200">{t.exit_rule}</pre>
+                                </div>
+                              )}
+                              {(t.hold_rule && !isLiteralFalseRule(t.hold_rule)) && (
+                                <div>
+                                  <p className="text-[11px] font-semibold text-gray-500">HOLD</p>
+                                  <pre className="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-200">{t.hold_rule}</pre>
+                                </div>
+                              )}
+                              {(!t.entry_rule || isLiteralFalseRule(t.entry_rule)) &&
+                                (!t.exit_rule || isLiteralFalseRule(t.exit_rule)) &&
+                                (!t.hold_rule || isLiteralFalseRule(t.hold_rule)) && (
+                                  <p className="text-xs text-gray-500 italic">
+                                    No active conditions (rules are empty/disabled).
+                                  </p>
+                                )}
+                            </div>
                           )}
                         </div>
                       ))}
@@ -686,6 +736,82 @@ export function PaperTradingControl() {
         </div>
       )}
 
+      {/* Trade Sets — paired round-trip entry/exit view */}
+      {tradeSets.length > 0 && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">Trade Sets</h2>
+            {tradeSetsData && (
+              <div className="flex gap-4 text-sm">
+                <span className="text-gray-500">
+                  <span className="font-semibold text-gray-800 dark:text-gray-200">{tradeSetsData.total_completed_trades}</span> trades
+                </span>
+                <span className="text-gray-500">
+                  Win rate: <span className={cn('font-semibold', tradeSetsData.win_rate_pct >= 50 ? 'text-green-600' : 'text-red-600')}>
+                    {tradeSetsData.win_rate_pct.toFixed(1)}%
+                  </span>
+                </span>
+                <span className="text-gray-500">
+                  Net P&L: <span className={cn('font-semibold', tradeSetsData.total_net_pnl >= 0 ? 'text-green-600' : 'text-red-600')}>
+                    {formatCurrency(tradeSetsData.total_net_pnl)}
+                  </span>
+                </span>
+              </div>
+            )}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 dark:border-gray-700 text-xs text-gray-500">
+                  <th className="text-left py-2 px-2">Symbol</th>
+                  <th className="text-left py-2 px-2">Entry</th>
+                  <th className="text-left py-2 px-2">Exit</th>
+                  <th className="text-right py-2 px-2">Hold</th>
+                  <th className="text-right py-2 px-2">Entry Px</th>
+                  <th className="text-right py-2 px-2">Exit Px</th>
+                  <th className="text-right py-2 px-2">Qty</th>
+                  <th className="text-right py-2 px-2">Fee</th>
+                  <th className="text-right py-2 px-2">Net P&L</th>
+                  <th className="text-right py-2 px-2">%</th>
+                  <th className="text-left py-2 px-2">Setup</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradeSets.map((ts: PaperTradingTradeSet, idx: number) => {
+                  const holdStr = ts.hold_minutes >= 60
+                    ? `${(ts.hold_minutes / 60).toFixed(1)}h`
+                    : `${ts.hold_minutes.toFixed(0)}m`;
+                  return (
+                    <tr key={idx} className={cn(
+                      'border-b border-gray-100 dark:border-gray-700/50 text-xs',
+                      ts.winner ? 'bg-green-50/30 dark:bg-green-900/10' : 'bg-red-50/30 dark:bg-red-900/10'
+                    )}>
+                      <td className="py-2 px-2 font-mono font-medium">{ts.symbol.replace('-USD', '')}</td>
+                      <td className="py-2 px-2 text-gray-500">{formatDateTime(ts.entry_time)}</td>
+                      <td className="py-2 px-2 text-gray-500">{formatDateTime(ts.exit_time)}</td>
+                      <td className="py-2 px-2 text-right font-mono">{holdStr}</td>
+                      <td className="py-2 px-2 text-right font-mono">{formatCurrency(ts.entry_price)}</td>
+                      <td className="py-2 px-2 text-right font-mono">{formatCurrency(ts.exit_price)}</td>
+                      <td className="py-2 px-2 text-right font-mono">{ts.qty.toFixed(4)}</td>
+                      <td className="py-2 px-2 text-right text-gray-500">{formatCurrency(ts.fee)}</td>
+                      <td className={cn('py-2 px-2 text-right font-semibold', ts.winner ? 'text-green-600' : 'text-red-600')}>
+                        {formatCurrency(ts.net_pnl)}
+                      </td>
+                      <td className={cn('py-2 px-2 text-right font-semibold', ts.winner ? 'text-green-600' : 'text-red-600')}>
+                        {ts.pnl_pct >= 0 ? '+' : ''}{ts.pnl_pct.toFixed(2)}%
+                      </td>
+                      <td className="py-2 px-2 text-gray-500 font-mono truncate max-w-32" title={ts.entry_trigger ?? ''}>
+                        {ts.category ?? ts.entry_trigger ?? '-'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Trade History */}
       {trades.length > 0 && (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
@@ -699,6 +825,7 @@ export function PaperTradingControl() {
                   <th className="text-left py-2 px-3">Side</th>
                   <th className="text-right py-2 px-3">Qty</th>
                   <th className="text-right py-2 px-3">Price</th>
+                  <th className="text-right py-2 px-3">Fee</th>
                   <th className="text-right py-2 px-3">P&L</th>
                 </tr>
               </thead>
@@ -712,6 +839,9 @@ export function PaperTradingControl() {
                     </td>
                     <td className="py-2 px-3 text-right">{trade.qty.toFixed(6)}</td>
                     <td className="py-2 px-3 text-right">{formatCurrency(trade.price)}</td>
+                    <td className="py-2 px-3 text-right text-gray-500">
+                      {trade.fee != null ? formatCurrency(trade.fee) : '-'}
+                    </td>
                     <td className={cn('py-2 px-3 text-right', (trade.pnl ?? 0) >= 0 ? 'text-green-600' : 'text-red-600')}>
                       {trade.pnl != null ? formatCurrency(trade.pnl) : '-'}
                     </td>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import timedelta
@@ -243,7 +244,9 @@ class TriggerSummary(BaseModel):
     direction: str
     timeframe: str
     confidence: Optional[str] = None
-    entry_rule: Optional[str] = None  # truncated to 150 chars
+    entry_rule: Optional[str] = None
+    exit_rule: Optional[str] = None
+    hold_rule: Optional[str] = None
 
 
 class StrategyPlanSummary(BaseModel):
@@ -270,6 +273,21 @@ class TradeRecord(BaseModel):
     price: float
     fee: Optional[float]
     pnl: Optional[float]
+
+
+class TriggerRuleUpdateRequest(BaseModel):
+    """Request payload for manual trigger rule edits."""
+    entry_rule: Optional[str] = None
+    exit_rule: Optional[str] = None
+    hold_rule: Optional[str] = None
+    reason: Optional[str] = Field(
+        default=None,
+        description="Optional human note for why this edit was made (audit trail).",
+    )
+    source: Optional[str] = Field(
+        default="ui.paper_trading.trigger_editor",
+        description="Source tag for audit trail.",
+    )
 
 
 # ============================================================================
@@ -546,7 +564,9 @@ async def get_current_plan(session_id: str):
                 direction=t.get("direction", ""),
                 timeframe=t.get("timeframe", ""),
                 confidence=t.get("confidence"),
-                entry_rule=(t.get("entry_rule") or "")[:150] or None,
+                entry_rule=(t.get("entry_rule") or "") or None,
+                exit_rule=(t.get("exit_rule") or "") or None,
+                hold_rule=(t.get("hold_rule") or "") or None,
             )
             for t in raw_triggers
             if isinstance(t, dict)
@@ -570,6 +590,109 @@ async def get_current_plan(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to get plan: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/sessions/{session_id}/triggers/{trigger_id}")
+async def update_trigger_rule(
+    session_id: str,
+    trigger_id: str,
+    request: TriggerRuleUpdateRequest,
+):
+    """Patch entry/exit/hold rules for one trigger in the active plan.
+
+    Note: the workflow only accepts this update if the edited plan remains
+    compilable by the deterministic trigger compiler.
+    """
+    from ops_api.temporal_client import get_temporal_client
+    from temporalio.service import RPCError
+
+    payload: Dict[str, Any] = {
+        "request_id": uuid4().hex,
+        "trigger_id": trigger_id,
+        "reason": (request.reason or "manual_ui_edit"),
+        "source": (request.source or "ui.paper_trading.trigger_editor"),
+    }
+    for field_name in ("entry_rule", "exit_rule", "hold_rule"):
+        value = getattr(request, field_name)
+        if value is not None:
+            payload[field_name] = value
+
+    changed_fields = [k for k in ("entry_rule", "exit_rule", "hold_rule") if k in payload]
+    if not changed_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of entry_rule, exit_rule, hold_rule must be provided",
+        )
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(session_id)
+        await handle.signal("update_trigger_rule", payload)
+
+        # Try to confirm acceptance/rejection immediately for better UX.
+        for _ in range(8):
+            edits = await handle.query("get_trigger_rule_edits", 50)
+            match = next(
+                (entry for entry in (edits or []) if entry.get("request_id") == payload["request_id"]),
+                None,
+            )
+            if match is not None:
+                if match.get("status") == "rejected":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Trigger edit rejected: {match.get('error', 'compile validation failed')}",
+                    )
+                return {
+                    "session_id": session_id,
+                    "trigger_id": trigger_id,
+                    "request_id": payload["request_id"],
+                    "status": "applied",
+                    "changed_fields": changed_fields,
+                    "message": "Trigger rule edit applied and passed compile validation.",
+                }
+            await asyncio.sleep(0.1)
+
+        return {
+            "session_id": session_id,
+            "trigger_id": trigger_id,
+            "request_id": payload["request_id"],
+            "status": "update_requested",
+            "changed_fields": changed_fields,
+            "message": "Trigger rule edit requested. Acceptance depends on compile validation in workflow.",
+        }
+    except RPCError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update trigger rule: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sessions/{session_id}/trigger-rule-edits")
+async def get_trigger_rule_edits(session_id: str, limit: int = 100):
+    """Return manual trigger-rule edit history for auditability."""
+    from ops_api.temporal_client import get_temporal_client
+    from temporalio.service import RPCError
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(session_id)
+        edits = await handle.query("get_trigger_rule_edits", limit)
+        return {
+            "session_id": session_id,
+            "count": len(edits or []),
+            "edits": edits or [],
+        }
+    except RPCError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get trigger rule edits: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -626,16 +749,23 @@ async def get_trades(session_id: str, limit: int = 100):
             legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
             transactions = await legacy_ledger_handle.query("get_transaction_history", {"limit": limit})
 
+        from datetime import datetime, timezone as _tz
+
         trades = []
         for tx in transactions:
+            ts_raw = tx.get("timestamp", "")
+            if isinstance(ts_raw, (int, float)):
+                ts_str = datetime.fromtimestamp(ts_raw, tz=_tz.utc).isoformat()
+            else:
+                ts_str = str(ts_raw)
             trades.append(TradeRecord(
-                timestamp=tx.get("timestamp", ""),
+                timestamp=ts_str,
                 symbol=tx.get("symbol", ""),
-                side=tx.get("side", ""),
-                qty=float(tx.get("qty", 0)),
-                price=float(tx.get("price", 0)),
-                fee=float(tx.get("fee", 0)) if tx.get("fee") else None,
-                pnl=float(tx.get("pnl", 0)) if tx.get("pnl") else None,
+                side=(tx.get("side", "") or "").lower(),
+                qty=float(tx.get("qty", tx.get("quantity", 0))),
+                price=float(tx.get("price", tx.get("fill_price", 0))),
+                fee=float(tx.get("fee", 0)) if tx.get("fee") is not None else None,
+                pnl=float(tx.get("pnl", 0)) if tx.get("pnl") is not None else None,
             ))
 
         return trades
@@ -644,6 +774,127 @@ async def get_trades(session_id: str, limit: int = 100):
         raise
     except Exception as e:
         logger.error(f"Failed to get trades: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sessions/{session_id}/trade_sets")
+async def get_trade_sets(session_id: str, limit: int = 50):
+    """Get completed round-trip trades (entry + exit pairs) for a session.
+
+    Pairs BUY fills with subsequent SELL fills for the same symbol and returns
+    per-trade metrics: P&L, fees, hold time, and trigger info.  Only fully
+    closed trades are returned; open positions are excluded.
+    """
+    from ops_api.temporal_client import get_temporal_client
+    from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+    from temporalio.service import RPCError, RPCStatusCode
+    from datetime import datetime, timezone as _tz
+
+    try:
+        client = await get_temporal_client()
+
+        session_handle = client.get_workflow_handle(session_id)
+        try:
+            await session_handle.query("get_session_status")
+        except RPCError as e:
+            if "not found" in str(e).lower():
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            raise
+
+        ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+        ledger_handle = client.get_workflow_handle(ledger_workflow_id)
+        try:
+            transactions = await ledger_handle.query("get_transaction_history", {"limit": 2000})
+        except RPCError as err:
+            if err.status != RPCStatusCode.NOT_FOUND:
+                raise
+            legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+            transactions = await legacy_ledger_handle.query("get_transaction_history", {"limit": 2000})
+
+        # Sort oldest-first for pairing
+        txs = sorted(transactions, key=lambda x: x.get("timestamp", 0))
+
+        def _ts_to_iso(raw) -> str:
+            if isinstance(raw, (int, float)):
+                return datetime.fromtimestamp(raw, tz=_tz.utc).isoformat()
+            return str(raw)
+
+        # Pair BUY → SELL for the same symbol using a FIFO stack per symbol
+        open_entries: Dict[str, List[Dict]] = {}  # symbol → list of open entry dicts
+        trade_sets = []
+
+        for tx in txs:
+            symbol = tx.get("symbol", "")
+            side = (tx.get("side", "") or "").upper()
+            qty = float(tx.get("qty", tx.get("quantity", 0)))
+            price = float(tx.get("price", tx.get("fill_price", 0)))
+            fee = float(tx.get("fee", 0) or 0)
+            ts_raw = tx.get("timestamp", 0)
+            intent = tx.get("intent", "entry" if side == "BUY" else "exit")
+
+            if side == "BUY" or intent == "entry":
+                open_entries.setdefault(symbol, []).append(tx)
+            elif side == "SELL" or intent == "exit":
+                entries = open_entries.get(symbol, [])
+                if not entries:
+                    continue
+                entry = entries.pop(0)
+
+                entry_price = float(entry.get("price", entry.get("fill_price", 0)))
+                entry_qty = float(entry.get("qty", entry.get("quantity", 0)))
+                entry_ts = entry.get("timestamp", 0)
+                entry_fee = float(entry.get("fee", 0) or 0)
+
+                used_qty = min(qty, entry_qty)
+                gross_pnl = (price - entry_price) * used_qty
+                total_fee = fee + entry_fee
+                net_pnl = gross_pnl - total_fee
+                pnl_pct = (gross_pnl / (entry_price * used_qty) * 100) if entry_price > 0 else 0.0
+
+                entry_ts_sec = entry_ts if entry_ts < 1e12 else entry_ts / 1000.0
+                exit_ts_sec = ts_raw if ts_raw < 1e12 else ts_raw / 1000.0
+                hold_minutes = (exit_ts_sec - entry_ts_sec) / 60.0
+
+                trade_sets.append({
+                    "symbol": symbol,
+                    "entry_time": _ts_to_iso(entry_ts),
+                    "exit_time": _ts_to_iso(ts_raw),
+                    "hold_minutes": round(hold_minutes, 1),
+                    "direction": "long",
+                    "entry_price": entry_price,
+                    "exit_price": price,
+                    "qty": used_qty,
+                    "gross_pnl": round(gross_pnl, 4),
+                    "fee": round(total_fee, 4),
+                    "net_pnl": round(net_pnl, 4),
+                    "pnl_pct": round(pnl_pct, 3),
+                    "entry_trigger": entry.get("trigger_id"),
+                    "exit_trigger": tx.get("trigger_id"),
+                    "category": entry.get("trigger_category"),
+                    "winner": net_pnl > 0,
+                })
+
+        # Return most recent completed trades first
+        trade_sets = list(reversed(trade_sets))[:limit]
+
+        # Summary stats
+        total = len(trade_sets)
+        winners = sum(1 for t in trade_sets if t["winner"])
+        total_pnl = sum(t["net_pnl"] for t in trade_sets)
+        win_rate = winners / total * 100 if total else 0.0
+
+        return {
+            "session_id": session_id,
+            "total_completed_trades": total,
+            "win_rate_pct": round(win_rate, 1),
+            "total_net_pnl": round(total_pnl, 4),
+            "trade_sets": trade_sets,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get trade sets: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

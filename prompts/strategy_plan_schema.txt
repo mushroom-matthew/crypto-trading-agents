@@ -230,11 +230,20 @@ BUILT-IN IDENTIFIERS available after entry (evaluate to True/False or float):
   target_distance_pct — % distance between close and target_price
 
 USAGE IN EXIT RULES:
-  Recommended exit pattern for structure-based entries (works for long and short):
-    exit_rule: "not is_flat and (stop_hit or target_hit)"
+  HARD INVARIANT: exit_rule expressions may ONLY use stop_hit, target_hit,
+  R-tracking identifiers (current_R, r1_reached, etc.), and position-state guards
+  (is_flat, position_age_minutes, etc.).  Indicator conditions (RSI, MACD, SMA,
+  Bollinger, ATR comparisons, volume, etc.) in exit_rule will be AUTO-STRIPPED at
+  compile time and replaced with the canonical safe form below.
 
-  Combined with rule-based exits:
-    exit_rule: "not is_flat and (stop_hit or target_hit or (rsi_14 > 75 and macd_hist < 0))"
+  If you want an indicator signal to influence a trade, express it as:
+    - A stop tightening in hold_rule (advance the stop closer to price)
+    - A partial exit in risk_reduce_rule (reduce size, not full close)
+    - A cooldown / block_reentry in hold_rule (prevent new entries)
+  NEVER use indicator conditions to drive a full position close via exit_rule.
+
+  Canonical exit pattern (structure-based entries — works for long and short):
+    exit_rule: "not is_flat and (stop_hit or target_hit)"
 
   Approach-to-target scale-out (risk_reduce):
     exit_rule: "not is_flat and target_distance_pct < 0.3"

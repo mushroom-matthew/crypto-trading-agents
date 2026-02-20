@@ -200,17 +200,30 @@ class ExecutionLedgerWorkflow:
         trigger_id = fill.get("trigger_id") or fill.get("reason")
         trigger_category = fill.get("trigger_category")
         opened_at = self._format_fill_timestamp(fill.get("timestamp"))
-        
+        current_qty = self.positions.get(symbol, Decimal("0"))
+
+        # Compute per-trade P&L for sells before state is mutated
+        trade_pnl = None
+        if side == "SELL" and current_qty > 0 and symbol in self.entry_price:
+            _entry_px = self.entry_price[symbol]
+            _fee = Decimal(str(fill.get("fee", 0) or 0))
+            trade_pnl = float((price - _entry_px) * qty - _fee)
+
         # Add transaction to history with timestamp
         transaction = {
             "timestamp": int(datetime.now(timezone.utc).timestamp()),
             "side": side,
             "symbol": symbol,
-            "quantity": float(qty),
-            "fill_price": float(price),
+            "qty": float(qty),
+            "price": float(price),
             "cost": float(cost),
+            "fee": float(fill.get("fee", 0.0) or 0.0),
+            "trigger_id": trigger_id,
+            "trigger_category": trigger_category,
+            "intent": fill.get("intent", "entry" if side == "BUY" else "exit"),
+            "pnl": trade_pnl,
             "cash_before": float(self.cash),
-            "position_before": float(self.positions.get(symbol, Decimal("0")))
+            "position_before": float(current_qty),
         }
         self.transaction_history.append(transaction)
         
@@ -528,7 +541,7 @@ class ExecutionLedgerWorkflow:
         for tx in sorted(window_transactions, key=lambda x: x["timestamp"]):
             symbol = tx["symbol"]
             side = tx["side"]
-            qty = tx["quantity"]
+            qty = tx.get("qty", tx.get("quantity", 0))
             cost = tx["cost"]
             
             if side == "BUY":
