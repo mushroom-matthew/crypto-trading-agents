@@ -3151,17 +3151,16 @@ class LLMStrategistBacktester:
                     if stop_dist is not None:
                         actual_risk = max(order.quantity * stop_dist, 0.0)
                 if actual_risk is None or actual_risk <= 0:
-                    # Runbook 37: when stop distance is unavailable, fall back to the theoretical
-                    # per-trade cap (conservative assumption: trade is at-risk for the full cap).
-                    # allocated_risk_abs is preferred over remaining_gate*0.1 because it's bounded
-                    # by the per-trade limit rather than the remaining daily budget.
-                    actual_risk = risk_snapshot.get("allocated_risk_abs", 0.0) if risk_snapshot else 0.0
-                    if actual_risk > 0:
-                        logger.warning(
-                            "actual_risk_abs unavailable for %s/%s; using theoretical cap %.4f "
-                            "(no stop distance — investigate stop_distance propagation upstream).",
-                            order.symbol, order.side, actual_risk,
-                        )
+                    # P0 fix: do NOT fall back to allocated_risk_abs (the per-trade cap), as that
+                    # causes ~255x budget overcharge when anchor-based stops haven't been resolved yet.
+                    # _update_position_risk_state() runs immediately after fill and re-derives
+                    # commit_amount from the resolved stop_price_abs.
+                    actual_risk = 0.0
+                    logger.warning(
+                        "actual_risk_abs unavailable for %s/%s — skipping budget pre-deduction; "
+                        "will re-derive from resolved stop_price_abs after fill.",
+                        order.symbol, order.side,
+                    )
                 commit_amount = min(actual_risk, remaining_gate) if remaining_gate > 0 else actual_risk
                 structure_snapshot = (market_structure or {}).get(order.symbol) if market_structure else None
                 risk_snapshot = getattr(risk_engine, "last_risk_snapshot", {}) if risk_engine else {}
@@ -3185,6 +3184,18 @@ class LLMStrategistBacktester:
                         "portfolio",
                     )
                     continue
+                # P0 fix: resolve anchors + initialize PositionRiskState BEFORE committing budget.
+                # For anchor-based stops, stop_price_abs is only set inside _update_position_risk_state(),
+                # so we resolve it here and use it to derive the true commit_amount.
+                self._update_position_risk_state(order, pre_qty, post_qty)
+                _is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
+                if _is_entry:
+                    _resolved_stop = self.portfolio.position_meta.get(order.symbol, {}).get("stop_price_abs")
+                    if _resolved_stop is not None and order.quantity > 0:
+                        _resolved_risk = abs(order.price - _resolved_stop) * order.quantity
+                        if _resolved_risk > 0:
+                            commit_amount = _resolved_risk
+                            actual_risk = _resolved_risk
                 self._commit_risk_budget(day_key, commit_amount, order.symbol)
                 limit_entry["trades_executed"] += 1
                 trigger_id = order.reason
@@ -3227,9 +3238,9 @@ class LLMStrategistBacktester:
                 if session_window:
                     self.session_trade_counts[day_key][session_window] += 1
                 _record_execution_detail(order, "trigger_engine", risk_used=risk_used, latency_seconds=0.0)
-                self._update_position_risk_state(order, pre_qty, post_qty)
+                # Note: _update_position_risk_state() already called above (before _commit_risk_budget)
                 # Track fill in trigger engine for cooldown/hold period enforcement
-                is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
+                is_entry = _is_entry
                 if self.current_trigger_engine:
                     self.current_trigger_engine.record_fill(order.symbol, is_entry, order.timestamp)
                 if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
@@ -3565,17 +3576,16 @@ class LLMStrategistBacktester:
                     if stop_dist is not None:
                         actual_risk = max(order.quantity * stop_dist, 0.0)
                 if actual_risk is None or actual_risk <= 0:
-                    # Runbook 37: when stop distance is unavailable, fall back to the theoretical
-                    # per-trade cap (conservative assumption: trade is at-risk for the full cap).
-                    # allocated_risk_abs is preferred over remaining_gate*0.1 because it's bounded
-                    # by the per-trade limit rather than the remaining daily budget.
-                    actual_risk = risk_snapshot.get("allocated_risk_abs", 0.0) if risk_snapshot else 0.0
-                    if actual_risk > 0:
-                        logger.warning(
-                            "actual_risk_abs unavailable for %s/%s; using theoretical cap %.4f "
-                            "(no stop distance — investigate stop_distance propagation upstream).",
-                            order.symbol, order.side, actual_risk,
-                        )
+                    # P0 fix: do NOT fall back to allocated_risk_abs (the per-trade cap), as that
+                    # causes ~255x budget overcharge when anchor-based stops haven't been resolved yet.
+                    # _update_position_risk_state() runs immediately after fill and re-derives
+                    # commit_amount from the resolved stop_price_abs.
+                    actual_risk = 0.0
+                    logger.warning(
+                        "actual_risk_abs unavailable for %s/%s — skipping budget pre-deduction; "
+                        "will re-derive from resolved stop_price_abs after fill.",
+                        order.symbol, order.side,
+                    )
                 load_scale = 1.0
                 if self.archetype_load_threshold > 0:
                     scale_start = max(1, int(self.archetype_load_threshold * self.archetype_load_scale_start))
@@ -3610,6 +3620,18 @@ class LLMStrategistBacktester:
                     if plan_id:
                         execution_tools.engine.revert_trade(run_id, plan_id, order.timestamp, order.symbol, order.timeframe)
                     continue
+                # P0 fix: resolve anchors + initialize PositionRiskState BEFORE committing budget.
+                # For anchor-based stops, stop_price_abs is only set inside _update_position_risk_state(),
+                # so we resolve it here and use it to derive the true commit_amount.
+                self._update_position_risk_state(order, pre_qty, post_qty)
+                _is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
+                if _is_entry:
+                    _resolved_stop = self.portfolio.position_meta.get(order.symbol, {}).get("stop_price_abs")
+                    if _resolved_stop is not None and order.quantity > 0:
+                        _resolved_risk = abs(order.price - _resolved_stop) * order.quantity
+                        if _resolved_risk > 0:
+                            commit_amount = _resolved_risk
+                            actual_risk = _resolved_risk
                 self._commit_risk_budget(day_key, commit_amount, order.symbol)
                 limit_entry["trades_executed"] += 1
                 risk_used = commit_amount or 0.0
@@ -3645,9 +3667,9 @@ class LLMStrategistBacktester:
                     self.session_trade_counts[day_key][session_window[0]] += 1
                 self.archetype_load_by_day[day_key][arche_key] = arche_load + 1
                 _record_execution_detail(order, "execution_engine", risk_used=risk_used, latency_seconds=latency_seconds)
-                self._update_position_risk_state(order, pre_qty, post_qty)
+                # Note: _update_position_risk_state() already called above (before _commit_risk_budget)
                 # Track fill in trigger engine for cooldown/hold period enforcement
-                is_entry = abs(pre_qty) <= 1e-9 and abs(post_qty) > 1e-9
+                is_entry = _is_entry
                 if self.current_trigger_engine:
                     self.current_trigger_engine.record_fill(order.symbol, is_entry, order.timestamp)
                 if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
