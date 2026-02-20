@@ -899,6 +899,7 @@ class StrategistBacktestResult:
     intraday_judge_history: List[Dict[str, Any]] = field(default_factory=list)
     judge_triggered_replans: List[Dict[str, Any]] = field(default_factory=list)
     trade_mgmt_events: List[Dict[str, Any]] = field(default_factory=list)
+    setup_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class LLMStrategistBacktester:
@@ -1138,6 +1139,18 @@ class LLMStrategistBacktester:
         self.trade_mgmt_config: TradeManagementConfig = trade_mgmt_config or TradeManagementConfig()
         self._trade_mgmt_events: List[Dict[str, Any]] = []
         self.pending_orders: Dict[tuple[str, str], PendingOrder] = {}
+
+        # Setup Event Generator (Runbook 44): per-symbol state machine for compression detection
+        from backtesting.constants import ENGINE_SEMVER
+        from agents.analytics.setup_event_generator import SetupEventGenerator
+        from services.model_scorer import NullModelScorer
+        self._model_scorer = NullModelScorer()
+        self._setup_gen = SetupEventGenerator(
+            engine_semver=ENGINE_SEMVER,
+            scorer=self._model_scorer,
+            strategy_template_version=None,
+        )
+        self._setup_events: List[Dict[str, Any]] = []
         self.position_risk_state: Dict[str, PositionRiskState] = {}
         if self.priority_skip_confidence_threshold is None and self.is_scalp_profile:
             self.priority_skip_confidence_threshold = "B"
@@ -3713,6 +3726,7 @@ class LLMStrategistBacktester:
         self.pending_orders.clear()
         self.position_risk_state.clear()
         self._trade_mgmt_events.clear()
+        self._setup_events.clear()
         self._ensure_strategy_run(run_id)
         all_timestamps = sorted(
             {ts for pair in self.market_data.values() for df in pair.values() for ts in df.index if self.start <= ts <= self.end}
@@ -4410,6 +4424,13 @@ class LLMStrategistBacktester:
                     indicator = self._indicator_snapshot(pair, timeframe, ts)
                     if indicator is None:
                         continue
+                    # Setup Event Generator: emit SetupEvents per bar (Runbook 44)
+                    try:
+                        new_setup_events = self._setup_gen.on_bar(pair, timeframe, ts, indicator)
+                        for evt in new_setup_events:
+                            self._setup_events.append(evt.model_dump(mode="json"))
+                    except Exception as _seg_exc:
+                        logger.debug("setup_event_generator error for %s %s: %s", pair, timeframe, _seg_exc)
                     if indicator_debug is not None:
                         symbol_debug = indicator_debug.setdefault(pair, {})
                         symbol_debug[timeframe] = self._format_indicator_debug(indicator)
@@ -4707,6 +4728,7 @@ class LLMStrategistBacktester:
             intraday_judge_history=list(self.intraday_judge_history),
             judge_triggered_replans=list(self.judge_triggered_replans),
             trade_mgmt_events=list(self._trade_mgmt_events),
+            setup_events=list(self._setup_events),
         )
 
     def _indicator_briefs(self, asset_states: Dict[str, AssetState]) -> Dict[str, Dict[str, Any]]:
@@ -4970,6 +4992,27 @@ class LLMStrategistBacktester:
             "slippage_adjustment": 0.0,
             "per_trade_cap_abs": per_trade_cap_abs,
         }
+
+    def _model_gate(self, symbol: str, snapshot: "IndicatorSnapshot | None") -> tuple:
+        """Return (is_blocked, size_multiplier) from model scorer.
+
+        Returns (False, 1.0) when no model is trained (NullModelScorer).
+        """
+        if snapshot is None:
+            return False, 1.0
+        try:
+            score = self._model_scorer.score(snapshot.model_dump())
+            blocked = self._model_scorer.is_entry_blocked(score)
+            mult = self._model_scorer.size_multiplier(score)
+            if blocked:
+                logger.info(
+                    "model gate BLOCKED entry for %s: p_false_breakout=%.3f > 0.40",
+                    symbol, score.p_false_breakout or 0.0,
+                )
+            return blocked, mult
+        except Exception as exc:
+            logger.debug("_model_gate error for %s: %s", symbol, exc)
+            return False, 1.0
 
     def _risk_budget_gate(self, day_key: str, order: Order) -> float | None:
         """Return remaining budget in currency, or None if exhausted. 0.0 = budget not configured."""

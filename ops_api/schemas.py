@@ -27,6 +27,8 @@ EventType = Literal[
     "order_executed",
     "symbols_discovered",
     "eval_summary",
+    "signal_emitted",
+    "fill_drift",
 ]
 
 

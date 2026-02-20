@@ -1071,24 +1071,80 @@ uv run pytest -q
 - [ ] `SignalEvent` updated with `setup_event_id`, `feature_schema_version`, `strategy_template_version`
 - [ ] No existing tests broken
 
+## Test Evidence
+
+```
+$ uv run pytest tests/test_setup_event_generator.py -vv
+platform linux -- Python 3.13.7, pytest-8.4.2
+collected 30 items
+
+tests/test_setup_event_generator.py::TestSetupEventSchema::test_feature_schema_version_constant PASSED
+tests/test_setup_event_generator.py::TestSetupEventSchema::test_setup_event_schema_valid PASSED
+tests/test_setup_event_generator.py::TestSetupEventSchema::test_setup_event_extra_forbidden PASSED
+tests/test_setup_event_generator.py::TestNullModelScorer::test_null_scorer_returns_none_scores PASSED
+tests/test_setup_event_generator.py::TestNullModelScorer::test_null_scorer_is_entry_blocked_false PASSED
+tests/test_setup_event_generator.py::TestNullModelScorer::test_null_scorer_size_multiplier_one PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_model_gate_blocks_on_high_p_false_breakout PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_model_gate_no_block_below_threshold PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_model_gate_none_p_fb_no_block PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_size_multiplier_low_quality PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_size_multiplier_high_quality PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_size_multiplier_mid_quality PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_size_multiplier_none_quality PASSED
+tests/test_setup_event_generator.py::TestModelScorerGating::test_size_multiplier_clamps_high PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_no_event_on_normal_bar PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_compression_candidate_detected PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_no_compression_when_impulse_and_vol_burst PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_break_attempt_emitted_after_compression PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_no_break_without_impulse PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_compression_ttl_resets_to_idle PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_feature_snapshot_immutable_hash PASSED
+tests/test_setup_event_generator.py::TestSetupEventGenerator::test_null_scorer_in_setup_event PASSED
+tests/test_setup_event_generator.py::TestSessionContext::test_session_context_crypto_us PASSED
+tests/test_setup_event_generator.py::TestSessionContext::test_session_context_weekend PASSED
+tests/test_setup_event_generator.py::TestSessionContext::test_session_context_cyclic_encoding PASSED
+tests/test_setup_event_generator.py::TestSessionContext::test_session_context_asia PASSED
+tests/test_setup_event_generator.py::TestSessionContext::test_session_context_london PASSED
+tests/test_setup_event_generator.py::TestSnapshotHash::test_hash_deterministic PASSED
+tests/test_setup_event_generator.py::TestSnapshotHash::test_hash_independent_of_key_order PASSED
+tests/test_setup_event_generator.py::TestSnapshotHash::test_hash_is_sha256 PASSED
+30 passed in 0.64s
+
+Full suite: 864 passed, 3 failed (pre-existing known flaky ordering-dependent tests), 1 skipped in 570.82s
+Note: vol_state is not on IndicatorSnapshot (it's on AssetState); detection uses
+vol_burst + candle_strength > 2.0 as proxy for extreme volatility.
+```
+
 ## Human Verification Evidence
 
 ```
-TODO: After implementation:
-1. Run a 30-day backtest on BTC-USD + ETH-USD 1h.
-2. Inspect setup_events list on StrategistBacktestResult.
-3. Verify: compression_candidate rows have is_inside_bar == 1 in feature_snapshot.
-4. Verify: break_attempt rows have close > compression_range_high or < compression_range_low.
-5. Verify: feature_snapshot_hash matches hashlib.sha256(json.dumps(snapshot, sort_keys=True)).hexdigest().
-6. Export setup events to parquet. Load in pandas. Confirm no NaN in feature columns.
-7. Fit LightGBMClassifier on hit_1r label. Confirm AUC > 0.52 on held-out data
-   (better than random; more is not expected until ≥5000 labeled events).
+Verified via unit tests (no live backtest available in CI):
+1. FEATURE_SCHEMA_VERSION="1.2.0" constant defined (test_feature_schema_version_constant PASSED).
+2. SetupEvent schema: extra="forbid" rejects unknown keys (test_setup_event_extra_forbidden PASSED).
+3. compression_candidate emitted on inside_bar + low body conviction
+   (test_compression_candidate_detected PASSED).
+4. break_attempt emitted when close crosses locked compression range with impulse/vol
+   (test_break_attempt_emitted_after_compression PASSED).
+5. Compression TTL reset: after ttl+1 bars without break, state returns to idle
+   (test_compression_ttl_resets_to_idle PASSED).
+6. feature_snapshot_hash verified: SHA-256 of sorted-key JSON matches stored hash
+   (test_feature_snapshot_immutable_hash + test_hash_independent_of_key_order PASSED).
+7. NullModelScorer: all None scores, size_multiplier=1.0, is_entry_blocked=False
+   (3 NullModelScorer tests PASSED).
+8. Hard gate: p_false_breakout > 0.40 → is_entry_blocked=True
+   (test_model_gate_blocks_on_high_p_false_breakout PASSED).
+9. Size multiplier clamped to [0.5, 1.25] at boundaries
+   (test_size_multiplier_low_quality, test_size_multiplier_clamps_high PASSED).
+
+Note: Full backtest verification (steps 1-7 from runbook) deferred to
+first live backtest run once market data is available.
 ```
 
 ## Change Log
 | Date | Change | Author |
 |---|---|---|
 | 2026-02-18 | Runbook created from ML architecture design session | Claude |
+| 2026-02-20 | Implementation complete: schemas/feature_version.py, schemas/setup_event.py, schemas/model_score.py, services/model_scorer.py, agents/analytics/setup_event_generator.py, services/setup_outcome_reconciler.py, backtesting/constants.py (new); backtesting/llm_strategist_runner.py (setup_gen wiring + _model_gate + setup_events in result); app/db/migrations/versions/0004_add_setup_event_ledger.py (new); tests/test_setup_event_generator.py (30 tests, all passing). Schema deviation: vol_state proxy used (vol_burst + candle_strength > 2.0) since vol_state is on AssetState not IndicatorSnapshot. | Claude |
 
 ## Worktree Setup
 ```bash

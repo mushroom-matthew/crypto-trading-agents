@@ -48,6 +48,8 @@ async def _broadcast_to_websocket(event: Event) -> None:
         "plan_judged",
         "judge_action_applied",
         "judge_action_skipped",
+        "signal_emitted",
+        "fill_drift",
     }
 
     market_event_types = {
@@ -99,3 +101,38 @@ def set_event_store(store: EventStore) -> None:
     """Override the shared event store (useful for tests or custom wiring)."""
     global _store
     _store = store
+
+
+async def emit_signal_event(
+    signal: "SignalEvent",
+    *,
+    run_id: str | None = None,
+    persist_to_ledger: bool = True,
+) -> None:
+    """Emit a SignalEvent to the event store and optionally persist to signal_ledger.
+
+    DISCLAIMER: Signals are research-only observations. Not personalized investment advice.
+    Sizing decisions remain with each execution adapter.
+
+    Args:
+        signal: The emitted signal.
+        run_id: Strategy run ID for correlation.
+        persist_to_ledger: If True and DB is configured, insert into signal_ledger.
+    """
+    from schemas.signal_event import SignalEvent  # noqa: F401 (type check only at runtime)
+
+    await emit_event(
+        "signal_emitted",
+        payload=signal.model_dump(mode="json"),
+        source="strategy_engine",
+        run_id=run_id,
+        dedupe_key=signal.signal_id,
+    )
+
+    if persist_to_ledger:
+        try:
+            from services.signal_ledger_service import SignalLedgerService
+            await asyncio.to_thread(SignalLedgerService().insert_signal, signal)
+        except Exception as exc:
+            # Ledger write failure must never block signal emission
+            logger.warning("emit_signal_event: ledger write failed (non-fatal): %s", exc)
