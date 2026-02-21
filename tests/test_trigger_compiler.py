@@ -42,6 +42,7 @@ def _strategy_plan(run_id: str, entry_rule: str = "close > 0") -> StrategyPlan:
         entry_rule=entry_rule,
         exit_rule="close < 0",
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     return StrategyPlan(
         plan_id="plan_test",
@@ -196,6 +197,7 @@ def test_warns_cross_category_entries_same_symbol():
             entry_rule="close > sma_medium",
             exit_rule="close < sma_short",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_reversal",
@@ -205,6 +207,7 @@ def test_warns_cross_category_entries_same_symbol():
             entry_rule="rsi_14 < 30",
             exit_rule="rsi_14 > 70",
             category="reversal",
+            stop_loss_pct=2.0,
         ),
     ]
     warnings = warn_cross_category_exits(triggers)
@@ -223,6 +226,7 @@ def test_no_warning_single_category():
             entry_rule="close > sma_medium",
             exit_rule="close < sma_short",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_trend_2",
@@ -232,6 +236,7 @@ def test_no_warning_single_category():
             entry_rule="close > sma_long",
             exit_rule="close < sma_medium",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
     ]
     warnings = warn_cross_category_exits(triggers)
@@ -275,6 +280,7 @@ def test_enforce_exit_binding_relabels_mismatch():
             entry_rule="close > sma_medium",
             exit_rule="",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_exit",
@@ -305,6 +311,7 @@ def test_enforce_exit_binding_skips_emergency_exit():
             entry_rule="close > sma_medium",
             exit_rule="",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_emergency",
@@ -333,6 +340,7 @@ def test_enforce_exit_binding_no_change_when_matching():
             entry_rule="close > sma_medium",
             exit_rule="close < sma_short",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_exit",
@@ -366,6 +374,7 @@ def test_strip_degenerate_hold_rule():
             exit_rule="close < sma_short",
             category="trend_continuation",
             hold_rule="rsi_14 > 45",  # Degenerate
+            stop_loss_pct=2.0,
         ),
     ]
     stripped = strip_degenerate_hold_rules(triggers)
@@ -387,6 +396,7 @@ def test_preserve_compound_hold_rule():
             exit_rule="close < sma_short",
             category="trend_continuation",
             hold_rule="rsi_14 > 60 and close > sma_medium and atr_14 < 500",
+            stop_loss_pct=2.0,
         ),
     ]
     stripped = strip_degenerate_hold_rules(triggers)
@@ -409,6 +419,7 @@ def _plan_with_rule(entry_rule: str, run_id: str = "run_test") -> StrategyPlan:
         entry_rule=entry_rule,
         exit_rule="close < 0",
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     return StrategyPlan(
         plan_id="plan_test",
@@ -475,6 +486,7 @@ def test_enforce_plan_quality_full_pipeline():
             entry_rule="close > sma_medium",
             exit_rule="",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_exit",
@@ -523,6 +535,7 @@ def test_emergency_exit_survives_enforce_plan_quality():
             entry_rule="close > sma_medium",
             exit_rule="",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_emergency",
@@ -576,6 +589,7 @@ def test_enforce_exit_binding_exempts_multi_category_match():
             entry_rule="close > sma_medium",
             exit_rule="close < sma_short",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_mean_rev",
@@ -585,6 +599,7 @@ def test_enforce_exit_binding_exempts_multi_category_match():
             entry_rule="rsi_14 < 30",
             exit_rule="rsi_14 > 70",
             category="mean_reversion",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_exit_trend",
@@ -616,6 +631,7 @@ def test_enforce_exit_binding_strips_multi_category_no_match():
             entry_rule="close > sma_medium",
             exit_rule="close < sma_short",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_mean_rev",
@@ -625,6 +641,7 @@ def test_enforce_exit_binding_strips_multi_category_no_match():
             entry_rule="rsi_14 < 30",
             exit_rule="rsi_14 > 70",
             category="mean_reversion",
+            stop_loss_pct=2.0,
         ),
         TriggerCondition(
             id="btc_exit_other",
@@ -741,6 +758,7 @@ def _make_trigger(
         category=category,
         entry_rule=entry_rule,
         exit_rule=exit_rule,
+        stop_loss_pct=2.0,
     )
 
 
@@ -875,6 +893,7 @@ def test_enforce_plan_quality_includes_sanitization(run_id="sanitize_test"):
         entry_rule="rsi_14 < 35",
         exit_rule="not is_flat and (stop_hit or target_hit or macd_hist < 0)",
         category="reversal",
+        stop_loss_pct=2.0,
     )
     plan = StrategyPlan(
         plan_id="plan_sanitize",
@@ -911,6 +930,7 @@ def test_enforce_plan_quality_strict_mode_raises():
         entry_rule="close > 0",
         exit_rule="not is_flat and (stop_hit or position_age_minutes > 60)",
         category="reversal",
+        stop_loss_pct=2.0,
     )
     plan = StrategyPlan(
         plan_id="plan_strict",

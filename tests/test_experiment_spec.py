@@ -154,6 +154,7 @@ def test_experiment_exposure_symbol_filter():
         category="trend_continuation",
         learning_book=True,
         experiment_id="exp-003",
+        stop_loss_pct=2.0,
     )
     result = evaluator.evaluate(trigger, "entry", 50000.0, _portfolio(), _indicator())
     assert not result.allowed
@@ -190,6 +191,7 @@ def test_experiment_notional_cap():
         category="trend_continuation",
         learning_book=True,
         experiment_id="exp-004",
+        stop_loss_pct=2.0,
     )
     result = evaluator.evaluate(trigger, "entry", 50000.0, _portfolio(), _indicator())
     assert result.allowed
@@ -227,6 +229,7 @@ def test_experiment_category_filter():
         category="trend_continuation",
         learning_book=True,
         experiment_id="exp-005",
+        stop_loss_pct=2.0,
     )
     result = evaluator.evaluate(trigger, "entry", 50000.0, _portfolio(), _indicator())
     assert not result.allowed
@@ -261,6 +264,7 @@ def test_non_experiment_learning_trigger_ignores_spec():
         category="trend_continuation",
         learning_book=True,
         # No experiment_id
+        stop_loss_pct=2.0,
     )
     result = evaluator.evaluate(trigger, "entry", 50000.0, _portfolio(), _indicator())
     assert result.allowed

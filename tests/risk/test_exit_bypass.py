@@ -135,6 +135,7 @@ def test_regular_entry_blocked_by_zero_risk_budget() -> None:
         entry_rule="True",
         exit_rule="False",
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     plan = StrategyPlan(
         generated_at=now,

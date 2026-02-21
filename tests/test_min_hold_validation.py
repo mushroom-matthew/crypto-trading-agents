@@ -49,6 +49,7 @@ def _entry_trigger(timeframe: str = "5m") -> TriggerCondition:
         timeframe=timeframe,
         entry_rule="close > ema_short",
         exit_rule="close < ema_short",
+        stop_loss_pct=2.0,
     )
 
 
@@ -120,6 +121,7 @@ def test_no_exit_triggers():
             timeframe="5m",
             entry_rule="close > ema_short",
             exit_rule="",
+            stop_loss_pct=2.0,
         )
     ])
     warnings = validate_min_hold_vs_exits(plan, min_hold_hours=1.0)

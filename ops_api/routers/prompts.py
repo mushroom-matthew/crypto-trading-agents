@@ -94,6 +94,10 @@ STRATEGY_METADATA = {
         "name": "Balanced / Hybrid",
         "description": "Adapts to market regime with core + tactical positions. Well-rounded approach.",
     },
+    "compression_breakout": {
+        "name": "Compression Breakout",
+        "description": "Wait for BB bandwidth compression, then trade the expansion breakout with volume confirmation. Ideal for range/consolidation markets.",
+    },
     "default": {
         "name": "Default (Current)",
         "description": "The current strategist prompt with full feature set.",

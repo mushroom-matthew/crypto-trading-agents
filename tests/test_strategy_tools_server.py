@@ -60,6 +60,7 @@ def _base_plan(run_id: str) -> StrategyPlan:
         entry_rule="close > 0",
         exit_rule="close < 0",
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     plan = StrategyPlan(
         plan_id="plan_test",

@@ -52,6 +52,7 @@ def _base_plan() -> StrategyPlan:
         entry_rule="True",
         exit_rule="False",
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     return StrategyPlan(
         generated_at=now,

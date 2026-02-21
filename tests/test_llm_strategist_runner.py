@@ -68,7 +68,8 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
                 direction="long",
                 timeframe="1h",
                 entry_rule="timeframe=='1h'",
-                exit_rule="False",
+                exit_rule="not is_flat and (stop_hit or target_hit)",
+                stop_loss_pct=99.0,  # Stop at ~1% of price; unreachable on test candles (100-109)
             )
         ],
         risk_constraints=RiskConstraint(
@@ -260,6 +261,7 @@ def test_carry_forward_exit_triggers_for_open_positions():
                 category="mean_reversion",
                 entry_rule="rsi_14 < 40 and position == 'flat'",
                 exit_rule="close > sma_short",
+                stop_loss_pct=2.0,
             ),
             TriggerCondition(
                 id="eth_mean_reversion_long_1",
@@ -269,6 +271,7 @@ def test_carry_forward_exit_triggers_for_open_positions():
                 category="mean_reversion",
                 entry_rule="rsi_14 < 40 and position == 'flat'",
                 exit_rule="close > sma_short",
+                stop_loss_pct=2.0,
             ),
         ],
         risk_constraints=RiskConstraint(
@@ -300,6 +303,7 @@ def test_carry_forward_exit_triggers_for_open_positions():
                 category="trend_continuation",
                 entry_rule="rsi_14 > 60 and position == 'flat'",
                 exit_rule="rsi_14 < 50",
+                stop_loss_pct=2.0,
             )
         ],
         risk_constraints=RiskConstraint(
@@ -355,8 +359,9 @@ def test_cap_state_reports_policy_vs_derived(monkeypatch, tmp_path, strict_fixed
                 direction="long",
                 timeframe="1h",
                 entry_rule="timeframe=='1h'",
-                exit_rule="False",
+                exit_rule="not is_flat and close < 0",
                 category="trend_continuation",
+                stop_loss_pct=2.0,
             )
         ],
         risk_constraints=RiskConstraint(
@@ -500,7 +505,8 @@ def test_flatten_daily_zeroes_overnight_exposure(monkeypatch, tmp_path):
                 direction="long",
                 timeframe="1h",
                 entry_rule="timeframe=='1h'",
-                exit_rule="False",
+                exit_rule="not is_flat and close < 0",
+                stop_loss_pct=2.0,
             )
         ],
         risk_constraints=RiskConstraint(
@@ -558,8 +564,9 @@ def test_factor_exposures_in_reports(monkeypatch, tmp_path):
                 direction="long",
                 timeframe="1h",
                 entry_rule="timeframe=='1h'",
-                exit_rule="False",
+                exit_rule="not is_flat and close < 0",
                 category="trend_continuation",
+                stop_loss_pct=2.0,
             )
         ],
         risk_constraints=RiskConstraint(
@@ -620,8 +627,9 @@ def test_fee_aware_sizing_allows_full_fraction_entry(monkeypatch, tmp_path):
                 direction="long",
                 timeframe="1h",
                 entry_rule="timeframe=='1h' and position == 'flat'",
-                exit_rule="False",
+                exit_rule="not is_flat and close < 0",
                 category="trend_continuation",
+                stop_loss_pct=2.0,
             )
         ],
         risk_constraints=RiskConstraint(

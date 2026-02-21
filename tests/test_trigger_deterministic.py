@@ -387,6 +387,7 @@ class TestTriggerValidation:
             category="trend_continuation",
             entry_rule="close > sma_short and tf_4h_close > tf_4h_sma_short",
             exit_rule="tf_1h_rsi_14 < 30",
+            stop_loss_pct=2.0,
         )
 
         # Only 5m is available

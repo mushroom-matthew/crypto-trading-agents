@@ -86,6 +86,7 @@ class TriggerEngine:
         evaluator: RuleEvaluator | None = None,
         trade_risk: TradeRiskEvaluator | None = None,
         stop_distance_resolver: Callable[[TriggerCondition, IndicatorSnapshot, Bar], float | None] | None = None,
+        min_rr_ratio: float = 1.2,
         confidence_override_threshold: Literal["A", "B", "C"] | None = "A",
         min_hold_bars: int = 4,
         trade_cooldown_bars: int = 2,
@@ -106,6 +107,9 @@ class TriggerEngine:
             risk_engine: Risk engine for position sizing
             evaluator: Rule evaluator (optional)
             trade_risk: Trade risk evaluator (optional)
+            min_rr_ratio: Minimum risk-to-reward ratio required for entry when
+                target_anchor_type is set (default 1.2). Entries whose prospective R:R
+                falls below this threshold are blocked with reason "insufficient_rr".
             confidence_override_threshold: Minimum confidence grade for entry to override exit.
                 "A" = only A-grade entries override exits (most conservative)
                 "B" = A or B grade entries override exits
@@ -136,6 +140,7 @@ class TriggerEngine:
         self.evaluator = evaluator or RuleEvaluator()
         self.trade_risk = trade_risk or TradeRiskEvaluator(risk_engine)
         self.stop_distance_resolver = stop_distance_resolver
+        self.min_rr_ratio = max(0.0, min_rr_ratio)
         self.judge_constraints = judge_constraints
         self.confidence_override_threshold = confidence_override_threshold
         self.min_hold_bars = max(0, min_hold_bars)
@@ -574,6 +579,53 @@ class TriggerEngine:
     def _emergency_cooldown_bars(self) -> int:
         return max(1, self.trade_cooldown_bars, self.min_hold_bars)
 
+    def _compute_target_distance(
+        self,
+        trigger: TriggerCondition,
+        indicator: IndicatorSnapshot,
+        entry_price: float,
+        stop_distance: float,
+        direction: str,
+    ) -> float | None:
+        """Return the projected distance from entry to target, or None if unresolvable.
+
+        Mirrors the anchor logic in _resolve_target_price_anchored so the R:R
+        check can run at order-generation time without importing backtesting code.
+        """
+        anchor = trigger.target_anchor_type
+        if not anchor:
+            return None
+
+        if anchor == "r_multiple_2":
+            return stop_distance * 2.0
+        if anchor == "r_multiple_3":
+            return stop_distance * 3.0
+
+        if anchor == "measured_move":
+            upper = indicator.donchian_upper_short
+            lower = indicator.donchian_lower_short
+            if upper is not None and lower is not None and upper > lower:
+                return upper - lower
+            return None
+
+        if anchor in {"htf_daily_high", "htf_daily_extreme"} and direction == "long":
+            level = indicator.htf_daily_high
+            return abs(level * 0.998 - entry_price) if level else None
+
+        if anchor in {"htf_5d_high", "htf_5d_extreme"} and direction == "long":
+            level = indicator.htf_5d_high
+            return abs(level * 0.998 - entry_price) if level else None
+
+        if anchor in {"htf_daily_low", "htf_daily_extreme"} and direction == "short":
+            level = indicator.htf_daily_low
+            return abs(entry_price - level * 1.002) if level else None
+
+        if anchor in {"htf_5d_low", "htf_5d_extreme"} and direction == "short":
+            level = indicator.htf_5d_low
+            return abs(entry_price - level * 1.002) if level else None
+
+        return None
+
     def _entry_order(
         self,
         trigger: TriggerCondition,
@@ -610,6 +662,22 @@ class TriggerEngine:
                 self._record_block(block_entries, trigger, check.reason, detail, bar)
             return None
         side: Literal["buy", "sell"] = "buy" if desired == "long" else "sell"
+        # R:R gate: when a target anchor is defined, the prospective reward/risk ratio
+        # must meet the minimum threshold before capital is committed.
+        if trigger.target_anchor_type and stop_distance and stop_distance > 0 and self.min_rr_ratio > 0:
+            direction_str = "long" if side == "buy" else "short"
+            target_dist = self._compute_target_distance(trigger, indicator, bar.close, stop_distance, direction_str)
+            if target_dist is not None:
+                rr = target_dist / stop_distance
+                if rr < self.min_rr_ratio:
+                    if block_entries is not None:
+                        detail = (
+                            f"R:R {rr:.2f} < minimum {self.min_rr_ratio:.2f} "
+                            f"(stop={stop_distance:.4f}, target_dist={target_dist:.4f}, "
+                            f"anchor={trigger.target_anchor_type})"
+                        )
+                        self._record_block(block_entries, trigger, "insufficient_rr", detail, bar)
+                    return None
         return Order(
             symbol=trigger.symbol,
             side=side,

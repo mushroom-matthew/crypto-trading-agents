@@ -53,6 +53,7 @@ def _learning_trigger(direction: str = "long") -> TriggerCondition:
         confidence_grade="B",
         learning_book=True,
         experiment_id="exp-001",
+        stop_loss_pct=2.0,
     )
 
 
@@ -66,6 +67,7 @@ def _profit_trigger() -> TriggerCondition:
         exit_rule="",
         category="trend_continuation",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
 
 

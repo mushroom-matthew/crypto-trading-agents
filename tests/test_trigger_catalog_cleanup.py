@@ -43,6 +43,7 @@ def test_prunes_dead_exit_variants(tmp_path):
                 entry_rule="True",
                 exit_rule="False",
                 category="mean_reversion",
+                stop_loss_pct=2.0,
             ),
             TriggerCondition(
                 id="btc_mean_reversion_exit_exit",

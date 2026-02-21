@@ -54,6 +54,7 @@ def _plan_without_limits() -> StrategyPlan:
         timeframe="1h",
         entry_rule="True",
         exit_rule="False",
+        stop_loss_pct=2.0,
     )
     return StrategyPlan(
         generated_at=now,

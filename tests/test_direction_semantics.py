@@ -78,6 +78,7 @@ def test_exit_direction_not_blocked(monkeypatch, tmp_path):
                 entry_rule="timeframe=='1h'",
                 exit_rule="False",
                 category="trend_continuation",
+                stop_loss_pct=2.0,
             ),
             TriggerCondition(
                 id="emergency_exit",
@@ -141,6 +142,7 @@ def test_invalid_direction_rejected(tmp_path):
                 entry_rule="timeframe=='1h'",
                 exit_rule="False",
                 category="trend_continuation",
+                stop_loss_pct=2.0,
             )
         ],
         risk_constraints=RiskConstraint(**_risk_params()),

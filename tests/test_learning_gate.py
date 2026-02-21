@@ -227,6 +227,7 @@ def test_profit_trades_ignore_gate():
         category="trend_continuation",
         confidence_grade="A",
         learning_book=False,
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([profit_trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -257,6 +258,7 @@ def test_learning_trigger_blocked_by_closed_gate():
         category="trend_continuation",
         confidence_grade="B",
         learning_book=True,
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([learning_trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -287,6 +289,7 @@ def test_learning_trigger_passes_when_gate_open():
         category="trend_continuation",
         confidence_grade="A",
         learning_book=True,
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([learning_trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})

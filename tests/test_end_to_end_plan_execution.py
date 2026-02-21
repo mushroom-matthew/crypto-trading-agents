@@ -80,6 +80,7 @@ def _simple_plan() -> StrategyPlan:
         entry_rule="timeframe=='1h' and close < 100",
         exit_rule="close > 120",
         category="mean_reversion",
+        stop_loss_pct=10.0,  # Wide stop (85.5 for entry=95); test lows are 94, never fires
     )
     return StrategyPlan(
         generated_at=now,

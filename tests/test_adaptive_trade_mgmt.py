@@ -133,6 +133,7 @@ def _engine() -> TriggerEngine:
             entry_rule="False",
             exit_rule="False",
             category="trend_continuation",
+            stop_loss_pct=2.0,
         )
     ])
     risk_engine = RiskEngine(plan.risk_constraints, {})

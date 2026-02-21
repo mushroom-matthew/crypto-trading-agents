@@ -482,49 +482,171 @@ export function PaperTradingControl() {
                   </p>
                 </div>
               </div>
-              {Object.keys(portfolio.positions).length > 0 && (
-                <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                  <p className="text-sm font-medium mb-2">Open Positions</p>
-                  <div className="space-y-2">
-                    {Object.entries(portfolio.positions).map(([symbol, qty]) => {
-                      const entryPx = portfolio.entry_prices[symbol] || 0;
-                      const lastPx = portfolio.last_prices[symbol] || entryPx;
-                      const pnlPct = entryPx > 0 ? ((lastPx - entryPx) / entryPx) * 100 : 0;
-                      const meta = portfolio.position_meta?.[symbol];
-                      const stopPx = meta?.stop_price_abs ?? null;
-                      const targetPx = meta?.target_price_abs ?? null;
-                      return (
-                        <div key={symbol} className="text-sm space-y-0.5">
-                          <div className="flex justify-between items-center">
-                            <span className="font-mono font-medium">{symbol}</span>
-                            <div className="text-right">
-                              <span className="font-semibold">{qty.toFixed(6)}</span>
-                              <span className="text-gray-500 ml-2">@ {formatCurrency(entryPx)}</span>
-                              <span className={cn('ml-2 font-medium', pnlPct >= 0 ? 'text-green-600' : 'text-red-600')}>
-                                {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+              {Object.keys(portfolio.positions).length > 0 && (() => {
+                const posEntries = Object.entries(portfolio.positions);
+                let totalExposure = 0;
+                let totalAtRisk = 0;
+                let positionsWithoutStop = 0;
+
+                // Pre-compute per-position values for aggregate panel
+                const posData = posEntries.map(([symbol, qty]) => {
+                  const entryPx = portfolio.entry_prices[symbol] || 0;
+                  const lastPx = portfolio.last_prices[symbol] || entryPx;
+                  const meta = portfolio.position_meta?.[symbol];
+                  const stopPx = meta?.stop_price_abs ?? null;
+                  const targetPx = meta?.target_price_abs ?? null;
+                  const side = meta?.entry_side ?? 'long';
+                  const category = meta?.entry_category ?? null;
+                  const absQty = Math.abs(qty);
+                  const notional = entryPx * absQty;
+                  const pnlAbs = (lastPx - entryPx) * absQty * (side === 'short' ? -1 : 1);
+                  const pnlPct = entryPx > 0 ? (pnlAbs / notional) * 100 : 0;
+                  const riskAbs = stopPx !== null ? Math.abs(entryPx - stopPx) * absQty : null;
+                  const stopDistPct = stopPx !== null && lastPx > 0 ? Math.abs(lastPx - stopPx) / lastPx * 100 : null;
+                  const tgtDistPct = targetPx !== null && lastPx > 0 ? Math.abs(targetPx - lastPx) / lastPx * 100 : null;
+                  const stopSpan = stopPx !== null ? Math.abs(entryPx - stopPx) : null;
+                  const currentR = stopSpan && stopSpan > 0
+                    ? (side === 'short' ? (entryPx - lastPx) : (lastPx - entryPx)) / stopSpan
+                    : null;
+                  const rrRatio = stopSpan && stopSpan > 0 && targetPx !== null
+                    ? Math.abs(targetPx - entryPx) / stopSpan
+                    : null;
+                  const riskPct = riskAbs !== null && portfolio.total_equity > 0
+                    ? riskAbs / portfolio.total_equity * 100
+                    : null;
+
+                  totalExposure += notional;
+                  if (riskAbs !== null) totalAtRisk += riskAbs;
+                  if (stopPx === null) positionsWithoutStop++;
+
+                  return { symbol, qty: absQty, entryPx, lastPx, meta, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio };
+                });
+
+                const exposurePct = portfolio.total_equity > 0 ? totalExposure / portfolio.total_equity * 100 : 0;
+                const totalRiskPct = portfolio.total_equity > 0 ? totalAtRisk / portfolio.total_equity * 100 : 0;
+
+                return (
+                  <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                    <p className="text-sm font-medium mb-3">Open Positions</p>
+                    <div className="space-y-3">
+                      {posData.map(({ symbol, qty, entryPx, lastPx, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio }) => (
+                        <div key={symbol} className="text-sm rounded-md border border-gray-200 dark:border-gray-700 p-2.5 space-y-1.5">
+                          {/* Header row: symbol + badges */}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono font-semibold">{symbol}</span>
+                            <span className={cn(
+                              'text-xs font-bold px-1.5 py-0.5 rounded',
+                              side === 'short'
+                                ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
+                                : 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+                            )}>
+                              {side.toUpperCase()}
+                            </span>
+                            {category && (
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400">
+                                {category}
                               </span>
-                            </div>
+                            )}
                           </div>
-                          {(stopPx !== null || targetPx !== null) && (
-                            <div className="flex gap-4 text-xs pl-1">
-                              {stopPx !== null && (
-                                <span className="text-red-500 font-mono">
-                                  ↓ stop {formatCurrency(stopPx)}
+                          {/* Size + current price + P&L */}
+                          <div className="flex justify-between items-baseline text-xs text-gray-600 dark:text-gray-400">
+                            <span className="font-mono">
+                              {qty.toFixed(6)} @ {formatCurrency(entryPx)}
+                              <span className="ml-2 text-gray-400">Notional: {formatCurrency(notional)}</span>
+                            </span>
+                            <span className={cn('font-semibold', pnlAbs >= 0 ? 'text-green-600' : 'text-red-600')}>
+                              {pnlAbs >= 0 ? '+' : ''}{formatCurrency(pnlAbs)} ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            Current: <span className="font-mono text-gray-700 dark:text-gray-300">{formatCurrency(lastPx)}</span>
+                          </div>
+                          {/* Stop row */}
+                          {stopPx !== null ? (
+                            <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400 font-mono">
+                              <span>↓ Stop</span>
+                              <span className="font-semibold">{formatCurrency(stopPx)}</span>
+                              {stopDistPct !== null && (
+                                <span className="text-gray-500">({stopDistPct.toFixed(1)}% away)</span>
+                              )}
+                              {riskAbs !== null && (
+                                <span className="ml-auto text-gray-600 dark:text-gray-400">
+                                  At risk: {formatCurrency(riskAbs)}
+                                  {riskPct !== null && <span className="ml-1">({riskPct.toFixed(2)}% equity)</span>}
                                 </span>
                               )}
-                              {targetPx !== null && (
-                                <span className="text-green-500 font-mono">
-                                  ↑ target {formatCurrency(targetPx)}
+                            </div>
+                          ) : (
+                            <div className="text-xs text-amber-600 dark:text-amber-400 font-medium">
+                              ── No stop set ──
+                            </div>
+                          )}
+                          {/* Target row */}
+                          {targetPx !== null && (
+                            <div className="flex items-center gap-2 text-xs text-green-600 dark:text-green-400 font-mono">
+                              <span>↑ Target</span>
+                              <span className="font-semibold">{formatCurrency(targetPx)}</span>
+                              {tgtDistPct !== null && (
+                                <span className="text-gray-500">({tgtDistPct.toFixed(1)}% away)</span>
+                              )}
+                              {rrRatio !== null && (
+                                <span className="ml-1 text-gray-600 dark:text-gray-400">R:R 1:{rrRatio.toFixed(1)}</span>
+                              )}
+                              {currentR !== null && (
+                                <span className={cn(
+                                  'ml-auto font-semibold',
+                                  currentR >= 0 ? 'text-green-600' : 'text-red-500'
+                                )}>
+                                  {currentR >= 0 ? '+' : ''}{currentR.toFixed(2)}r
                                 </span>
                               )}
                             </div>
                           )}
+                          {/* Current R when target not set but stop is */}
+                          {targetPx === null && currentR !== null && (
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              Current R: <span className={cn('font-semibold', currentR >= 0 ? 'text-green-600' : 'text-red-500')}>
+                                {currentR >= 0 ? '+' : ''}{currentR.toFixed(2)}r
+                              </span>
+                            </div>
+                          )}
                         </div>
-                      );
-                    })}
+                      ))}
+                    </div>
+                    {/* Risk Assessment summary panel */}
+                    <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+                      <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide mb-2">Risk Assessment</p>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Positions</span>
+                          <span className="font-medium">{posEntries.length}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Exposure</span>
+                          <span className="font-mono font-medium">
+                            {formatCurrency(totalExposure)} <span className="text-gray-400">({exposurePct.toFixed(1)}%)</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">At risk</span>
+                          <span className="font-mono font-medium text-red-600 dark:text-red-400">
+                            {formatCurrency(totalAtRisk)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Risk/equity</span>
+                          <span className="font-mono font-medium">{totalRiskPct.toFixed(2)}%</span>
+                        </div>
+                      </div>
+                      {positionsWithoutStop > 0 && (
+                        <div className="mt-2 text-xs text-amber-600 dark:text-amber-400 font-medium">
+                          ⚠ {positionsWithoutStop} position{positionsWithoutStop > 1 ? 's' : ''} {positionsWithoutStop > 1 ? 'have' : 'has'} no stop set
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           )}
 

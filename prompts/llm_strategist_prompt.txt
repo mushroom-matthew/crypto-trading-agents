@@ -61,7 +61,10 @@ Multi-layer synthesis requirements:
    - For short entries: use "is_flat" (strict) or "not is_short" (allows scale-ins from flat or long)
    - For exit/flat rules: use "not is_flat" to ensure there's a position to exit
    IMPORTANT: Use boolean indicators (is_flat, is_long, is_short) instead of string comparisons like position == 'flat'. The boolean form is more reliable.
-   IMPORTANT - Short entries require stop_loss_pct: All triggers with direction="short" MUST include stop_loss_pct (e.g., 2.0 for a 2% stop). Shorts without stop_loss_pct will be BLOCKED by the risk engine.
+   IMPORTANT - All entry triggers (long AND short) MUST define a stop and a target. A stop is required to compute position size. A target is required to evaluate R:R before committing capital. Plans missing either will be REJECTED at validation time.
+   - Stop: set stop_anchor_type to a structural level (e.g. 'htf_daily_extreme', 'donchian_extreme', 'atr') OR set stop_loss_pct > 0 for a percentage stop. Prefer structural anchors over percentage stops when htf_* or donchian fields are available.
+   - Target: set target_anchor_type (e.g. 'htf_daily_extreme', 'htf_5d_extreme', 'measured_move', 'r_multiple_2'). r_multiple_2 (2× risk) and r_multiple_3 (3× risk) guarantee R:R regardless of market structure; structural anchors use actual price levels.
+   - R:R requirement: the prospective risk-to-reward ratio must be ≥ 1.2. Entries where the target distance / stop distance < 1.2 are BLOCKED at order time. To guarantee passage, use r_multiple_2 (R:R = 2.0) or r_multiple_3 (R:R = 3.0). For structural anchors (htf_daily_extreme, htf_5d_extreme), verify the target level is far enough from entry relative to the stop; if the target is too close, widen the timeframe or use a different target anchor.
    Scale-in behavior: The risk engine allows scale-ins (adding to existing positions in the same direction) subject to aggregate risk limits. When scaling in, the existing position's risk is subtracted from the risk cap, and only the remaining risk budget is available for the new entry. If aggregate risk would exceed max_position_risk_pct, the scale-in is blocked. Use "is_flat" in entry_rules if you want to prevent scale-ins; use "not is_short" (for longs) to allow scale-ins.
 9. Hold rules (optional): Use hold_rule to prevent premature exits from minor fluctuations. When hold_rule evaluates to True, the exit_rule is suppressed and the position is maintained. Emergency exits ALWAYS fire regardless of hold_rule. Use hold_rule when:
    - A trend-following position should ride minor pullbacks (e.g., hold_rule="tf_4h_close > tf_4h_sma_medium and rsi_14 > 40")
@@ -202,7 +205,9 @@ Trimmed output example:
       "timeframe": "1h",
       "entry_rule": "is_flat and timeframe=='1h' and trend_state=='uptrend' and close > sma_medium and tf_4h_close > tf_4h_sma_medium and tf_1h_rsi_14 between 48 and 62 and atr_14 < tf_4h_atr_14 and macd_hist > 0",
       "exit_rule": "not is_flat and (close < sma_medium or tf_4h_rsi_14 < 50 or realized_vol_short > tf_4h_realized_vol_medium)",
-      "hold_rule": "tf_4h_close > tf_4h_sma_medium and rsi_14 > 40 and vol_state != 'extreme'"
+      "hold_rule": "tf_4h_close > tf_4h_sma_medium and rsi_14 > 40 and vol_state != 'extreme'",
+      "stop_anchor_type": "htf_daily_extreme",
+      "target_anchor_type": "htf_5d_extreme"
     },
     {
       "id": "btc_risk_reduce_overbought",

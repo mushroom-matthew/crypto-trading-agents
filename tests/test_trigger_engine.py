@@ -81,6 +81,7 @@ def test_trigger_engine_records_block_when_risk_denies_entry():
         entry_rule="True",
         exit_rule="",
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     plan = _plan(trigger)
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -124,6 +125,7 @@ def test_emergency_exit_vetoes_same_bar_entry():
         entry_rule="False",
         exit_rule="True",
         category="emergency_exit",
+        stop_loss_pct=2.0,
     )
     plan = _plan(trigger)
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -157,6 +159,7 @@ def test_emergency_exit_vetoes_min_hold_on_next_bar():
         entry_rule="False",
         exit_rule="True",
         category="emergency_exit",
+        stop_loss_pct=2.0,
     )
     plan = _plan(trigger)
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -202,6 +205,7 @@ def test_emergency_exit_min_hold_allows_on_threshold_bar():
         entry_rule="False",
         exit_rule="True",
         category="emergency_exit",
+        stop_loss_pct=2.0,
     )
     plan = _plan(trigger)
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -266,6 +270,7 @@ def test_emergency_exit_dedup_overrides_high_conf_entry():
         exit_rule="False",
         category="trend_continuation",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
     emergency_trigger = TriggerCondition(
         id="btc_emergency_exit",
@@ -276,6 +281,7 @@ def test_emergency_exit_dedup_overrides_high_conf_entry():
         exit_rule="True",
         category="emergency_exit",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([entry_trigger, emergency_trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -320,6 +326,7 @@ def test_emergency_exit_dedup_wins_even_with_permissive_risk():
         exit_rule="True",
         category="emergency_exit",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
     entry_trigger = TriggerCondition(
         id="btc_entry",
@@ -330,6 +337,7 @@ def test_emergency_exit_dedup_wins_even_with_permissive_risk():
         exit_rule="False",
         category="trend_continuation",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
     # Emergency first: produces flatten, then entry fires on rebuilt portfolio
     plan = _plan_with_triggers([emergency_trigger, entry_trigger])
@@ -376,6 +384,7 @@ def test_emergency_exit_bypasses_hold_rule():
         exit_rule="True",
         hold_rule="True",  # hold_rule always active — would suppress a normal exit
         category="emergency_exit",
+        stop_loss_pct=2.0,
     )
     plan = _plan(trigger)
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -410,6 +419,7 @@ def test_regular_exit_respects_hold_rule():
         exit_rule="True",
         hold_rule="True",  # hold_rule always active
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     plan = _plan(trigger)
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -445,6 +455,7 @@ def test_judge_disabled_category_blocks_emergency_exit():
         entry_rule="False",
         exit_rule="True",
         category="emergency_exit",
+        stop_loss_pct=2.0,
     )
     plan = _plan(trigger)
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -491,6 +502,7 @@ def test_emergency_exit_missing_exit_rule_rejected_by_schema(exit_rule):
             entry_rule="False",
             exit_rule=exit_rule,
             category="emergency_exit",
+            stop_loss_pct=2.0,
         )
 
 
@@ -505,6 +517,7 @@ def test_emergency_exit_none_exit_rule_rejected_by_schema():
             entry_rule="False",
             exit_rule=None,
             category="emergency_exit",
+            stop_loss_pct=2.0,
         )
 
 
@@ -535,6 +548,7 @@ def test_emergency_exit_missing_exit_rule_runtime_defense(exit_rule):
         entry_rule="False",
         exit_rule="True",
         category="emergency_exit",
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([valid_trigger])
     plan.__dict__["triggers"] = [trigger]
@@ -571,6 +585,7 @@ def test_conflicting_signal_policy_skips_orders(policy: str):
         exit_rule="",
         category="trend_continuation",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -610,6 +625,7 @@ def test_conflicting_signal_policy_exit_flattens():
         exit_rule="",
         category="trend_continuation",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -654,6 +670,7 @@ def test_learning_tags_propagate_to_order():
         confidence_grade="A",
         learning_book=True,
         experiment_id="exp-001",
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -688,6 +705,7 @@ def test_default_order_has_no_learning_tags():
         exit_rule="",
         category="trend_continuation",
         confidence_grade="A",
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})
@@ -1500,6 +1518,7 @@ def test_per_trigger_fire_rate():
         exit_rule="close < 0",  # Never fires
         category="trend_continuation",
         confidence_grade="B",
+        stop_loss_pct=2.0,
     )
     plan = _plan_with_triggers([trigger])
     risk_engine = RiskEngine(plan.risk_constraints, {})

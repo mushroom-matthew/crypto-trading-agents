@@ -271,6 +271,21 @@ class TriggerCondition(SerializableModel):
         # risk_reduce should have exit_fraction (warn but don't require for now)
         # This allows gradual adoption without breaking existing code
 
+        # Entry triggers (long/short) must define a stop so that position size and
+        # R:R can be computed before committing capital.
+        if self.direction in {"long", "short"}:
+            has_structural_anchor = (
+                self.stop_anchor_type is not None and self.stop_anchor_type != "pct"
+            )
+            has_pct_stop = self.stop_loss_pct is not None and self.stop_loss_pct > 0
+            if not (has_structural_anchor or has_pct_stop):
+                raise ValueError(
+                    f"Entry trigger '{self.id}' (direction='{self.direction}') must define a stop. "
+                    "Set stop_anchor_type (e.g. 'htf_daily_extreme', 'atr', 'donchian_extreme') "
+                    "or stop_loss_pct > 0. A stop is required to compute position size and "
+                    "evaluate risk-to-reward before entry."
+                )
+
         return self
 
 

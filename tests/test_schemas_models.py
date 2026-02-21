@@ -24,6 +24,7 @@ def _legacy_plan_payload() -> dict:
                 "timeframe": "1h",
                 "entry_rule": "close > sma_short",
                 "exit_rule": "close < sma_medium",
+                "stop_loss_pct": 2.0,
             }
         ],
         "risk_constraints": {

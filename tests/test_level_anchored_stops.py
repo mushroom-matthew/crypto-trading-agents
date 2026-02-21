@@ -72,6 +72,7 @@ def _trigger(**kwargs) -> TriggerCondition:
         exit_rule="below_stop",
         confidence_grade="A",
         category="trend_continuation",
+        stop_loss_pct=2.0,
     )
     defaults.update(kwargs)
     return TriggerCondition(**defaults)
@@ -99,13 +100,12 @@ def test_stop_pct_short():
     assert price == pytest.approx(51000.0, rel=1e-6)
 
 
-def test_stop_pct_no_pct_returns_none():
-    """'pct' anchor with no stop_loss_pct → (None, None)."""
-    trig = _trigger(stop_anchor_type="pct")
-    snap = _snapshot()
-    price, anchor = _resolve_stop_price_anchored(trig, 50000.0, snap, "long")
-    assert price is None
-    assert anchor is None
+def test_stop_pct_no_pct_raises_validation():
+    """stop_anchor_type='pct' with no stop_loss_pct is rejected by schema validation."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+    with _pytest.raises(ValidationError, match="must define a stop"):
+        _trigger(stop_anchor_type="pct", stop_loss_pct=None)
 
 
 def test_stop_atr_long():

@@ -25,6 +25,7 @@ def _plan_with_triggers(symbol: str) -> list[TriggerCondition]:
                 exit_rule="close < 0",
                 category=category,
                 confidence_grade="A" if idx % 2 == 0 else "B",
+                stop_loss_pct=2.0,
             )
         )
     return triggers
