@@ -7,9 +7,43 @@ The LLM's role shifts from "write RSI thresholds for BTC and ETH" to "here are 5
 
 This runbook does NOT require the LLM to scan 200 symbols. The screener is a lightweight deterministic pass that reduces the universe to ~5-10 candidates. The LLM then decides among pre-filtered options.
 
+## Amendment (2026-02-21): Template Pre-Selection
+
+The user's instrument-level strategy should not require them to configure trigger rules.
+Instead, the screener is the user's strategic lever — sniffer configuration determines
+which instruments are surfaced and, as of this amendment, which strategy template is
+applied to each. The LLM's instrument-level role becomes: choose the instrument and
+confirm or adjust the template suggestion, not author trigger DSL from scratch.
+
+**Additional scope items added by this amendment:**
+
+- `InstrumentRecommendation` gains a `template_id: str | None` field populated by
+  deterministic score-based logic (not the LLM):
+  - `compression_score > 0.60` → `template_id = "compression_breakout"`
+  - `expansion_score > 0.55` AND `trend_state in ["uptrend", "unclear"]` →
+    `template_id = "volatile_breakout"` (or `"bull_trending"` if HTF trend confirmed)
+  - `expansion_score > 0.55` AND `trend_state = "downtrend"` →
+    `template_id = "bear_defensive"`
+  - `composite_score < 0.30` (low anomaly) → `template_id = "uncertain_wait"`
+  - Otherwise → `template_id = None` (LLM picks from retrieved candidates)
+- The LLM prompt for `instrument_recommendation.txt` receives the pre-selected
+  `template_id` as a suggestion, not a mandate. The LLM may override it with a brief
+  justification. This keeps human-level reasoning in the loop while biasing toward
+  the deterministic suggestion.
+- `screener_config` in `ScreenerResult` records the weight profile used so the operator
+  can audit which tuning produced which template suggestions.
+
+**Sniffer tuning as the user strategy interface:** The `SCREENER_COMPRESSION_WEIGHT` and
+`SCREENER_EXPANSION_WEIGHT` env vars now directly influence which template gets suggested
+to active instruments. A user who increases compression weight → more instruments
+surfaced as compression_breakout candidates → more compression_breakout plans generated.
+This is how user strategic intent propagates to the instrument level without requiring
+trigger authorship.
+
 ## Scope
 1. **`services/universe_screener_service.py`** — anomaly scoring logic for a symbol list
 2. **`schemas/screener.py`** — `ScreenerResult`, `InstrumentRecommendation` Pydantic models
+   (add `template_id: str | None` to `InstrumentRecommendation`)
 3. **`workflows/universe_screener_workflow.py`** — Temporal workflow (periodic screening cadence)
 4. **`services/strategist_plan_service.py`** — consume instrument recommendation at plan initialization
 5. **`worker/agent_worker.py`** — register new workflow

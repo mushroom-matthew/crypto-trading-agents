@@ -24,6 +24,9 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [41-htf-structure-cascade.md](41-htf-structure-cascade.md): Always load daily candles as an anchor layer — 12 new `htf_*` fields (daily_high, daily_low, prev_daily_high, 5d_high, daily_atr, etc.) for level-based stop and target anchoring. Prerequisite for Runbook 42.
 - [42-level-anchored-stops.md](42-level-anchored-stops.md): Absolute stop/target prices stored per TradeLeg at fill time — 7 stop anchor types (htf_daily_low, donchian_lower, candle_low, atr, etc.), 6 target types (measured_move, htf_daily_high, r_multiple). Exposes `below_stop` and `above_target` as trigger identifiers. Depends on Runbooks 41 and 38.
 - [43-signal-ledger-and-reconciler.md](43-signal-ledger-and-reconciler.md): Signal Ledger + Outcome Reconciler — `SignalEvent` schema with full provenance, persistent `signal_ledger` table, fill drift telemetry (slippage_bps, fill_latency_ms), MFE/MAE tracking, and 5 statistical capital gates. Foundation for monetizable signal track record. Depends on Runbook 42 for stop/target fields.
+- [46-template-matched-plan-generation.md](46-template-matched-plan-generation.md): Wire vector store retrieval to concrete prompt templates — adds `compression_breakout.md` to vector store, `RetrievalResult` returns `template_id`, `generate_plan()` loads matching `prompts/strategies/*.txt` automatically. Zero schema changes. Gate: R39 screener in paper trading.
+- [47-hard-template-binding.md](47-hard-template-binding.md): `template_id` field on `StrategyPlan` + trigger compiler enforcement — triggers using identifiers outside the declared template's allowed set are blocked at compile time. Backwards compatible (Optional field). Gate: R46 retrieval routing validated ≥ 80% accuracy.
+- [48-research-budget-paper-trading.md](48-research-budget-paper-trading.md): Research budget in paper trading — separate ledger + capital pool for hypothesis testing; `PlaybookOutcomeAggregator` writes validated stats to `vector_store/playbooks/*.md`; judge gains `suggest_experiment` and `update_playbook` actions. All 7 playbooks updated with hypothesis + validation evidence structure. Parallel-safe with Runbooks 46/47.
 - ~~04-emergency-exit-runbook-hold-cooldown.md~~: Min-hold and cooldown enforcement. → Completed, see [X-emergency-exit-runbook-hold-cooldown.md](X-emergency-exit-runbook-hold-cooldown.md).
 - ~~05-emergency-exit-runbook-bypass-override.md~~: Bypass and override behavior. → Completed, see [X-emergency-exit-runbook-bypass-override.md](X-emergency-exit-runbook-bypass-override.md).
 - ~~06-emergency-exit-runbook-edge-cases.md~~: Emergency-exit edge cases. → Completed, see [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md).
@@ -117,22 +120,75 @@ Runbooks 37–43 represent a product direction shift: from "LLM writes indicator
 21. **37**: Risk budget commit actual (255x overcharge blocks all real-capital use cases) ✅ implemented
 
 **Stratum A — Feature foundations + Signal infrastructure (parallel-safe):**
-22. **38**: Candlestick pattern features (independent; adds 15 identifiers to feature vector)
-23. **41**: HTF structure cascade (independent; adds 12 daily anchor fields)
-24. **43**: Signal ledger & outcome reconciler (Signal→Risk Policy→Execution Adapter architecture; statistical capital gates; requires 42 for stop/target fields)
+22. **38**: Candlestick pattern features (independent; adds 15 identifiers to feature vector) ✅ implemented
+23. **41**: HTF structure cascade (independent; adds 12 daily anchor fields) ✅ implemented
+24. **43**: Signal ledger & outcome reconciler (Signal→Risk Policy→Execution Adapter architecture; statistical capital gates; requires 42 for stop/target fields) ✅ implemented
 
 **Stratum B — Strategy templates (after Stratum A merges):**
-25. **40**: Compression breakout template (requires 38 for is_impulse_candle, is_inside_bar)
-26. **42**: Level-anchored stops (requires 38 for candle_low anchor, 41 for htf_daily_low anchor)
+25. **40**: Compression breakout template (requires 38 for is_impulse_candle, is_inside_bar) ✅ implemented
+26. **42**: Level-anchored stops (requires 38 for candle_low anchor, 41 for htf_daily_low anchor) ✅ implemented
 
 **Stratum C — Market intelligence (after Stratum B validates in paper trading):**
 27. **39**: Universe screener (standalone; can be built in parallel but validated after 40/42)
+    - **Amendment (2026-02-21)**: Screener pre-selects `template_id` deterministically from
+      composite score breakdown (compression_score > 0.60 → `compression_breakout`, etc.).
+      Sniffer tuning via `SCREENER_COMPRESSION_WEIGHT` is now the user's strategic lever —
+      it controls which template gets applied at the instrument level without requiring
+      trigger authorship. See amendment section in [39-universe-screener.md](39-universe-screener.md).
 
 > **Why this order:** Runbook 37 is a correctness bug with zero-cost fix — ship immediately. Candlestick features (38) and HTF structure (41) are additive with no risk of regression and unlock everything downstream. The breakout template (40) and level-anchored stops (42) depend on those features and should be validated together via a paper trading backtest before the universe screener (39) is enabled — you want a working strategy before adding autonomous instrument selection.
 
 > **Paper trading as the validation gate:** Unlike prior runbooks that were validated via backtest, Runbook 39 (universe screener) can only be meaningfully validated via paper trading. The screener surfaces real-time anomalies; no historical simulation can test whether it would have identified the right instrument at the right time. Plan for a 30-day paper trading period after 39 ships before enabling live capital routing.
 
+### Phase 7 — Template-Bound Instrument Strategy (new direction, 2026-02)
+
+Runbooks 46–47 complete the shift from "LLM authors trigger rules" to "LLM selects and
+parameterizes a known template." The vector store retrieval infrastructure is already
+active (`STRATEGY_VECTOR_STORE_ENABLED=true`); these runbooks close the gap between
+retrieval-as-hints and retrieval-as-binding.
+
+> **Architecture context:** The `vector_store/strategies/` docs are retrieval targets.
+> The `prompts/strategies/*.txt` files are the actual system prompts. The two systems are
+> currently disconnected — retrieval finds a regime match but does not load the
+> corresponding prompt. Runbook 46 wires them together. Runbook 47 enforces the contract.
+
+**Stratum D — Template routing (after Stratum C paper trading validation):**
+28. **46**: [Template-matched plan generation](46-template-matched-plan-generation.md) —
+    Adds `compression_breakout.md` to vector store; wires retrieval to load the
+    corresponding `prompts/strategies/*.txt` template automatically. Zero schema changes.
+    _Gate: Runbook 39 screener running in paper trading._
+
+**Stratum E — Hard binding (after Stratum D validated):**
+29. **47**: [Hard template binding](47-hard-template-binding.md) — Adds `template_id`
+    to `StrategyPlan`; trigger compiler blocks triggers using identifiers outside the
+    declared template's allowed set. Backwards compatible (Optional field, enforcement
+    skipped when `template_id=None`).
+    _Gate: Runbook 46 routing confirmed correct ≥ 80% of plan-generation days._
+
+**Stratum F — Research feedback loop (can run in parallel with Stratum D/E):**
+30. **48**: [Research budget in paper trading](48-research-budget-paper-trading.md) —
+    Separate capital pool + ledger for hypothesis testing in paper trading. Research
+    trades tagged with `experiment_id` and `playbook_id`. `PlaybookOutcomeAggregator`
+    writes validated stats to `vector_store/playbooks/*.md` `## Validation Evidence`
+    sections. Judge gains `suggest_experiment` and `update_playbook` action types.
+    All 7 existing playbooks updated with `hypothesis`, `min_sample_size`, and
+    `## Research Trade Attribution` sections. New meta-playbook:
+    `vector_store/playbooks/experiment_framework.md`.
+    _Can start immediately; does not block on Stratum D/E._
+
+> **Why this order matters:** Binding without accurate retrieval produces wrong plans
+> silently (LLM declares `compression_breakout` but indicators are trending — triggers
+> are blocked as identifier violations, leaving an empty plan). Retrieval accuracy must
+> be validated first. The 30-day paper trading gate for Runbook 39 serves double duty:
+> it also validates the template routing table from Runbook 46.
+>
+> Runbook 48 is parallel-safe: the research budget is additive (separate ledger, no
+> coupling to template selection). It should ship during the Stratum D paper trading
+> validation period so that playbook evidence starts accumulating while the template
+> routing table is being validated.
+
 ## Backlog Runbooks (_)
+- [_per-instrument-workflow.md](_per-instrument-workflow.md): Per-instrument `InstrumentStrategyWorkflow` (one Temporal workflow per active symbol). Deferred until Runbooks 39+46+47 are validated via 30-day paper trading and open architectural questions (workflow ID namespace, multi-timeframe, judge routing) are resolved with operational evidence.
 - [_emergency-exit-runbook-judge-loop-design.md](_emergency-exit-runbook-judge-loop-design.md): Judge/strategist loop design gaps (non-test items).
 - [_synthetic-data-testing.md](_synthetic-data-testing.md): Synthetic data generation for deterministic trigger testing.
 - [later/_comp-audit-risk-followups.md](later/_comp-audit-risk-followups.md): Follow-ups from comp-audit-risk-core.
