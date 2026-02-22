@@ -27,6 +27,14 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [46-template-matched-plan-generation.md](46-template-matched-plan-generation.md): Wire vector store retrieval to concrete prompt templates — adds `compression_breakout.md` to vector store, `RetrievalResult` returns `template_id`, `generate_plan()` loads matching `prompts/strategies/*.txt` automatically. Zero schema changes. Gate: R39 screener in paper trading.
 - [47-hard-template-binding.md](47-hard-template-binding.md): `template_id` field on `StrategyPlan` + trigger compiler enforcement — triggers using identifiers outside the declared template's allowed set are blocked at compile time. Backwards compatible (Optional field). Gate: R46 retrieval routing validated ≥ 80% accuracy.
 - [48-research-budget-paper-trading.md](48-research-budget-paper-trading.md): Research budget in paper trading — separate ledger + capital pool for hypothesis testing; `PlaybookOutcomeAggregator` writes validated stats to `vector_store/playbooks/*.md`; judge gains `suggest_experiment` and `update_playbook` actions. All 7 playbooks updated with hypothesis + validation evidence structure. Parallel-safe with Runbooks 46/47.
+- [49-market-snapshot-definition.md](49-market-snapshot-definition.md): Multimodal `MarketSnapshot` contract (numerical + derived + text + visual encodings) as the single source of truth for strategist/judge invocations. Enforces timestamped provenance, normalization, staleness checks, and snapshot hashing.
+- [50-dual-reflection-templates.md](50-dual-reflection-templates.md): Dual-level reflection framework — fast policy-loop reflection (event-driven coherence/invariants/memory-check) plus scheduled high-level reflection (batch outcomes, regime drift, playbook updates), with deterministic tick-level validation kept separate from LLM reflection.
+- [51-memory-store-diversified-retrieval.md](51-memory-store-diversified-retrieval.md): Diversified episode memory store and contrastive retrieval (`wins`, `losses`, `failure_modes`) for strategist and judge grounding. Builds on Signal Ledger outcome data and adds regime fingerprints + playbook metadata.
+- [52-playbook-definition-regime-tags.md](52-playbook-definition-regime-tags.md): Typed playbook schema with regime eligibility, entry/invalidation rules, stop/target logic, time-horizon expectations, and historical stats (including holding-time/MAE/MFE distributions). Strategist selects playbook first, then instantiates a plan.
+- [53-judge-validation-rules-memory-evidence.md](53-judge-validation-rules-memory-evidence.md): Judge loop upgrade from risk-only checks to evidence-based validation using memory failure patterns and cluster evidence; explicit revise/reject criteria for unsupported or overconfident strategist proposals.
+- [54-reasoning-agent-cadence-rules.md](54-reasoning-agent-cadence-rules.md): Central cadence runbook for a three-tier model (deterministic tick engine, event-driven policy loop, slow structural learning loop), including policy heartbeats/triggers, reflection cadence, and slow-loop scheduling.
+- [55-regime-fingerprint-transition-detector.md](55-regime-fingerprint-transition-detector.md): Deterministic regime fingerprint + transition detector (bounded, decomposable distance + asymmetric hysteresis + HTF-close gating) that emits `regime_state_changed` policy events and drives policy-loop cadence without per-tick LLM calls.
+- [56-structural-target-activation-refinement-enforcement.md](56-structural-target-activation-refinement-enforcement.md): Deterministic enforcement layer between playbook schema and trigger engine — compiler validation for structural target candidate selection (expectancy gate telemetry) and activation refinement mode -> trigger identifier/timeframe/confirmation mapping.
 - ~~04-emergency-exit-runbook-hold-cooldown.md~~: Min-hold and cooldown enforcement. → Completed, see [X-emergency-exit-runbook-hold-cooldown.md](X-emergency-exit-runbook-hold-cooldown.md).
 - ~~05-emergency-exit-runbook-bypass-override.md~~: Bypass and override behavior. → Completed, see [X-emergency-exit-runbook-bypass-override.md](X-emergency-exit-runbook-bypass-override.md).
 - ~~06-emergency-exit-runbook-edge-cases.md~~: Emergency-exit edge cases. → Completed, see [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md).
@@ -186,6 +194,38 @@ retrieval-as-hints and retrieval-as-binding.
 > coupling to template selection). It should ship during the Stratum D paper trading
 > validation period so that playbook evidence starts accumulating while the template
 > routing table is being validated.
+
+### Phase 8 — Reasoning Agent Operating System (FinAgent-inspired, 2026-02)
+
+Runbooks 49–54 translate the paper insights into implementation contracts for this
+codebase's existing strategist/judge architecture. The key framing is architectural:
+we are not adding a new pretrained "foundation model"; we are upgrading the agent
+system around multimodal inputs, reflection, memory, and evidence gating.
+
+**Stratum G — Inputs + memory substrate (ship first):**
+31. **49**: `MarketSnapshot` definition (single source of truth for every reasoning tick)
+32. **55**: Deterministic regime fingerprint + transition detector (policy-loop trigger keystone)
+33. **51**: Diversified memory store + retrieval (wins/losses/failure-modes)
+
+**Stratum H — Decision structure + reflection (after Stratum G):**
+34. **52**: Typed playbook definition with regime tags + expectation distributions
+35. **56**: Structural target + activation refinement enforcement (compiler + deterministic mapping layer)
+36. **50**: Dual reflection templates (policy-level fast reflection, high-level batch review)
+37. **53**: Judge validation rules with memory-backed rejection criteria
+
+**Stratum I — Operations control plane (after Stratum H starts landing):**
+38. **54**: Reasoning-agent cadence rules (three-tier scheduling, policy triggers/heartbeats, slow-loop thresholds)
+
+> **Why this order:** `MarketSnapshot` (49) establishes normalized inputs, but policy-loop
+> cadence is only trustworthy once the deterministic regime transition detector (55)
+> exists. Diversified memory retrieval (51) then uses that normalized regime structure for
+> contrastive evidence. Typed playbooks (52) provide the constrained proposal surface and
+> expectation distributions (holding time, MAE/MFE). Runbook 56 then hardens the
+> deterministic enforcement layer between playbook schema and trigger engine (structural
+> target selection + refinement mode mapping) before reflection/judge layers rely on it.
+> Dual reflection (50) and judge validation (53) come after those inputs and enforcement
+> contracts exist, otherwise they degrade into prompt-only rituals. Cadence rules (54)
+> are codified after the transition detector and policy-loop triggers are concretely defined.
 
 ## Backlog Runbooks (_)
 - [_per-instrument-workflow.md](_per-instrument-workflow.md): Per-instrument `InstrumentStrategyWorkflow` (one Temporal workflow per active symbol). Deferred until Runbooks 39+46+47 are validated via 30-day paper trading and open architectural questions (workflow ID namespace, multi-timeframe, judge routing) are resolved with operational evidence.
