@@ -77,11 +77,18 @@ IMPORTANT - Exit Binding Constraint:
 Do NOT use these keys in triggers: type, risk_grade.
 
 Risk constraints MUST include:
-- max_position_risk_pct
-- max_symbol_exposure_pct
-- max_portfolio_exposure_pct
-- max_daily_loss_pct
-- max_daily_risk_budget_pct (optional)
+- max_position_risk_pct  — fraction of equity to RISK per trade (loss at stop). E.g., 2.0 = willing
+    to lose 2% of equity if stopped out. The engine converts this to notional via stop distance:
+    position_notional = (equity × risk_pct / 100) / stop_distance_per_unit × price.
+    With a 2% stop on a $10 000 account: risk = $200, notional ≈ $10 000. The symbol/portfolio
+    caps below apply as hard upper bounds. Recommended: 1.0–2.0.
+- max_symbol_exposure_pct — maximum notional in any single symbol as % of equity.
+    This is the primary cap on position size when risk-based notional exceeds it.
+    With max_position_risk_pct=2 and a 2% stop, you need max_symbol_exposure_pct ≥ ~50 to
+    get meaningful risk per trade. Recommended: 50–80 for 2-symbol portfolios.
+- max_portfolio_exposure_pct — total open notional across all symbols. Recommended: 80–95.
+- max_daily_loss_pct — daily drawdown limit before all sizing is blocked. Recommended: 4–6.
+- max_daily_risk_budget_pct (optional) — daily risk budget (sum of per-trade risks). Recommended: 5–8.
 
 Sizing rules MUST include one entry per symbol. If unsure, use:
 { "symbol": "<SYMBOL>", "sizing_mode": "fixed_fraction", "target_risk_pct": <max_position_risk_pct> }
@@ -164,6 +171,10 @@ HTF STOP AND TARGET ANCHORING:
   (prefer exits over entries for longs at these levels)
   htf_price_vs_daily_mid < -1.0 means far below midpoint
   (prefer entries for longs — oversold relative to session structure)
+- Target realism rule: in non-breakout contexts (breakout_confirmed <= 0, expansion_flag <= 0,
+  vol_burst is false, and |htf_price_vs_daily_mid| <= 1.5), cap long targets near htf_5d_high
+  (fallback htf_daily_high) and short targets near htf_5d_low (fallback htf_daily_low). Avoid
+  proposing r_multiple/measured_move targets that overshoot nearby weekly structure.
 - NOTE: htf_* fields are None before the second completed daily bar. Always combine
   with a fallback (e.g., "htf_daily_low is not None and close < htf_daily_low * 0.995 or close < sma_long * 0.97").
 
@@ -216,6 +227,17 @@ LEVEL-ANCHORED STOP/TARGET FIELDS (Runbook 42):
       'r_multiple_2'  — 2R from entry (requires stop_price_abs)
       'r_multiple_3'  — 3R from entry
     Default (null): no stored target, exits via exit_rule only.
+
+  estimated_bars_to_resolution (optional integer on TriggerCondition):
+    Your forecast for how many candles until this trade reaches its target OR stop.
+    This is NOT a trigger — it is purely a statistical recording used to measure
+    your prediction accuracy against actual outcome per playbook.
+    Example: estimated_bars_to_resolution = 4 means you expect resolution within 4 bars
+    of the trigger's timeframe.  Set based on your regime assessment:
+    - Range mean-reversion: 2–6 bars (quick snaps)
+    - Trend continuation: 4–12 bars (needs structure time)
+    - Compression breakout: 3–8 bars (expansion should be fast or it stalls)
+    - Leave null if genuinely uncertain — omitting is better than guessing.
 
 BUILT-IN IDENTIFIERS available after entry (evaluate to True/False or float):
   stop_hit    — True when stop is triggered (direction-aware: close < stop for longs,

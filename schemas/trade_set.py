@@ -142,6 +142,12 @@ class TradeLeg(BaseModel):
     experiment_variant: Optional[str] = Field(
         default=None, description="Experiment variant if learning book trade"
     )
+    # Time estimation fields (Runbook 49)
+    estimated_bars_to_resolution: Optional[int] = Field(
+        default=None,
+        description="LLM's estimated bars-to-resolution at entry time (from TriggerCondition). "
+                    "Measured against actual bars_held post-exit for playbook forecast accuracy.",
+    )
 
 
 class TradeSet(BaseModel):
@@ -189,6 +195,44 @@ class TradeSet(BaseModel):
     experiment_id: Optional[str] = Field(
         default=None, description="Experiment ID if learning book trade"
     )
+    # Time-to-resolution metrics (Runbook 49)
+    bars_held: Optional[int] = Field(
+        default=None,
+        description="Integer bar count from entry to close (timeframe-relative). "
+                    "Set at position close time.",
+    )
+    minutes_to_R1: Optional[float] = Field(
+        default=None, description="Minutes from entry to first R1 rung hit (R45 trade management)"
+    )
+    minutes_to_R2: Optional[float] = Field(
+        default=None, description="Minutes from entry to R2 rung hit"
+    )
+    minutes_to_R3: Optional[float] = Field(
+        default=None, description="Minutes from entry to R3 rung hit"
+    )
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def r_per_hour(self) -> Optional[float]:
+        """Risk-adjusted return per hour of capital exposure.
+
+        Computes (realized_pnl / initial_risk_dollars) / hold_hours.
+        Returns None when stop price, hold duration, or initial risk cannot be determined.
+        """
+        if not self.closed_at or not self.legs:
+            return None
+        hold_hours = (self.closed_at - self.opened_at).total_seconds() / 3600.0
+        if hold_hours <= 0:
+            return None
+        entry_legs = [leg for leg in self.legs if leg.is_entry and leg.stop_price_abs is not None]
+        if not entry_legs:
+            return None
+        entry = entry_legs[0]
+        initial_risk = abs(entry.price - entry.stop_price_abs) * entry.qty
+        if initial_risk <= 0:
+            return None
+        r_return = self.pnl_realized_total / initial_risk
+        return round(r_return / hold_hours, 4)
 
     @computed_field  # type: ignore[misc]
     @property

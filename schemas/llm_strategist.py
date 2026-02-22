@@ -251,6 +251,15 @@ class TriggerCondition(SerializableModel):
                     "'r_multiple_2' (2R from entry), 'r_multiple_3' (3R from entry). "
                     "Null/absent means no stored target; exits via exit_rule only.",
     )
+    estimated_bars_to_resolution: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="LLM estimate of how many bars until this trade reaches its target or stop. "
+                    "Not a trigger condition — purely a forecast recorded on the trade for "
+                    "playbook accuracy measurement. E.g., set to 4 for a 1h trigger where "
+                    "you expect resolution within 4 candles. Measured against actual bars_held "
+                    "post-exit to surface indicator-latency and timing bias.",
+    )
 
     @model_validator(mode="after")
     def _validate_trigger(self) -> "TriggerCondition":

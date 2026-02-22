@@ -301,14 +301,16 @@ def _resolve_target_price_anchored(
             return None, None  # Use htf_daily_low or htf_daily_extreme for shorts
         level = getattr(snapshot, "htf_daily_high", None)
         if level:
-            return level * 0.998, "htf_daily_high"
+            price = level * 0.998
+            return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_daily_high"
 
     elif anchor == "htf_5d_high":
         if direction != "long":
             return None, None
         level = getattr(snapshot, "htf_5d_high", None)
         if level:
-            return level * 0.998, "htf_5d_high"
+            price = level * 0.998
+            return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_5d_high"
 
     # Short-only level targets (support below price) ------------------------
     elif anchor == "htf_daily_low":
@@ -316,35 +318,41 @@ def _resolve_target_price_anchored(
             return None, None
         level = getattr(snapshot, "htf_daily_low", None)
         if level:
-            return level * 1.002, "htf_daily_low"
+            price = level * 1.002
+            return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_daily_low"
 
     elif anchor == "htf_5d_low":
         if direction != "short":
             return None, None
         level = getattr(snapshot, "htf_5d_low", None)
         if level:
-            return level * 1.002, "htf_5d_low"
+            price = level * 1.002
+            return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_5d_low"
 
     # Anchor families: auto-select resistance/support based on direction ----
     elif anchor == "htf_daily_extreme":
         if direction == "long":
             level = getattr(snapshot, "htf_daily_high", None)
             if level:
-                return level * 0.998, "htf_daily_extreme"
+                price = level * 0.998
+                return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_daily_extreme"
         else:
             level = getattr(snapshot, "htf_daily_low", None)
             if level:
-                return level * 1.002, "htf_daily_extreme"
+                price = level * 1.002
+                return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_daily_extreme"
 
     elif anchor == "htf_5d_extreme":
         if direction == "long":
             level = getattr(snapshot, "htf_5d_high", None)
             if level:
-                return level * 0.998, "htf_5d_extreme"
+                price = level * 0.998
+                return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_5d_extreme"
         else:
             level = getattr(snapshot, "htf_5d_low", None)
             if level:
-                return level * 1.002, "htf_5d_extreme"
+                price = level * 1.002
+                return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_5d_extreme"
 
     # Direction-aware computed targets --------------------------------------
     elif anchor == "measured_move":
@@ -353,19 +361,94 @@ def _resolve_target_price_anchored(
         if upper is not None and lower is not None:
             range_height = upper - lower
             price = fill_price + range_height if direction == "long" else fill_price - range_height
-            return price, "measured_move"
+            return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "measured_move"
 
     elif anchor == "r_multiple_2" and stop_price is not None:
         risk = abs(fill_price - stop_price)
         price = fill_price + 2 * risk if direction == "long" else fill_price - 2 * risk
-        return price, "r_multiple_2"
+        return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "r_multiple_2"
 
     elif anchor == "r_multiple_3" and stop_price is not None:
         risk = abs(fill_price - stop_price)
         price = fill_price + 3 * risk if direction == "long" else fill_price - 3 * risk
-        return price, "r_multiple_3"
+        return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "r_multiple_3"
 
     return None, None
+
+
+def _cap_target_price_to_structure(
+    target_price: float | None,
+    fill_price: float,
+    snapshot: "IndicatorSnapshot",
+    direction: str,
+) -> float | None:
+    """Cap stretched targets to nearby HTF structure in non-breakout contexts.
+
+    This prevents unrealistic extensions (e.g. long targets far above 5d highs)
+    when price is still within the prevailing weekly range.
+    """
+    if target_price is None:
+        return None
+
+    def _to_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+            return parsed if math.isfinite(parsed) else None
+        except (TypeError, ValueError):
+            return None
+
+    # Only apply inside the range neighborhood; when price is far from mid we
+    # avoid clamping to preserve trend extension behavior.
+    mid_score = getattr(snapshot, "htf_price_vs_daily_mid", None)
+    mid_score_f = _to_float(mid_score)
+    if mid_score_f is None or abs(mid_score_f) > 1.5:
+        return target_price
+
+    breakout_confirmed = getattr(snapshot, "breakout_confirmed", None)
+    expansion_flag = getattr(snapshot, "expansion_flag", None)
+    vol_burst = getattr(snapshot, "vol_burst", None)
+    breakout_like = bool((_to_float(breakout_confirmed) or 0) > 0) or bool((_to_float(expansion_flag) or 0) > 0) or bool(vol_burst)
+    if breakout_like:
+        return target_price
+
+    if direction == "long":
+        weekly_high = getattr(snapshot, "htf_5d_high", None)
+        daily_high = getattr(snapshot, "htf_daily_high", None)
+        ceiling = None
+        if weekly_high:
+            # If already above weekly high, allow extension (breakout underway).
+            if fill_price > float(weekly_high) * 1.002:
+                return target_price
+            ceiling = float(weekly_high) * 1.002
+        elif daily_high:
+            if fill_price > float(daily_high) * 1.002:
+                return target_price
+            ceiling = float(daily_high) * 1.002
+        if ceiling is not None:
+            capped = min(float(target_price), ceiling)
+            return capped if capped > fill_price else None
+        return target_price
+
+    if direction == "short":
+        weekly_low = getattr(snapshot, "htf_5d_low", None)
+        daily_low = getattr(snapshot, "htf_daily_low", None)
+        floor = None
+        if weekly_low:
+            if fill_price < float(weekly_low) * 0.998:
+                return target_price
+            floor = float(weekly_low) * 0.998
+        elif daily_low:
+            if fill_price < float(daily_low) * 0.998:
+                return target_price
+            floor = float(daily_low) * 0.998
+        if floor is not None:
+            capped = max(float(target_price), floor)
+            return capped if capped < fill_price else None
+        return target_price
+
+    return target_price
 
 
 @dataclass(frozen=True)
@@ -440,6 +523,10 @@ class PositionRiskState:
     r1_triggered: bool = False
     r2_triggered: bool = False
     r3_triggered: bool = False
+    # Timestamps when each rung first fired (Runbook 49)
+    r1_ts: Optional[datetime] = None
+    r2_ts: Optional[datetime] = None
+    r3_ts: Optional[datetime] = None
 
 
 @dataclass
@@ -2543,6 +2630,7 @@ class LLMStrategistBacktester:
                 current_R, bar.timestamp, config, rung_catch=rung_catch,
             )
             state.r1_triggered = True
+            state.r1_ts = bar.timestamp
             state.trade_state = "MATURE"
 
         if r2_fires:
@@ -2584,6 +2672,7 @@ class LLMStrategistBacktester:
                 current_R, bar.timestamp, config, rung_catch=rung_catch,
             )
             state.r2_triggered = True
+            state.r2_ts = bar.timestamp
             state.trade_state = "EXTENDED"
 
         if r3_fires:
@@ -2592,6 +2681,7 @@ class LLMStrategistBacktester:
                 current_R, bar.timestamp, config, rung_catch=rung_catch,
             )
             state.r3_triggered = True
+            state.r3_ts = bar.timestamp
             state.trade_state = "TRAIL"
 
         return partial_orders

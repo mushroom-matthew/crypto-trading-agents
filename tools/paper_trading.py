@@ -241,11 +241,30 @@ def evaluate_triggers_activity(
         risk_profile=RiskProfile(),
     )
 
+    # Align sizing with execution: resolve stop distance from the same anchored
+    # stop logic used when orders are filled.
+    resolve_stop_distance = None
+    try:
+        from backtesting.llm_strategist_runner import _resolve_stop_price_anchored
+
+        def resolve_stop_distance(trigger, indicator, bar) -> float | None:
+            direction = trigger.direction if trigger.direction in {"long", "short"} else None
+            if direction is None:
+                return None
+            stop_abs, _ = _resolve_stop_price_anchored(trigger, bar.close, indicator, direction)
+            if stop_abs is None:
+                return None
+            dist = abs(float(bar.close) - float(stop_abs))
+            return dist if dist > 0 else None
+    except Exception as e:
+        logger.warning(f"Anchored stop resolver unavailable in trigger evaluation: {e}")
+
     # Build trigger engine
     trigger_engine = TriggerEngine(
         plan,
         risk_engine,
         trade_risk=TradeRiskEvaluator(risk_engine),
+        stop_distance_resolver=resolve_stop_distance,
         exit_binding_mode=exit_binding_mode if exit_binding_mode else "category",
         conflicting_signal_policy=conflicting_signal_policy if conflicting_signal_policy else "reverse",
     )
@@ -615,6 +634,11 @@ class PaperTradingWorkflow:
         self.trigger_rule_edits: List[Dict[str, Any]] = []
         # Indicator snapshots from last plan generation (used in trigger evaluation)
         self.last_indicators: Dict[str, Any] = {}
+        self.min_rr_ratio: float = float(os.environ.get("PAPER_TRADING_MIN_RR_RATIO", "1.2"))
+        # Live indicator snapshots refreshed on a 1-minute cadence for UI context.
+        # This does not affect trigger evaluation; it is visibility-only.
+        self.last_indicators_live: Dict[str, Any] = {}
+        self.last_live_indicators_refresh: Optional[datetime] = None
         # Candle-clock: tracks the last candle floor we ran trigger evaluation on,
         # keyed by timeframe string (e.g. "1h").  Prevents re-evaluating within the
         # same candle and enforces at least one-candle separation between entry and exit.
@@ -827,6 +851,25 @@ class PaperTradingWorkflow:
         """Get equity curve history for this session."""
         return list(self.equity_history)
 
+    @workflow.query
+    def get_last_indicators(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Get latest indicator snapshots used for planning/evaluation."""
+        if symbol:
+            sym = str(symbol).upper()
+            snap = self.last_indicators.get(sym)
+            return {sym: snap} if snap is not None else {}
+        return dict(self.last_indicators)
+
+    @workflow.query
+    def get_live_indicators(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Get latest live (1m) indicator snapshots for UI structure context."""
+        source = self.last_indicators_live or self.last_indicators
+        if symbol:
+            sym = str(symbol).upper()
+            snap = source.get(sym)
+            return {sym: snap} if snap is not None else {}
+        return dict(source)
+
     # -------------------------------------------------------------------------
     # Main Workflow
     # -------------------------------------------------------------------------
@@ -886,6 +929,8 @@ class PaperTradingWorkflow:
         # Main loop
         plan_interval = timedelta(hours=self.plan_interval_hours)
         evaluation_interval = timedelta(seconds=30)  # Evaluate every 30 seconds
+        live_indicators_interval = timedelta(minutes=1)
+        enable_live_indicator_refresh = workflow.patched("paper-trading-live-indicators-v1")
 
         while not self.stopped:
             now = workflow.now()
@@ -909,6 +954,15 @@ class PaperTradingWorkflow:
                     await self._discover_new_symbols()
                     self.last_discovery_date = today
 
+            # Refresh UI structure snapshots on a 1-minute cadence so context is
+            # "live-ish" rather than only updating at plan generation time.
+            if enable_live_indicator_refresh and (
+                self.last_live_indicators_refresh is None
+                or (now - self.last_live_indicators_refresh) >= live_indicators_interval
+            ):
+                await self._refresh_live_indicators()
+                self.last_live_indicators_refresh = now
+
             # Generate/update strategy plan
             if self.replan_on_day_boundary and self.last_plan_time is not None:
                 if self.last_plan_time.date() != now.date():
@@ -929,6 +983,15 @@ class PaperTradingWorkflow:
 
             # Sleep until next evaluation
             await workflow.sleep(evaluation_interval)
+
+        # Stop the session-scoped ledger workflow on graceful shutdown.
+        # Never stop the legacy shared ledger.
+        if self.ledger_workflow_id and self.ledger_workflow_id != MOCK_LEDGER_WORKFLOW_ID:
+            try:
+                ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
+                await ledger_handle.signal("stop_workflow")
+            except Exception as exc:
+                workflow.logger.warning(f"Failed to stop ledger workflow {self.ledger_workflow_id}: {exc}")
 
         # Session stopped
         await workflow.execute_activity(
@@ -955,11 +1018,33 @@ class PaperTradingWorkflow:
         initial_allocations: Dict[str, float],
     ) -> None:
         """Initialize the execution ledger with starting portfolio."""
+        # Normalize allocation semantics so symbol allocations are funded from
+        # initial_cash unless explicit cash is provided.
+        allocs = {k: float(v) for k, v in (initial_allocations or {}).items()}
+        non_cash_allocs = {
+            k: v for k, v in allocs.items()
+            if k.lower() != "cash" and v > 0
+        }
+        non_cash_total = sum(non_cash_allocs.values())
+        explicit_cash = allocs.get("cash")
+        if explicit_cash is None:
+            if non_cash_total > float(initial_cash) + 1e-6:
+                raise ValueError(
+                    f"Initial allocations ({non_cash_total:.2f}) exceed initial_cash ({float(initial_cash):.2f})"
+                )
+            cash_for_ledger = max(0.0, float(initial_cash) - non_cash_total)
+        else:
+            total_budget = float(explicit_cash) + non_cash_total
+            if total_budget > float(initial_cash) + 1e-6:
+                raise ValueError(
+                    f"cash + allocations ({total_budget:.2f}) exceed initial_cash ({float(initial_cash):.2f})"
+                )
+            cash_for_ledger = float(explicit_cash)
 
-        # Fetch current prices for position initialization
+        # Fetch current prices for non-cash allocations
         prices = await workflow.execute_activity(
             fetch_current_prices_activity,
-            args=[list(initial_allocations.keys())],
+            args=[list(non_cash_allocs.keys())],
             schedule_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
@@ -967,16 +1052,19 @@ class PaperTradingWorkflow:
         # Signal the execution ledger to initialize
         ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
         await ledger_handle.signal("initialize_portfolio", {
-            "cash": initial_allocations.get("cash", initial_cash),
+            "cash": cash_for_ledger,
             "positions": {
                 symbol: alloc / prices.get(symbol, 1)
-                for symbol, alloc in initial_allocations.items()
-                if symbol != "cash" and prices.get(symbol, 0) > 0
+                for symbol, alloc in non_cash_allocs.items()
+                if prices.get(symbol, 0) > 0
             },
             "prices": prices,
         })
 
-        workflow.logger.info(f"Initialized portfolio: cash={initial_cash}, allocations={initial_allocations}")
+        workflow.logger.info(
+            f"Initialized portfolio: cash={cash_for_ledger}, "
+            f"symbol_allocations={non_cash_allocs}, initial_cash={initial_cash}"
+        )
 
     async def _generate_plan(self) -> None:
         """Generate a new strategy plan."""
@@ -1098,6 +1186,20 @@ class PaperTradingWorkflow:
         )
 
         workflow.logger.info(f"Generated strategy plan with {len(plan_dict.get('triggers', []))} triggers")
+
+    async def _refresh_live_indicators(self) -> None:
+        """Refresh 1-minute indicator snapshots used by the structure UI."""
+        try:
+            live_snapshots = await workflow.execute_activity(
+                fetch_indicator_snapshots_activity,
+                args=[self.symbols, "1m", 240],
+                schedule_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            if isinstance(live_snapshots, dict) and live_snapshots:
+                self.last_indicators_live = live_snapshots
+        except Exception as exc:
+            workflow.logger.warning(f"Failed to refresh live indicators: {exc}")
 
     @staticmethod
     def _candle_floor(dt: datetime, tf_minutes: int) -> str:
@@ -1370,7 +1472,7 @@ class PaperTradingWorkflow:
                 "as_of": _dt.datetime.now(_dt.timezone.utc),
             })
             stop_abs, _ = _resolve_stop_price_anchored(trigger, fill_price, snap, direction)
-            target_abs, _ = _resolve_target_price_anchored(trigger, fill_price, snap, direction)
+            target_abs, _ = _resolve_target_price_anchored(trigger, fill_price, stop_abs, snap, direction)
             return stop_abs, target_abs
         except Exception as e:
             workflow.logger.warning(f"Could not resolve stop/target for {trigger_id}: {e}")
@@ -1387,6 +1489,95 @@ class PaperTradingWorkflow:
 
         # Resolve stop/target for entry orders
         stop_price_abs, target_price_abs = self._resolve_order_stop_target(order, fill_price)
+        trigger_id = order.get("trigger_id") or order.get("reason")
+        trigger_dict = None
+        if self.current_plan and trigger_id:
+            trigger_dict = next(
+                (t for t in (self.current_plan.get("triggers", []) or []) if t.get("id") == trigger_id),
+                None,
+            )
+        target_anchor_type = (trigger_dict or {}).get("target_anchor_type")
+
+        # Gate: reject entries whose stop failed to resolve. An entry without a
+        # known stop price cannot be risk-sized or swept. This is defense-in-depth
+        # (schema validation ensures triggers define a stop; this catches anchor
+        # resolution failures such as missing HTF snapshot fields).
+        if order.get("intent") == "entry" and stop_price_abs is None:
+            workflow.logger.warning(
+                f"Entry order for {order.get('symbol')} ({trigger_id}) rejected: "
+                f"stop price could not be resolved — position not opened"
+            )
+            await workflow.execute_activity(
+                emit_paper_trading_event_activity,
+                args=[
+                    self.session_id,
+                    "trade_blocked",
+                    {
+                        "symbol": order.get("symbol"),
+                        "trigger_id": trigger_id,
+                        "reason": "stop_price_unresolvable",
+                        "detail": "Stop anchor resolved to None; entry rejected to prevent unprotected position.",
+                    },
+                ],
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
+            return
+
+        # Gate: if a target anchor is defined but target failed to resolve, reject.
+        if order.get("intent") == "entry" and target_anchor_type and target_price_abs is None:
+            workflow.logger.warning(
+                f"Entry order for {order.get('symbol')} ({trigger_id}) rejected: "
+                f"target price could not be resolved for anchor={target_anchor_type}"
+            )
+            await workflow.execute_activity(
+                emit_paper_trading_event_activity,
+                args=[
+                    self.session_id,
+                    "trade_blocked",
+                    {
+                        "symbol": order.get("symbol"),
+                        "trigger_id": trigger_id,
+                        "reason": "target_price_unresolvable",
+                        "detail": f"Target anchor '{target_anchor_type}' resolved to None; entry rejected.",
+                    },
+                ],
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
+            return
+
+        # Gate: enforce minimum realized R:R from resolved stop/target at entry.
+        if (
+            order.get("intent") == "entry"
+            and stop_price_abs is not None
+            and target_price_abs is not None
+            and self.min_rr_ratio > 0
+        ):
+            risk = abs(fill_price - stop_price_abs)
+            reward = abs(target_price_abs - fill_price)
+            rr = (reward / risk) if risk > 0 else 0.0
+            if rr < self.min_rr_ratio:
+                workflow.logger.warning(
+                    f"Entry order for {order.get('symbol')} ({trigger_id}) rejected: "
+                    f"resolved R:R {rr:.2f} < {self.min_rr_ratio:.2f}"
+                )
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[
+                        self.session_id,
+                        "trade_blocked",
+                        {
+                            "symbol": order.get("symbol"),
+                            "trigger_id": trigger_id,
+                            "reason": "insufficient_rr_resolved",
+                            "detail": (
+                                f"Resolved R:R {rr:.2f} below minimum {self.min_rr_ratio:.2f} "
+                                f"(entry={fill_price:.4f}, stop={stop_price_abs:.4f}, target={target_price_abs:.4f})"
+                            ),
+                        },
+                    ],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                )
+                return
 
         fill_payload: Dict[str, Any] = {
             "symbol": order["symbol"],
@@ -1396,7 +1587,7 @@ class PaperTradingWorkflow:
             "cost": cost,
             "fee": fee,  # 0.1% fee for reporting
             "timestamp": int(workflow.now().timestamp() * 1000),
-            "trigger_id": order.get("trigger_id") or order.get("reason"),
+            "trigger_id": trigger_id,
             "trigger_category": order.get("trigger_category"),
             "intent": order.get("intent"),
         }
@@ -1404,6 +1595,15 @@ class PaperTradingWorkflow:
             fill_payload["stop_price_abs"] = stop_price_abs
         if target_price_abs is not None:
             fill_payload["target_price_abs"] = target_price_abs
+        # Carry the LLM's time estimate to the fill record for playbook accuracy stats
+        if order.get("intent") == "entry":
+            trigger_id = order.get("trigger_id") or order.get("reason")
+            triggers = (self.current_plan or {}).get("triggers", [])
+            tdict = next((t for t in triggers if t.get("id") == trigger_id), None)
+            if tdict:
+                etb = tdict.get("estimated_bars_to_resolution")
+                if etb is not None:
+                    fill_payload["estimated_bars_to_resolution"] = int(etb)
         await ledger_handle.signal("record_fill", fill_payload)
 
         # Emit event with stop/target for activity feed

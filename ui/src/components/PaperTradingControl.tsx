@@ -140,6 +140,13 @@ export function PaperTradingControl() {
     refetchInterval: session?.status === 'running' ? 30000 : false,
     staleTime: 25000,
   });
+  const { data: structureData } = useQuery({
+    queryKey: ['paper-trading-structure', selectedSessionId],
+    queryFn: () => paperTradingAPI.getStructure(selectedSessionId!),
+    enabled: !!selectedSessionId,
+    refetchInterval: session?.status === 'running' ? 30000 : false,
+    staleTime: 25000,
+  });
 
   // Start session mutation
   const startSession = useMutation({
@@ -218,6 +225,21 @@ export function PaperTradingControl() {
   const isRunning = session?.status === 'running';
   const isStarting = startSession.isPending;
   const isLiteralFalseRule = (rule?: string | null) => (rule || '').trim().toLowerCase() === 'false';
+  const selectedPositionMeta = portfolio?.position_meta?.[chartSymbol];
+  const selectedPositionQty = portfolio?.positions?.[chartSymbol] ?? 0;
+  const selectedEntryPrice = portfolio?.entry_prices?.[chartSymbol] ?? null;
+  const selectedStructure = structureData?.indicators?.[chartSymbol] ?? null;
+  const selectedStructureRows = buildStructureRows(selectedStructure);
+  const chartExecutions = activityEvents
+    .filter((ev) => ev.type === 'order_executed' && ev.payload?.symbol === chartSymbol)
+    .map((ev) => ({
+      ts: ev.ts,
+      side: String(ev.payload?.side ?? '').toLowerCase(),
+      intent: String(ev.payload?.intent ?? ''),
+      price: Number(ev.payload?.price ?? 0),
+      triggerId: String(ev.payload?.trigger_id ?? ev.payload?.reason ?? ''),
+    }))
+    .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
 
   return (
     <div className="space-y-6">
@@ -300,7 +322,7 @@ export function PaperTradingControl() {
                 disabled={isRunning}
               />
               <p className="text-xs text-gray-500 mt-1">
-                Pre-allocate capital to specific assets (notional USD)
+                Pre-allocate from initial cash to specific assets (notional USD). If cash is omitted, remaining cash is auto-computed.
               </p>
             </div>
 
@@ -809,7 +831,7 @@ export function PaperTradingControl() {
               })()}
               {/* Timeframe selector */}
               <div className="flex gap-1 ml-2">
-                {['1m', '5m', '15m', '1h'].map((tf) => (
+                {['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M'].map((tf) => (
                   <button
                     key={tf}
                     onClick={() => setChartTimeframe(tf)}
@@ -826,12 +848,101 @@ export function PaperTradingControl() {
               </div>
             </div>
           </div>
-          <CandlestickChart
-            candles={candlesData?.candles ?? []}
-            trades={trades.filter((t) => t.symbol === chartSymbol)}
-            stopPrice={portfolio?.position_meta?.[chartSymbol]?.stop_price_abs ?? null}
-            targetPrice={portfolio?.position_meta?.[chartSymbol]?.target_price_abs ?? null}
-          />
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div className="xl:col-span-2">
+              <CandlestickChart
+                candles={candlesData?.candles ?? []}
+                trades={trades.filter((t) => t.symbol === chartSymbol)}
+                executions={chartExecutions}
+                timeframe={chartTimeframe}
+                stopPrice={selectedPositionMeta?.stop_price_abs ?? null}
+                targetPrice={selectedPositionMeta?.target_price_abs ?? null}
+                openPosition={selectedPositionQty !== 0 ? {
+                  openedAt: selectedPositionMeta?.opened_at ?? null,
+                  entrySide: selectedPositionMeta?.entry_side ?? null,
+                  entryPrice: selectedEntryPrice,
+                } : null}
+              />
+            </div>
+            <div className="space-y-3">
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+                <p className="text-xs uppercase tracking-wide font-semibold text-gray-500 mb-2">
+                  Open Position Context
+                </p>
+                {selectedPositionQty === 0 ? (
+                  <p className="text-xs text-gray-500">No open position on {chartSymbol.replace('-USD', '')}.</p>
+                ) : (
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex justify-between gap-3">
+                      <span className="text-gray-500">Direction</span>
+                      <span className={cn(
+                        'font-semibold',
+                        (selectedPositionMeta?.entry_side ?? 'long') === 'short' ? 'text-red-600' : 'text-green-600'
+                      )}>
+                        {(selectedPositionMeta?.entry_side ?? 'long').toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-gray-500">Entry Time</span>
+                      <span className="font-mono text-right">
+                        {selectedPositionMeta?.opened_at ? formatDateTime(selectedPositionMeta.opened_at) : 'N/A'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-gray-500">Entry Price</span>
+                      <span className="font-mono">{selectedEntryPrice != null ? formatCurrency(selectedEntryPrice) : 'N/A'}</span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-gray-500">Stop</span>
+                      <span className={cn(
+                        'font-mono',
+                        selectedPositionMeta?.stop_price_abs == null && 'text-amber-600 dark:text-amber-400'
+                      )}>
+                        {selectedPositionMeta?.stop_price_abs != null
+                          ? formatCurrency(selectedPositionMeta.stop_price_abs)
+                          : 'Not set'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-gray-500">Target</span>
+                      <span className={cn(
+                        'font-mono',
+                        selectedPositionMeta?.target_price_abs == null && 'text-gray-400'
+                      )}>
+                        {selectedPositionMeta?.target_price_abs != null
+                          ? formatCurrency(selectedPositionMeta.target_price_abs)
+                          : 'Not set'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+                <p className="text-xs uppercase tracking-wide font-semibold text-gray-500 mb-2">
+                  Structure Snapshot (HTF)
+                </p>
+                {selectedStructureRows.length === 0 ? (
+                  <p className="text-xs text-gray-500">
+                    No structure snapshot yet. It appears after the first plan cycle.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <tbody>
+                        {selectedStructureRows.map((row) => (
+                          <tr key={row.key} className="border-b border-gray-100 dark:border-gray-700 last:border-0">
+                            <td className="py-1.5 text-gray-500 pr-2">{row.label}</td>
+                            <td className={cn('py-1.5 text-right font-mono', row.valueClassName)}>{row.value}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1014,6 +1125,90 @@ function collapseActivityEvents(events: ActivityEvent[]): (ActivityEvent & { cou
   return out;
 }
 
+type StructureRow = {
+  key: string;
+  label: string;
+  value: string;
+  valueClassName?: string;
+};
+
+function buildStructureRows(snapshot: Record<string, any> | null): StructureRow[] {
+  if (!snapshot) return [];
+
+  const timeframe = typeof snapshot.timeframe === 'string' ? snapshot.timeframe : null;
+  const asOf = typeof snapshot.as_of === 'string' ? snapshot.as_of : null;
+  const close = toNumber(snapshot.close);
+  const htfDailyLow = toNumber(snapshot.htf_daily_low);
+  const htfDailyHigh = toNumber(snapshot.htf_daily_high);
+  const htf5dLow = toNumber(snapshot.htf_5d_low);
+  const htf5dHigh = toNumber(snapshot.htf_5d_high);
+  const dailyAtr = toNumber(snapshot.htf_daily_atr);
+  const priceVsMid = toNumber(snapshot.htf_price_vs_daily_mid);
+  const rsi = toNumber(snapshot.rsi_14);
+  const trend = deriveTrendLabel(snapshot);
+  const daysRangePct = toNumber(snapshot.htf_daily_range_pct);
+
+  const rows: StructureRow[] = [
+    { key: 'tf', label: 'Snapshot TF', value: timeframe ?? 'N/A' },
+    { key: 'as_of', label: 'As Of', value: asOf ? formatDateTime(asOf) : 'N/A' },
+    { key: 'trend', label: 'Trend State', value: trend.label, valueClassName: trend.className },
+    { key: 'close', label: 'Close', value: close != null ? formatCurrency(close) : 'N/A' },
+    { key: 'daily_low', label: 'Daily Low', value: htfDailyLow != null ? formatCurrency(htfDailyLow) : 'N/A' },
+    { key: 'daily_high', label: 'Daily High', value: htfDailyHigh != null ? formatCurrency(htfDailyHigh) : 'N/A' },
+    { key: 'week_low', label: '5D Low', value: htf5dLow != null ? formatCurrency(htf5dLow) : 'N/A' },
+    { key: 'week_high', label: '5D High', value: htf5dHigh != null ? formatCurrency(htf5dHigh) : 'N/A' },
+    { key: 'daily_atr', label: 'Daily ATR', value: dailyAtr != null ? formatNumber(dailyAtr, 2) : 'N/A' },
+    { key: 'daily_range', label: 'Daily Range %', value: daysRangePct != null ? `${daysRangePct.toFixed(2)}%` : 'N/A' },
+    {
+      key: 'vs_mid',
+      label: 'Price vs Daily Mid (ATR)',
+      value: priceVsMid != null ? formatSigned(priceVsMid, 2) : 'N/A',
+      valueClassName: priceVsMid == null ? '' : (priceVsMid >= 0 ? 'text-green-600' : 'text-red-600'),
+    },
+    {
+      key: 'rsi',
+      label: 'RSI 14',
+      value: rsi != null ? rsi.toFixed(1) : 'N/A',
+      valueClassName: rsi == null ? '' : (rsi >= 70 ? 'text-red-600' : (rsi <= 30 ? 'text-green-600' : '')),
+    },
+  ];
+
+  return rows;
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function formatNumber(value: number, digits = 2): string {
+  return value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function formatSigned(value: number, digits = 2): string {
+  return `${value >= 0 ? '+' : ''}${formatNumber(value, digits)}`;
+}
+
+function deriveTrendLabel(snapshot: Record<string, any>): { label: string; className: string } {
+  const trendState = typeof snapshot.trend_state === 'string' ? snapshot.trend_state.toLowerCase() : '';
+  if (trendState === 'uptrend') return { label: 'UPTREND', className: 'text-green-600' };
+  if (trendState === 'downtrend') return { label: 'DOWNTREND', className: 'text-red-600' };
+  if (trendState === 'sideways') return { label: 'SIDEWAYS', className: 'text-gray-500' };
+
+  const smaShort = toNumber(snapshot.sma_short);
+  const smaMedium = toNumber(snapshot.sma_medium);
+  const smaLong = toNumber(snapshot.sma_long);
+  if (smaShort != null && smaMedium != null && smaLong != null) {
+    if (smaShort > smaMedium && smaMedium > smaLong) return { label: 'UPTREND*', className: 'text-green-600' };
+    if (smaShort < smaMedium && smaMedium < smaLong) return { label: 'DOWNTREND*', className: 'text-red-600' };
+  }
+  return { label: 'SIDEWAYS', className: 'text-gray-500' };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Candlestick Chart
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1021,11 +1216,49 @@ function collapseActivityEvents(events: ActivityEvent[]): (ActivityEvent & { cou
 interface CandlestickChartProps {
   candles: CandleBar[];
   trades: { timestamp: string; side: string; price: number }[];
+  executions?: { ts: string; side: string; intent?: string; price: number; triggerId?: string }[];
+  timeframe: string;
   stopPrice: number | null;
   targetPrice: number | null;
+  openPosition?: {
+    openedAt: string | null;
+    entrySide: string | null;
+    entryPrice: number | null;
+  } | null;
 }
 
-function CandlestickChart({ candles, trades, stopPrice, targetPrice }: CandlestickChartProps) {
+function inferPriceDecimals(min: number, max: number): number {
+  const span = Math.abs(max - min);
+  if (!Number.isFinite(span) || span <= 0) return 2;
+  const rawStep = span / 6;
+  const magnitude = Math.floor(Math.log10(Math.max(rawStep, 1e-12)));
+  let decimals = Math.max(0, Math.min(8, -magnitude + 1));
+  const maxAbs = Math.max(Math.abs(min), Math.abs(max));
+  if (maxAbs < 1) decimals = Math.max(decimals, 3);
+  if (maxAbs < 0.1) decimals = Math.max(decimals, 4);
+  return decimals;
+}
+
+function formatPriceWithDecimals(value: number, decimals: number): string {
+  if (!Number.isFinite(value)) return 'N/A';
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
+function formatTimeAxis(value: number, timeframe: string): string {
+  const dt = new Date(value);
+  if (timeframe === '1d' || timeframe === '1w' || timeframe === '1M') {
+    return dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+  if (timeframe === '1h' || timeframe === '4h') {
+    return dt.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' });
+  }
+  return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function CandlestickChart({ candles, trades, executions = [], timeframe, stopPrice, targetPrice, openPosition }: CandlestickChartProps) {
   if (candles.length === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
@@ -1044,25 +1277,61 @@ function CandlestickChart({ candles, trades, stopPrice, targetPrice }: Candlesti
       isUp,
       bodyRange: [bodyLow, bodyHigh] as [number, number],
       wickRange: [c.low, c.high] as [number, number],
-      label: new Date(c.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
   });
 
-  // Build trade marker positions — map each trade's timestamp to closest candle index
-  const tradeMarkers: { x: number; side: string; price: number }[] = [];
-  for (const trade of trades) {
-    const tradeMs = new Date(trade.timestamp).getTime();
+  const firstCandleMs = data[0]?.time ?? 0;
+  const lastCandleMs = data[data.length - 1]?.time ?? 0;
+
+  // Build execution markers for trades in visible range.
+  const markerInputs = executions.length > 0
+    ? executions.map((e) => ({ ts: e.ts, side: e.side, intent: (e.intent || '').toLowerCase() }))
+    : trades.map((t) => ({ ts: t.timestamp, side: (t.side || '').toLowerCase(), intent: '' }));
+  const executionMarkers: { time: number; side: string; intent: string }[] = [];
+  for (const m of markerInputs) {
+    const markMs = new Date(m.ts).getTime();
+    if (!Number.isFinite(markMs) || markMs < firstCandleMs || markMs > lastCandleMs) {
+      continue;
+    }
     let closestIdx = 0;
     let minDiff = Infinity;
     data.forEach((d, i) => {
-      const diff = Math.abs(d.time - tradeMs);
+      const diff = Math.abs(d.time - markMs);
       if (diff < minDiff) { minDiff = diff; closestIdx = i; }
     });
-    tradeMarkers.push({ x: closestIdx, side: trade.side, price: trade.price });
+    executionMarkers.push({
+      time: data[closestIdx]?.time,
+      side: m.side,
+      intent: m.intent,
+    });
   }
 
-  const yMin = Math.min(...candles.map((c) => c.low)) * 0.9995;
-  const yMax = Math.max(...candles.map((c) => c.high)) * 1.0005;
+  let openEntryMarkerTime: number | null = null;
+  if (openPosition?.openedAt) {
+    const openedMs = new Date(openPosition.openedAt).getTime();
+    if (Number.isFinite(openedMs) && openedMs >= firstCandleMs && openedMs <= lastCandleMs) {
+      let closestIdx = 0;
+      let minDiff = Infinity;
+      data.forEach((d, i) => {
+        const diff = Math.abs(d.time - openedMs);
+        if (diff < minDiff) { minDiff = diff; closestIdx = i; }
+      });
+      openEntryMarkerTime = data[closestIdx]?.time ?? null;
+    }
+  }
+
+  const levelValues = [
+    openPosition?.entryPrice,
+    stopPrice,
+    targetPrice,
+  ].filter((v): v is number => v != null && Number.isFinite(v));
+  const rawMin = Math.min(...candles.map((c) => c.low), ...(levelValues.length ? levelValues : [Infinity]));
+  const rawMax = Math.max(...candles.map((c) => c.high), ...(levelValues.length ? levelValues : [-Infinity]));
+  const baseSpan = Math.max(rawMax - rawMin, Math.abs(rawMax) * 0.002, 1e-9);
+  const yPad = baseSpan * 0.03;
+  const yMin = rawMin >= 0 ? Math.max(0, rawMin - yPad) : rawMin - yPad;
+  const yMax = rawMax + yPad;
+  const axisDecimals = inferPriceDecimals(yMin, yMax);
 
   const CustomTooltip = ({ active, payload }: any) => {
     if (!active || !payload?.length) return null;
@@ -1070,29 +1339,54 @@ function CandlestickChart({ candles, trades, stopPrice, targetPrice }: Candlesti
     if (!d) return null;
     return (
       <div className="bg-gray-900 text-white text-xs rounded px-3 py-2 shadow-lg">
-        <p className="font-semibold mb-1">{d.label}</p>
-        <p>O: {d.open?.toFixed(2)}  H: {d.high?.toFixed(2)}</p>
-        <p>L: {d.low?.toFixed(2)}  C: {d.close?.toFixed(2)}</p>
+        <p className="font-semibold mb-1">
+          {new Date(d.time).toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          })}
+        </p>
+        <p>O: {formatPriceWithDecimals(Number(d.open), axisDecimals)}  H: {formatPriceWithDecimals(Number(d.high), axisDecimals)}</p>
+        <p>L: {formatPriceWithDecimals(Number(d.low), axisDecimals)}  C: {formatPriceWithDecimals(Number(d.close), axisDecimals)}</p>
         <p className="text-gray-400">Vol: {d.volume?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
       </div>
     );
   };
 
   return (
-    <ResponsiveContainer width="100%" height={280}>
-      <ComposedChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+    <div className="space-y-2">
+      <div className="flex items-center gap-4 text-[11px] text-gray-500">
+        <span className="inline-flex items-center gap-1">
+          <span className="w-3 h-0.5 bg-cyan-500 inline-block" />
+          Entry marker
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-3 h-0.5 bg-amber-500 inline-block" />
+          Exit marker
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-3 h-0.5 bg-blue-500 inline-block" />
+          Entry price
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={280}>
+        <ComposedChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" strokeOpacity={0.4} />
         <XAxis
-          dataKey="label"
+          dataKey="time"
+          type="number"
+          domain={['dataMin', 'dataMax']}
           tick={{ fontSize: 10, fill: '#9ca3af' }}
-          interval={Math.floor(data.length / 8)}
+          interval={Math.max(0, Math.floor(data.length / 8))}
+          tickFormatter={(value) => formatTimeAxis(value, timeframe)}
           tickLine={false}
         />
         <YAxis
           domain={[yMin, yMax]}
           tick={{ fontSize: 10, fill: '#9ca3af' }}
-          tickFormatter={(v) => v.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-          width={60}
+          tickFormatter={(v) => formatPriceWithDecimals(v, axisDecimals)}
+          width={80}
           tickLine={false}
         />
         <Tooltip content={<CustomTooltip />} />
@@ -1121,21 +1415,56 @@ function CandlestickChart({ candles, trades, stopPrice, targetPrice }: Candlesti
           strokeOpacity={0.4}
         />
 
-        {/* Trade entry markers */}
-        {tradeMarkers.map((m, i) => (
+          {/* Entry/exit execution markers */}
+          {executionMarkers.map((m, i) => {
+            const isEntry = m.intent === 'entry';
+            const color = isEntry ? '#06b6d4' : (m.intent === 'exit' ? '#f59e0b' : (m.side === 'buy' ? '#16a34a' : '#dc2626'));
+            const labelText = isEntry
+              ? (m.side === 'buy' ? 'ENTRY ▲' : 'ENTRY ▼')
+              : (m.intent === 'exit'
+                ? (m.side === 'sell' ? 'EXIT ▼' : 'EXIT ▲')
+                : (m.side === 'buy' ? '▲' : '▼'));
+            return (
+              <ReferenceLine
+                key={`exec-${i}`}
+                x={m.time}
+                stroke={color}
+                strokeWidth={1.5}
+                strokeDasharray="4 2"
+                label={{
+                  value: labelText,
+                  fill: color,
+                  fontSize: 10,
+                }}
+              />
+            );
+          })}
+
+        {/* Open position entry marker (if visible in current candle window) */}
+        {openEntryMarkerTime != null && (
           <ReferenceLine
-            key={i}
-            x={data[m.x]?.label}
-            stroke={m.side === 'buy' ? '#16a34a' : '#dc2626'}
-            strokeWidth={2}
-            strokeDasharray="4 2"
+            x={openEntryMarkerTime}
+            stroke={openPosition?.entrySide === 'short' ? '#dc2626' : '#16a34a'}
+            strokeWidth={1.5}
+            strokeDasharray="2 2"
             label={{
-              value: m.side === 'buy' ? '▲' : '▼',
-              fill: m.side === 'buy' ? '#16a34a' : '#dc2626',
-              fontSize: 12,
+              value: openPosition?.entrySide === 'short' ? 'entry ▼' : 'entry ▲',
+              fill: openPosition?.entrySide === 'short' ? '#dc2626' : '#16a34a',
+              fontSize: 10,
             }}
           />
-        ))}
+        )}
+
+        {/* Entry price reference line for active position */}
+        {openPosition?.entryPrice != null && (
+          <ReferenceLine
+            y={openPosition.entryPrice}
+            stroke="#3b82f6"
+            strokeWidth={1}
+            strokeDasharray="4 3"
+            label={{ value: `entry ${formatPriceWithDecimals(openPosition.entryPrice, axisDecimals)}`, fill: '#3b82f6', fontSize: 10, position: 'right' }}
+          />
+        )}
 
         {/* Stop loss line */}
         {stopPrice != null && (
@@ -1144,7 +1473,7 @@ function CandlestickChart({ candles, trades, stopPrice, targetPrice }: Candlesti
             stroke="#ef4444"
             strokeWidth={1.5}
             strokeDasharray="6 3"
-            label={{ value: `stop ${stopPrice.toFixed(0)}`, fill: '#ef4444', fontSize: 10, position: 'right' }}
+            label={{ value: `stop ${formatPriceWithDecimals(stopPrice, axisDecimals)}`, fill: '#ef4444', fontSize: 10, position: 'right' }}
           />
         )}
 
@@ -1155,11 +1484,12 @@ function CandlestickChart({ candles, trades, stopPrice, targetPrice }: Candlesti
             stroke="#22c55e"
             strokeWidth={1.5}
             strokeDasharray="6 3"
-            label={{ value: `target ${targetPrice.toFixed(0)}`, fill: '#22c55e', fontSize: 10, position: 'right' }}
+            label={{ value: `target ${formatPriceWithDecimals(targetPrice, axisDecimals)}`, fill: '#22c55e', fontSize: 10, position: 'right' }}
           />
         )}
-      </ComposedChart>
-    </ResponsiveContainer>
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 

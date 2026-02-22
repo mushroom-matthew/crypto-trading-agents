@@ -94,6 +94,51 @@ def test_trigger_engine_records_block_when_risk_denies_entry():
     assert blocks[0]["reason"] in {"max_position_risk_pct", "sizing_zero"}
 
 
+def test_rr_gate_blocks_stretched_target_when_capped_by_htf_structure():
+    trigger = TriggerCondition(
+        id="btc_long",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="False",
+        category="trend_continuation",
+        stop_loss_pct=5.0,
+        target_anchor_type="r_multiple_3",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_rr_ratio=1.2, max_triggers_per_symbol_per_bar=2)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=68000.0,
+        high=68100.0,
+        low=67900.0,
+        close=68000.0,
+        volume=1.0,
+    )
+    indicator = IndicatorSnapshot(
+        symbol="BTC-USD",
+        timeframe="1h",
+        as_of=bar.timestamp,
+        close=68000.0,
+        atr_14=500.0,
+        htf_daily_high=69000.0,
+        htf_5d_high=70000.0,
+        htf_price_vs_daily_mid=0.3,
+        breakout_confirmed=0.0,
+        expansion_flag=0.0,
+        vol_burst=False,
+    )
+
+    orders, blocks = engine.on_bar(bar, indicator, _portfolio())
+    assert not orders
+    rr_blocks = [b for b in blocks if b["reason"] == "insufficient_rr"]
+    assert rr_blocks, blocks
+
+
 def test_emergency_exit_trigger_bypasses_risk_checks():
     trigger = TriggerCondition(
         id="btc_exit",

@@ -65,6 +65,7 @@ Multi-layer synthesis requirements:
    - Stop: set stop_anchor_type to a structural level (e.g. 'htf_daily_extreme', 'donchian_extreme', 'atr') OR set stop_loss_pct > 0 for a percentage stop. Prefer structural anchors over percentage stops when htf_* or donchian fields are available.
    - Target: set target_anchor_type (e.g. 'htf_daily_extreme', 'htf_5d_extreme', 'measured_move', 'r_multiple_2'). r_multiple_2 (2× risk) and r_multiple_3 (3× risk) guarantee R:R regardless of market structure; structural anchors use actual price levels.
    - R:R requirement: the prospective risk-to-reward ratio must be ≥ 1.2. Entries where the target distance / stop distance < 1.2 are BLOCKED at order time. To guarantee passage, use r_multiple_2 (R:R = 2.0) or r_multiple_3 (R:R = 3.0). For structural anchors (htf_daily_extreme, htf_5d_extreme), verify the target level is far enough from entry relative to the stop; if the target is too close, widen the timeframe or use a different target anchor.
+   - Target realism constraint (REQUIRED): in non-breakout/range-like context (e.g. breakout_confirmed <= 0, expansion_flag <= 0, vol_burst == false, |htf_price_vs_daily_mid| <= 1.5), do NOT place long targets materially above htf_5d_high (or htf_daily_high when 5d is missing), and do NOT place short targets materially below htf_5d_low (or htf_daily_low fallback). If r_multiple/measured_move implies a farther level, cap the target to the nearest HTF extreme and downgrade confidence.
    Scale-in behavior: The risk engine allows scale-ins (adding to existing positions in the same direction) subject to aggregate risk limits. When scaling in, the existing position's risk is subtracted from the risk cap, and only the remaining risk budget is available for the new entry. If aggregate risk would exceed max_position_risk_pct, the scale-in is blocked. Use "is_flat" in entry_rules if you want to prevent scale-ins; use "not is_short" (for longs) to allow scale-ins.
 9. Hold rules (optional): Use hold_rule to prevent premature exits from minor fluctuations. When hold_rule evaluates to True, the exit_rule is suppressed and the position is maintained. Emergency exits ALWAYS fire regardless of hold_rule. Use hold_rule when:
    - A trend-following position should ride minor pullbacks (e.g., hold_rule="tf_4h_close > tf_4h_sma_medium and rsi_14 > 40")
@@ -181,7 +182,7 @@ Trimmed input example:
       ]
     }
   ],
-  "risk_params": {"max_position_risk_pct": 2, "max_symbol_exposure_pct": 25, "max_portfolio_exposure_pct": 80, "max_daily_loss_pct": 3}
+  "risk_params": {"max_position_risk_pct": 2, "max_symbol_exposure_pct": 70, "max_portfolio_exposure_pct": 90, "max_daily_loss_pct": 4}
 }
 
 Trimmed output example:
@@ -190,7 +191,7 @@ Trimmed output example:
   "valid_until": "2024-06-02T00:00:00Z",
   "global_view": "BTC leading in an orderly bull channel while ETH consolidates mid-range.",
   "regime": "bull",
-  "risk_constraints": {"max_position_risk_pct": 2, "max_symbol_exposure_pct": 25, "max_portfolio_exposure_pct": 80, "max_daily_loss_pct": 3},
+  "risk_constraints": {"max_position_risk_pct": 2, "max_symbol_exposure_pct": 70, "max_portfolio_exposure_pct": 90, "max_daily_loss_pct": 4},
   "sizing_rules": [
     {"symbol": "BTC-USD", "sizing_mode": "fixed_fraction", "target_risk_pct": 1.5},
     {"symbol": "ETH-USD", "sizing_mode": "fixed_fraction", "target_risk_pct": 1.0}

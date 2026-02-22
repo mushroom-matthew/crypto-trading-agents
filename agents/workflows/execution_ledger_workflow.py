@@ -43,6 +43,7 @@ class ExecutionLedgerWorkflow:
         self.trading_wallet_name = os.environ.get("LEDGER_TRADING_WALLET_NAME", "mock_trading")
         self.equity_wallet_name = os.environ.get("LEDGER_EQUITY_WALLET_NAME", "system_equity")
         self.wallet_provider: WalletProvider | None = None
+        self.stopped = False
 
     def _env_int(self, key: str) -> int | None:
         value = os.environ.get(key)
@@ -160,6 +161,12 @@ class ExecutionLedgerWorkflow:
         self.transaction_history = []
         self.fill_count = 0
         workflow.logger.info("Portfolio reset to initial state")
+
+    @workflow.signal
+    def stop_workflow(self) -> None:
+        """Stop this ledger workflow."""
+        self.stopped = True
+        workflow.logger.info("Execution ledger stop requested")
 
     @workflow.signal
     def update_last_prices(self, prices: Dict[str, float]) -> None:
@@ -690,4 +697,4 @@ class ExecutionLedgerWorkflow:
 
     @workflow.run
     async def run(self) -> None:
-        await workflow.wait_condition(lambda: False)
+        await workflow.wait_condition(lambda: self.stopped)

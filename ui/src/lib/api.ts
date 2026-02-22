@@ -811,6 +811,12 @@ export interface PaperTradingActivityEvent {
   source: string;
 }
 
+export interface PaperTradingStructureSnapshot {
+  session_id: string;
+  count: number;
+  indicators: Record<string, Record<string, any>>;
+}
+
 export interface PaperTradingTrade {
   timestamp: string;
   symbol: string;
@@ -1008,6 +1014,14 @@ export const paperTradingAPI = {
   getActivity: async (sessionId: string, limit = 40): Promise<{ session_id: string; events: PaperTradingActivityEvent[] }> => {
     const response = await api.get(`/paper-trading/sessions/${sessionId}/activity`, {
       params: { limit },
+    });
+    return response.data;
+  },
+
+  // Get latest indicator snapshots (HTF structure + indicator context)
+  getStructure: async (sessionId: string, symbol?: string): Promise<PaperTradingStructureSnapshot> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/structure`, {
+      params: symbol ? { symbol } : undefined,
     });
     return response.data;
   },

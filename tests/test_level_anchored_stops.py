@@ -241,6 +241,39 @@ def test_target_r_multiple_3():
     assert price == pytest.approx(53000.0, rel=1e-6)
 
 
+def test_target_r_multiple_clamped_to_weekly_high_in_range_context():
+    """Computed long targets are capped near 5d resistance when not in breakout mode."""
+    trig = _trigger(target_anchor_type="r_multiple_3")
+    snap = _snapshot(
+        htf_5d_high=53000.0,
+        htf_price_vs_daily_mid=0.3,
+        breakout_confirmed=0.0,
+        expansion_flag=0.0,
+        vol_burst=False,
+    )
+    # raw r_multiple_3 target = 50000 + 3*(50000-48000) = 56000
+    stop = 48000.0
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, stop, snap, "long")
+    assert anchor == "r_multiple_3"
+    assert price == pytest.approx(53000.0 * 1.002, rel=1e-6)
+
+
+def test_target_r_multiple_not_clamped_when_breakout_confirmed():
+    """When breakout signals are present, extension targets are allowed."""
+    trig = _trigger(target_anchor_type="r_multiple_3")
+    snap = _snapshot(
+        htf_5d_high=53000.0,
+        htf_price_vs_daily_mid=0.3,
+        breakout_confirmed=1.0,
+        expansion_flag=1.0,
+        vol_burst=True,
+    )
+    stop = 48000.0
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, stop, snap, "long")
+    assert anchor == "r_multiple_3"
+    assert price == pytest.approx(56000.0, rel=1e-6)
+
+
 def test_target_none_anchor_type():
     """No target_anchor_type → (None, None)."""
     trig = _trigger()  # no target_anchor_type
@@ -751,3 +784,75 @@ def test_stop_loss_atr_mult_field_accepted():
         stop_loss_atr_mult=2.5,
     )
     assert trig.stop_loss_atr_mult == pytest.approx(2.5)
+
+
+# ---------------------------------------------------------------------------
+# Regression: stop + target resolved together (paper trading bug)
+# When target_anchor_type is set, the stop must still resolve correctly.
+# Bug: _resolve_target_price_anchored was called with wrong arg order in
+# paper_trading._resolve_order_stop_target, causing both stop AND target to
+# silently return None when target_anchor_type was present.
+# ---------------------------------------------------------------------------
+
+def test_stop_resolves_when_target_anchor_r_multiple_2():
+    """Stop must resolve even when target uses r_multiple_2.
+
+    Simulates the paper trading path:
+      stop_abs = _resolve_stop_price_anchored(...)
+      target_abs = _resolve_target_price_anchored(..., stop_price=stop_abs, ...)
+    """
+    trig = _trigger(
+        stop_loss_pct=2.0,
+        target_anchor_type="r_multiple_2",
+    )
+    snap = _snapshot()
+    fill_price = 50000.0
+
+    stop_abs, stop_anchor = _resolve_stop_price_anchored(trig, fill_price, snap, "long")
+    assert stop_abs is not None, "Stop must resolve for pct anchor"
+    assert stop_abs == pytest.approx(fill_price * 0.98, rel=1e-6)
+
+    target_abs, target_anchor = _resolve_target_price_anchored(
+        trig, fill_price, stop_abs, snap, "long"
+    )
+    assert target_abs is not None, "Target must resolve for r_multiple_2 when stop is set"
+    risk = fill_price - stop_abs
+    assert target_abs == pytest.approx(fill_price + 2 * risk, rel=1e-6)
+
+
+def test_stop_resolves_when_target_anchor_r_multiple_3():
+    """Stop resolves independently of target_anchor_type=r_multiple_3."""
+    trig = _trigger(
+        stop_loss_pct=2.0,
+        target_anchor_type="r_multiple_3",
+    )
+    snap = _snapshot()
+    fill_price = 50000.0
+
+    stop_abs, _ = _resolve_stop_price_anchored(trig, fill_price, snap, "long")
+    assert stop_abs == pytest.approx(fill_price * 0.98, rel=1e-6)
+
+    target_abs, anchor = _resolve_target_price_anchored(
+        trig, fill_price, stop_abs, snap, "long"
+    )
+    risk = fill_price - stop_abs
+    assert target_abs == pytest.approx(fill_price + 3 * risk, rel=1e-6)
+    assert anchor == "r_multiple_3"
+
+
+def test_stop_resolves_when_target_anchor_htf_daily_extreme():
+    """Structural stop still resolves when target uses htf_daily_extreme."""
+    trig = _trigger(
+        stop_anchor_type="htf_daily_extreme",
+        target_anchor_type="htf_daily_extreme",
+    )
+    snap = _snapshot(htf_daily_low=48500.0, htf_daily_high=52500.0)
+    fill_price = 50000.0
+
+    stop_abs, stop_anchor = _resolve_stop_price_anchored(trig, fill_price, snap, "long")
+    assert stop_abs == pytest.approx(48500.0 * 0.995, rel=1e-6)
+
+    target_abs, target_anchor = _resolve_target_price_anchored(
+        trig, fill_price, stop_abs, snap, "long"
+    )
+    assert target_abs == pytest.approx(52500.0 * 0.998, rel=1e-6)

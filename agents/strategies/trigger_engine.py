@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -596,34 +597,101 @@ class TriggerEngine:
         if not anchor:
             return None
 
-        if anchor == "r_multiple_2":
-            return stop_distance * 2.0
-        if anchor == "r_multiple_3":
-            return stop_distance * 3.0
+        def _to_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                parsed = float(value)
+                return parsed if math.isfinite(parsed) else None
+            except (TypeError, ValueError):
+                return None
 
-        if anchor == "measured_move":
+        def _apply_structure_cap(candidate: float | None) -> float | None:
+            if candidate is None:
+                return None
+
+            mid_score = _to_float(getattr(indicator, "htf_price_vs_daily_mid", None))
+            if mid_score is None or abs(mid_score) > 1.5:
+                return candidate
+
+            breakout_confirmed = _to_float(getattr(indicator, "breakout_confirmed", None)) or 0.0
+            expansion_flag = _to_float(getattr(indicator, "expansion_flag", None)) or 0.0
+            vol_burst = bool(getattr(indicator, "vol_burst", None))
+            if breakout_confirmed > 0 or expansion_flag > 0 or vol_burst:
+                return candidate
+
+            if direction == "long":
+                weekly_high = _to_float(getattr(indicator, "htf_5d_high", None))
+                daily_high = _to_float(getattr(indicator, "htf_daily_high", None))
+                ceiling = None
+                if weekly_high:
+                    if entry_price > weekly_high * 1.002:
+                        return candidate
+                    ceiling = weekly_high * 1.002
+                elif daily_high:
+                    if entry_price > daily_high * 1.002:
+                        return candidate
+                    ceiling = daily_high * 1.002
+                if ceiling is None:
+                    return candidate
+                capped = min(candidate, ceiling)
+                return capped if capped > entry_price else None
+
+            if direction == "short":
+                weekly_low = _to_float(getattr(indicator, "htf_5d_low", None))
+                daily_low = _to_float(getattr(indicator, "htf_daily_low", None))
+                floor = None
+                if weekly_low:
+                    if entry_price < weekly_low * 0.998:
+                        return candidate
+                    floor = weekly_low * 0.998
+                elif daily_low:
+                    if entry_price < daily_low * 0.998:
+                        return candidate
+                    floor = daily_low * 0.998
+                if floor is None:
+                    return candidate
+                capped = max(candidate, floor)
+                return capped if capped < entry_price else None
+
+            return candidate
+
+        target_price: float | None = None
+        if anchor == "r_multiple_2":
+            target_price = entry_price + 2.0 * stop_distance if direction == "long" else entry_price - 2.0 * stop_distance
+        elif anchor == "r_multiple_3":
+            target_price = entry_price + 3.0 * stop_distance if direction == "long" else entry_price - 3.0 * stop_distance
+        elif anchor == "measured_move":
             upper = indicator.donchian_upper_short
             lower = indicator.donchian_lower_short
             if upper is not None and lower is not None and upper > lower:
-                return upper - lower
+                range_height = upper - lower
+                target_price = entry_price + range_height if direction == "long" else entry_price - range_height
+            else:
+                return None
+        elif anchor in {"htf_daily_high", "htf_daily_extreme"} and direction == "long":
+            level = indicator.htf_daily_high
+            target_price = level * 0.998 if level else None
+        elif anchor in {"htf_5d_high", "htf_5d_extreme"} and direction == "long":
+            level = indicator.htf_5d_high
+            target_price = level * 0.998 if level else None
+        elif anchor in {"htf_daily_low", "htf_daily_extreme"} and direction == "short":
+            level = indicator.htf_daily_low
+            target_price = level * 1.002 if level else None
+        elif anchor in {"htf_5d_low", "htf_5d_extreme"} and direction == "short":
+            level = indicator.htf_5d_low
+            target_price = level * 1.002 if level else None
+        else:
             return None
 
-        if anchor in {"htf_daily_high", "htf_daily_extreme"} and direction == "long":
-            level = indicator.htf_daily_high
-            return abs(level * 0.998 - entry_price) if level else None
+        target_price = _apply_structure_cap(target_price)
+        if target_price is None:
+            return None
 
-        if anchor in {"htf_5d_high", "htf_5d_extreme"} and direction == "long":
-            level = indicator.htf_5d_high
-            return abs(level * 0.998 - entry_price) if level else None
-
-        if anchor in {"htf_daily_low", "htf_daily_extreme"} and direction == "short":
-            level = indicator.htf_daily_low
-            return abs(entry_price - level * 1.002) if level else None
-
-        if anchor in {"htf_5d_low", "htf_5d_extreme"} and direction == "short":
-            level = indicator.htf_5d_low
-            return abs(entry_price - level * 1.002) if level else None
-
+        if direction == "long":
+            return target_price - entry_price if target_price > entry_price else None
+        if direction == "short":
+            return entry_price - target_price if target_price < entry_price else None
         return None
 
     def _entry_order(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Literal
 from uuid import uuid4
 
@@ -22,6 +22,29 @@ TASK_QUEUE = os.environ.get("TASK_QUEUE", "mcp-tools")
 def _paper_ledger_workflow_id(session_id: str) -> str:
     """Return the dedicated ledger workflow id for a paper-trading session."""
     return f"{session_id}-ledger"
+
+
+async def _cleanup_session_ledger(
+    client: Any,
+    session_id: str,
+    terminate: bool = False,
+) -> None:
+    """Best-effort cleanup of the session-scoped ledger workflow."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+    ledger_handle = client.get_workflow_handle(ledger_workflow_id)
+    try:
+        if terminate:
+            await ledger_handle.terminate(reason=f"paper_session_terminated:{session_id}")
+        else:
+            await ledger_handle.signal("stop_workflow")
+    except RPCError as err:
+        if err.status == RPCStatusCode.NOT_FOUND or "not found" in str(err).lower():
+            return
+        logger.warning("Failed to cleanup ledger workflow %s: %s", ledger_workflow_id, err)
+    except Exception as err:
+        logger.warning("Failed to cleanup ledger workflow %s: %s", ledger_workflow_id, err)
 
 
 # ============================================================================
@@ -338,6 +361,36 @@ async def start_session(config: PaperTradingSessionConfig):
                     normalized_key = f"{normalized_key}-USD"
                 initial_allocations[normalized_key] = float(value)
 
+            # Allocation semantics:
+            # - If cash is omitted, symbol allocations are funded from initial_cash.
+            # - If cash is provided, cash + symbol allocations must not exceed initial_cash.
+            non_cash_total = sum(
+                max(0.0, float(v))
+                for k, v in initial_allocations.items()
+                if k != "cash"
+            )
+            explicit_cash = initial_allocations.get("cash")
+            if explicit_cash is None:
+                if non_cash_total > float(config.initial_cash) + 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Initial allocations ({non_cash_total:.2f}) exceed initial_cash "
+                            f"({float(config.initial_cash):.2f})."
+                        ),
+                    )
+                initial_allocations["cash"] = max(0.0, float(config.initial_cash) - non_cash_total)
+            else:
+                total_budget = float(explicit_cash) + non_cash_total
+                if total_budget > float(config.initial_cash) + 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"cash + allocations ({total_budget:.2f}) exceed initial_cash "
+                            f"({float(config.initial_cash):.2f})."
+                        ),
+                    )
+
         # Build risk_params dict from config
         risk_params = {}
         if config.max_position_risk_pct is not None:
@@ -416,12 +469,17 @@ async def start_session(config: PaperTradingSessionConfig):
             else:
                 raise
 
-        await client.start_workflow(
-            PaperTradingWorkflow.run,
-            args=[workflow_config, None],  # config, resume_state
-            id=session_id,
-            task_queue=TASK_QUEUE,
-        )
+        try:
+            await client.start_workflow(
+                PaperTradingWorkflow.run,
+                args=[workflow_config, None],  # config, resume_state
+                id=session_id,
+                task_queue=TASK_QUEUE,
+            )
+        except Exception:
+            # Avoid orphaning a ledger if parent start fails.
+            await _cleanup_session_ledger(client, session_id, terminate=True)
+            raise
 
         logger.info(f"Started paper trading session: {session_id}")
 
@@ -480,8 +538,10 @@ async def stop_session(session_id: str):
 
         # Signal workflow to stop
         await handle.signal("stop_session")
+        # Best-effort stop of session-scoped ledger.
+        await _cleanup_session_ledger(client, session_id, terminate=False)
 
-        return {"session_id": session_id, "status": "stopping", "message": "Stop signal sent"}
+        return {"session_id": session_id, "status": "stopping", "message": "Stop signal sent to session and ledger"}
 
     except RPCError as e:
         if "not found" in str(e).lower():
@@ -489,6 +549,36 @@ async def stop_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to stop session: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/terminate")
+async def terminate_session(session_id: str):
+    """Hard terminate a paper trading session and its session-scoped ledger."""
+    from ops_api.temporal_client import get_temporal_client
+    from temporalio.service import RPCError, RPCStatusCode
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(session_id)
+
+        try:
+            await handle.terminate(reason=f"user_requested_terminate:{session_id}")
+        except RPCError as err:
+            if err.status != RPCStatusCode.NOT_FOUND and "not found" not in str(err).lower():
+                raise
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+        await _cleanup_session_ledger(client, session_id, terminate=True)
+        return {"session_id": session_id, "status": "terminated", "message": "Session and ledger terminated"}
+    except HTTPException:
+        raise
+    except RPCError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to terminate session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -855,7 +945,16 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                 exit_ts_sec = ts_raw if ts_raw < 1e12 else ts_raw / 1000.0
                 hold_minutes = (exit_ts_sec - entry_ts_sec) / 60.0
 
-                trade_sets.append({
+                # R-per-hour: net_pnl / initial_risk / hold_hours
+                stop_px = entry.get("stop_price_abs")
+                r_per_hour = None
+                if stop_px and entry_price > 0 and hold_minutes > 0:
+                    initial_risk = abs(entry_price - float(stop_px)) * used_qty
+                    if initial_risk > 0:
+                        r_return = net_pnl / initial_risk
+                        r_per_hour = round(r_return / (hold_minutes / 60.0), 4)
+
+                ts_rec: Dict[str, Any] = {
                     "symbol": symbol,
                     "entry_time": _ts_to_iso(entry_ts),
                     "exit_time": _ts_to_iso(ts_raw),
@@ -872,7 +971,11 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                     "exit_trigger": tx.get("trigger_id"),
                     "category": entry.get("trigger_category"),
                     "winner": net_pnl > 0,
-                })
+                    "stop_price_abs": stop_px,
+                    "r_per_hour": r_per_hour,
+                    "estimated_bars_to_resolution": entry.get("estimated_bars_to_resolution"),
+                }
+                trade_sets.append(ts_rec)
 
         # Return most recent completed trades first
         trade_sets = list(reversed(trade_sets))[:limit]
@@ -882,12 +985,18 @@ async def get_trade_sets(session_id: str, limit: int = 50):
         winners = sum(1 for t in trade_sets if t["winner"])
         total_pnl = sum(t["net_pnl"] for t in trade_sets)
         win_rate = winners / total * 100 if total else 0.0
+        rph_values = [t["r_per_hour"] for t in trade_sets if t.get("r_per_hour") is not None]
+        median_rph = sorted(rph_values)[len(rph_values) // 2] if rph_values else None
+        hold_values = [t["hold_minutes"] for t in trade_sets]
+        median_hold_minutes = sorted(hold_values)[len(hold_values) // 2] if hold_values else None
 
         return {
             "session_id": session_id,
             "total_completed_trades": total,
             "win_rate_pct": round(win_rate, 1),
             "total_net_pnl": round(total_pnl, 4),
+            "median_r_per_hour": median_rph,
+            "median_hold_minutes": median_hold_minutes,
             "trade_sets": trade_sets,
         }
 
@@ -933,6 +1042,56 @@ async def get_session_activity(session_id: str, limit: int = 40):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/sessions/{session_id}/structure")
+async def get_structure_snapshot(session_id: str, symbol: Optional[str] = None):
+    """Get latest indicator snapshot(s) used for structure-aware planning."""
+    from ops_api.temporal_client import get_temporal_client
+    from temporalio.service import RPCError
+
+    symbol_norm = symbol.upper() if symbol else None
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(session_id)
+
+        # Prefer live-ish 1m snapshots when available; fall back to plan-time
+        # snapshots for backward compatibility with older workflow runs.
+        try:
+            if symbol_norm:
+                indicators = await handle.query("get_live_indicators", symbol_norm)
+            else:
+                indicators = await handle.query("get_live_indicators")
+        except RPCError:
+            if symbol_norm:
+                indicators = await handle.query("get_last_indicators", symbol_norm)
+            else:
+                indicators = await handle.query("get_last_indicators")
+
+        if not isinstance(indicators, dict):
+            indicators = {}
+
+        return {
+            "session_id": session_id,
+            "count": len(indicators),
+            "indicators": indicators,
+        }
+    except RPCError as e:
+        msg = str(e).lower()
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        # Backward compatibility for sessions started before this query existed.
+        if "query" in msg and "get_last_indicators" in msg:
+            return {
+                "session_id": session_id,
+                "count": 0,
+                "indicators": {},
+            }
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get structure snapshot: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/sessions/{session_id}/candles")
 async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str = "1m", limit: int = 120):
     """Fetch recent OHLCV candles for charting.
@@ -947,15 +1106,123 @@ async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str =
     ccxt_symbol = symbol.replace("-", "/")
     # Map UI timeframe labels to ccxt timeframe strings
     tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-    ccxt_tf = tf_map.get(timeframe, "1m")
+    tf = timeframe.strip()
+    ccxt_tf = tf_map.get(tf, "1m")
+    ohlcv: List[List[float]] = []
 
+    def _aggregate_fixed_hour_bars(rows: List[List[float]], hours: int) -> List[List[float]]:
+        """Aggregate lower timeframe rows into fixed-hour candles."""
+        if hours <= 1 or not rows:
+            return rows
+        bucket_ms = hours * 60 * 60 * 1000
+        buckets: Dict[int, Dict[str, float]] = {}
+        order: List[int] = []
+        for row in rows:
+            if len(row) < 6:
+                continue
+            ts_ms, o, h, l, c, v = row[:6]
+            bucket_start = int((int(ts_ms) // bucket_ms) * bucket_ms)
+            if bucket_start not in buckets:
+                buckets[bucket_start] = {
+                    "time": float(bucket_start),
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(c),
+                    "volume": float(v),
+                }
+                order.append(bucket_start)
+            else:
+                b = buckets[bucket_start]
+                b["high"] = max(b["high"], float(h))
+                b["low"] = min(b["low"], float(l))
+                b["close"] = float(c)
+                b["volume"] += float(v)
+        order.sort()
+        return [
+            [
+                int(buckets[k]["time"]),
+                buckets[k]["open"],
+                buckets[k]["high"],
+                buckets[k]["low"],
+                buckets[k]["close"],
+                buckets[k]["volume"],
+            ]
+            for k in order
+        ]
+
+    exchange = ccxt.coinbase({"enableRateLimit": True})
     try:
-        exchange = ccxt.coinbase({"enableRateLimit": True})
-        ohlcv = await exchange.fetch_ohlcv(ccxt_symbol, ccxt_tf, limit=limit)
-        await exchange.close()
+        # Coinbase often lacks native 1w/1M bars in ccxt. Build them from 1d.
+        if tf in {"1w", "1M"}:
+            # Weekly needs ~7 days/bar; monthly ~31 days/bar.
+            lookback_days = max(limit * (7 if tf == "1w" else 31), 90)
+            daily = await exchange.fetch_ohlcv(ccxt_symbol, "1d", limit=lookback_days)
+            buckets: Dict[str, Dict[str, float]] = {}
+            order: List[str] = []
+
+            for row in daily:
+                ts_ms, o, h, l, c, v = row
+                dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+                if tf == "1w":
+                    iso = dt.isocalendar()
+                    key = f"{iso.year}-W{iso.week:02d}"
+                else:
+                    key = f"{dt.year}-{dt.month:02d}"
+
+                if key not in buckets:
+                    buckets[key] = {
+                        "time": float(ts_ms),
+                        "open": float(o),
+                        "high": float(h),
+                        "low": float(l),
+                        "close": float(c),
+                        "volume": float(v),
+                    }
+                    order.append(key)
+                else:
+                    b = buckets[key]
+                    b["high"] = max(b["high"], float(h))
+                    b["low"] = min(b["low"], float(l))
+                    b["close"] = float(c)
+                    b["volume"] += float(v)
+
+            ohlcv = [
+                [
+                    int(buckets[k]["time"]),
+                    buckets[k]["open"],
+                    buckets[k]["high"],
+                    buckets[k]["low"],
+                    buckets[k]["close"],
+                    buckets[k]["volume"],
+                ]
+                for k in order
+            ]
+            if len(ohlcv) > limit:
+                ohlcv = ohlcv[-limit:]
+        elif tf == "4h":
+            # Prefer native 4h bars, but fallback to aggregating 1h if unavailable.
+            try:
+                ohlcv = await exchange.fetch_ohlcv(ccxt_symbol, "4h", limit=limit)
+            except Exception as native_err:
+                logger.info("Native 4h candles unavailable for %s: %s", symbol, native_err)
+                ohlcv = []
+            if not ohlcv:
+                lookback_hours = max(limit * 4 + 8, 240)
+                hourly = await exchange.fetch_ohlcv(ccxt_symbol, "1h", limit=lookback_hours)
+                ohlcv = _aggregate_fixed_hour_bars(hourly, 4)
+                if len(ohlcv) > limit:
+                    ohlcv = ohlcv[-limit:]
+        else:
+            ohlcv = await exchange.fetch_ohlcv(ccxt_symbol, ccxt_tf, limit=limit)
     except Exception as e:
         logger.error(f"Failed to fetch candles for {symbol}: {e}")
         raise HTTPException(status_code=502, detail=f"Exchange error: {e}")
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
     candles = [
         {

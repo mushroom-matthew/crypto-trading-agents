@@ -197,6 +197,16 @@ class RiskEngine:
         else:
             position_cap = remaining_risk_abs
 
+        # Risk-based sizing: when a stop distance is resolved, reinterpret
+        # target_risk_pct as the fraction of equity to RISK at the stop level
+        # (not the fraction to invest as notional).
+        # desired_notional was equity × pct / 100 — a small flat-fraction.
+        # The correct target is: qty = risk_dollars / stop_distance → notional = qty × price.
+        # Setting desired_notional = position_cap achieves exactly that: the symbol,
+        # portfolio, and cash caps still apply as hard upper bounds.
+        if stop_distance is not None and price > 0 and rule.sizing_mode == "fixed_fraction":
+            desired_notional = position_cap
+
         caps = {
             "max_position_risk_pct": position_cap,
             "max_symbol_exposure_pct": self._available_symbol_capacity(symbol, price, portfolio),
