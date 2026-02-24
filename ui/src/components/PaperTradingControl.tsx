@@ -78,6 +78,12 @@ export function PaperTradingControl() {
     retry: false,
   });
   const screenerPreflight = screenerPreflightQuery.data;
+  const runScreenerNow = useMutation({
+    mutationFn: () => screenerAPI.runOnce({ timeframe: '1h', lookback_bars: 50 }),
+    onSuccess: async () => {
+      await screenerPreflightQuery.refetch();
+    },
+  });
 
   // Fetch session list
   const { data: sessionsData } = useQuery({
@@ -327,6 +333,20 @@ export function PaperTradingControl() {
                   <RefreshCw className={cn('w-3.5 h-3.5', screenerPreflightQuery.isFetching && 'animate-spin')} />
                   Refresh
                 </button>
+                <button
+                  type="button"
+                  onClick={() => runScreenerNow.mutate()}
+                  disabled={runScreenerNow.isPending}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs border border-sky-300 dark:border-sky-700 hover:bg-sky-100/80 dark:hover:bg-sky-900/40 disabled:opacity-60"
+                  title="Run one screener pass now and refresh preflight"
+                >
+                  {runScreenerNow.isPending ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Zap className="w-3.5 h-3.5" />
+                  )}
+                  Run Screener Now
+                </button>
               </div>
 
               <div className="mb-3 flex items-center gap-2">
@@ -358,6 +378,17 @@ export function PaperTradingControl() {
               {!screenerPreflightQuery.isLoading && screenerPreflightQuery.error && screenerErrorStatus !== 404 && (
                 <p className="text-xs text-red-600 dark:text-red-400">
                   Failed to load screener preflight: {(screenerPreflightQuery.error as Error).message}
+                </p>
+              )}
+              {runScreenerNow.error && (
+                <p className="text-xs text-red-600 dark:text-red-400">
+                  Failed to run screener: {(runScreenerNow.error as Error).message}
+                </p>
+              )}
+              {runScreenerNow.data && (
+                <p className="text-xs text-sky-800 dark:text-sky-200">
+                  Screener refreshed: {runScreenerNow.data.top_candidates} candidates
+                  {runScreenerNow.data.selected_symbol ? `, selected ${runScreenerNow.data.selected_symbol}` : ''}.
                 </p>
               )}
 

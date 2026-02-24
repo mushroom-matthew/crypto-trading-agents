@@ -21,6 +21,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/screener", tags=["screener"])
 
 
+@router.post("/run-once")
+async def run_screener_once(
+    timeframe: str = Query(default="1h"),
+    lookback_bars: int = Query(default=50, ge=30, le=500),
+) -> dict:
+    """Run a single screener pass immediately and persist latest result/recommendation."""
+    try:
+        service = UniverseScreenerService()
+        result = await service.screen(timeframe=timeframe, lookback_bars=lookback_bars)
+        recommendation = service.recommend_from_result(result, timeframe=timeframe) if result.top_candidates else None
+        service.persist_latest(result, recommendation)
+        return {
+            "status": "ok",
+            "run_id": result.run_id,
+            "as_of": result.as_of,
+            "timeframe": timeframe,
+            "lookback_bars": lookback_bars,
+            "top_candidates": len(result.top_candidates),
+            "selected_symbol": recommendation.selected_symbol if recommendation else None,
+        }
+    except Exception as exc:
+        logger.error("Failed to run screener once: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/latest", response_model=ScreenerResult)
 async def get_latest_screener_result() -> ScreenerResult:
     """Return the most recent screener result."""

@@ -948,6 +948,21 @@ export interface PaperTradingEquityCurve {
 }
 
 export const screenerAPI = {
+  runOnce: async (params?: { timeframe?: string; lookback_bars?: number }): Promise<{
+    status: string;
+    run_id: string;
+    as_of: string;
+    timeframe: string;
+    lookback_bars: number;
+    top_candidates: number;
+    selected_symbol?: string | null;
+  }> => {
+    const response = await api.post('/screener/run-once', null, {
+      params,
+    });
+    return response.data;
+  },
+
   getRecommendations: async (maxPerGroup = 10): Promise<ScreenerRecommendationBatch> => {
     const response = await api.get('/screener/recommendations', {
       params: { max_per_group: maxPerGroup },

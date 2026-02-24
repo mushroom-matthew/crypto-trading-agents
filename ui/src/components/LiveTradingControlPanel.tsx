@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -56,6 +56,12 @@ export function LiveTradingControlPanel() {
   });
 
   const screenerErrorStatus = (preflightQuery.error as any)?.response?.status as number | undefined;
+  const runScreenerNow = useMutation({
+    mutationFn: () => screenerAPI.runOnce({ timeframe: '1h', lookback_bars: 50 }),
+    onSuccess: async () => {
+      await preflightQuery.refetch();
+    },
+  });
   const opsMode = statusQuery.data?.mode ?? 'unknown';
   const liveAck = Boolean(statusQuery.data?.live_trading_ack);
   const annotationApplied = Boolean(preflightQuery.data?.shortlist.annotation_meta?.applied);
@@ -115,6 +121,20 @@ export function LiveTradingControlPanel() {
             <RefreshCw className={cn('w-3.5 h-3.5', (statusQuery.isFetching || preflightQuery.isFetching) && 'animate-spin')} />
             Refresh
           </button>
+          <button
+            type="button"
+            onClick={() => runScreenerNow.mutate()}
+            disabled={runScreenerNow.isPending}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-full border border-red-300 dark:border-red-700 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60"
+            title="Run one screener pass now and refresh live preflight"
+          >
+            {runScreenerNow.isPending ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5" />
+            )}
+            Run Screener Now
+          </button>
         </div>
       </div>
 
@@ -154,6 +174,17 @@ export function LiveTradingControlPanel() {
           {!preflightQuery.isLoading && preflightQuery.error && screenerErrorStatus !== 404 && (
             <div className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/10 p-3 text-sm text-red-700 dark:text-red-300">
               Failed to load live preflight: {(preflightQuery.error as Error).message}
+            </div>
+          )}
+          {runScreenerNow.error && (
+            <div className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/10 p-3 text-sm text-red-700 dark:text-red-300">
+              Failed to run screener: {(runScreenerNow.error as Error).message}
+            </div>
+          )}
+          {runScreenerNow.data && (
+            <div className="rounded-md border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">
+              Screener refreshed: {runScreenerNow.data.top_candidates} candidates
+              {runScreenerNow.data.selected_symbol ? `, selected ${runScreenerNow.data.selected_symbol}` : ''}.
             </div>
           )}
 
