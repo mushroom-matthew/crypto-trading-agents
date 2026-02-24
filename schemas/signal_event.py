@@ -169,3 +169,13 @@ class SignalEvent(BaseModel):
             "Null if NullModelScorer active."
         ),
     )
+
+    # --- Research attribution (Runbook 48) ---
+    experiment_id: Optional[str] = Field(
+        default=None,
+        description="ExperimentSpec ID if this signal was a research trade.",
+    )
+    playbook_id: Optional[str] = Field(
+        default=None,
+        description="Playbook being tested by this research trade.",
+    )

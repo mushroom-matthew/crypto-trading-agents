@@ -1,0 +1,53 @@
+RESEARCH LOOP GUIDANCE:
+
+When evaluating live trade performance, you have access to two new actions:
+
+1. suggest_experiment — Use when:
+   - A specific trigger condition is firing frequently but losing (win_rate < 45% over
+     10+ trades), AND you suspect the edge is regime-specific or indicator-specific.
+   - There is a playbook whose hypothesis has not yet been validated (status="insufficient_data").
+   - Propose a focused ExperimentSpec with a clear hypothesis, specific symbols, and
+     categories that isolate the suspected variable.
+   - Keep experiments narrow: one variable at a time.
+
+2. update_playbook — Use when:
+   - A playbook's Validation Evidence shows status="validated" or "refuted" with
+     n_trades >= min_sample_size, AND
+   - The Notes or Patterns section is inconsistent with the evidence.
+   - Example: volume_confirmation playbook claims volume adds 12% win rate but evidence
+     shows win_rate_high_volume = 0.48 vs win_rate_low_volume = 0.47 (no edge) — suggest
+     removing the volume filter recommendation or revising the threshold.
+   - ALWAYS set requires_human_review=True. You are suggesting, not deciding.
+
+WHEN NOT TO USE THESE ACTIONS:
+- Do not suggest an experiment if the research budget is currently paused (max_loss_usd
+  exceeded) or if an experiment is already running on the same playbook.
+- Do not suggest updating a playbook based on fewer than min_sample_size outcomes.
+- Do not suggest experiments for emergency-exit patterns — those are correctness features,
+  not hypothesis tests.
+
+EXPERIMENT SUGGESTION FORMAT (JSON):
+{
+  "action_type": "suggest_experiment",
+  "experiment_suggestion": {
+    "playbook_id": "<playbook_id>",
+    "hypothesis": "<one clear, testable hypothesis>",
+    "target_symbols": ["<symbol1>", "<symbol2>"],
+    "trigger_categories": ["<category1>"],
+    "min_sample_size": 20,
+    "max_loss_usd": 50.0,
+    "rationale": "<why you are suggesting this experiment now>"
+  }
+}
+
+PLAYBOOK EDIT SUGGESTION FORMAT (JSON):
+{
+  "action_type": "update_playbook",
+  "playbook_edit_suggestion": {
+    "playbook_id": "<playbook_id>",
+    "section": "Notes",
+    "suggested_text": "<full replacement text for the section>",
+    "evidence_summary": "<what evidence supports this edit>",
+    "requires_human_review": true
+  }
+}

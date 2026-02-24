@@ -42,6 +42,8 @@ with workflow.unsafe.imports_passed_through():
         PortfolioState,
         StrategyPlan,
     )
+    from schemas.research_budget import ResearchBudgetState
+    from schemas.experiment_spec import ExperimentSpec
     from trading_core.trigger_compiler import compile_plan
     from ops_api.event_store import EventStore
     from ops_api.schemas import Event
@@ -96,6 +98,9 @@ class SessionState(BaseModel):
     # Candle-clock: track last evaluated candle floor per timeframe to avoid
     # re-evaluating the same candle on every 30-second tick.
     last_eval_candle_by_tf: Dict[str, str] = {}
+    # Research budget: isolated capital pool for hypothesis testing (Runbook 48)
+    research: Optional["ResearchBudgetState"] = None
+    active_experiments: List[Dict[str, Any]] = []
 
 
 # ============================================================================
@@ -643,6 +648,9 @@ class PaperTradingWorkflow:
         # keyed by timeframe string (e.g. "1h").  Prevents re-evaluating within the
         # same candle and enforces at least one-candle separation between entry and exit.
         self.last_eval_candle_by_tf: Dict[str, str] = {}
+        # Research budget (Runbook 48)
+        self.research: Optional["ResearchBudgetState"] = None
+        self.active_experiments: List[Dict[str, Any]] = []
 
     # -------------------------------------------------------------------------
     # Signals
@@ -904,6 +912,19 @@ class PaperTradingWorkflow:
             self.min_volume_24h = parsed_config.min_volume_24h
             self.exit_binding_mode = parsed_config.exit_binding_mode
             self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
+
+            # Initialize research budget (separate capital pool)
+            research_fraction = float(os.environ.get("RESEARCH_BUDGET_FRACTION", "0.10"))
+            research_capital = parsed_config.initial_cash * research_fraction
+            max_loss_usd = float(
+                os.environ.get("RESEARCH_MAX_LOSS_USD", str(research_capital * 0.5))
+            )
+            self.research = ResearchBudgetState(
+                initial_capital=research_capital,
+                cash=research_capital,
+                max_loss_usd=max_loss_usd,
+            )
+            self.active_experiments = []
 
             # Initialize portfolio with starting allocations
             await self._initialize_portfolio(
@@ -1691,6 +1712,8 @@ class PaperTradingWorkflow:
             conflicting_signal_policy=self.conflicting_signal_policy,
             trigger_rule_edits=self.trigger_rule_edits,
             last_eval_candle_by_tf=dict(self.last_eval_candle_by_tf),
+            research=self.research,
+            active_experiments=list(self.active_experiments),
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -1714,3 +1737,5 @@ class PaperTradingWorkflow:
         self.conflicting_signal_policy = parsed.conflicting_signal_policy
         self.trigger_rule_edits = parsed.trigger_rule_edits
         self.last_eval_candle_by_tf = dict(parsed.last_eval_candle_by_tf)
+        self.research = parsed.research
+        self.active_experiments = list(parsed.active_experiments)
