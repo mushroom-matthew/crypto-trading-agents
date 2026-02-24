@@ -413,6 +413,7 @@ class StrategyPlanProvider:
                 "risk_constraints": plan.risk_constraints.model_dump() if plan.risk_constraints else None,
                 "context_flags": _context_flags(llm_input),
                 "source": (self.last_generation_info or {}).get("source"),
+                "retrieved_template_id": (self.last_generation_info or {}).get("retrieved_template_id"),
                 "llm_meta": self.last_generation_info,
             }
             ts = event_ts

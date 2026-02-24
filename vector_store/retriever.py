@@ -27,6 +27,15 @@ class VectorDocument:
     identifiers: List[str]
     source_path: Path
     embedding: List[float]
+    template_file: str | None = None
+
+
+@dataclass
+class RetrievalResult:
+    """Result from retrieve_context — carries the knowledge block and an optional template id."""
+
+    context: str | None
+    template_id: str | None
 
 
 _FRONTMATTER_BOUNDARY = "---"
@@ -130,6 +139,7 @@ class StrategyVectorStore:
             tags = _normalize_list(meta.get("tags"))
             identifiers = _normalize_list(meta.get("identifiers") or meta.get("rules"))
             doc_id = str(meta.get("id") or path.stem)
+            template_file = str(meta.get("template_file") or "").strip() or None
             placeholder = VectorDocument(
                 doc_id=doc_id,
                 title=title,
@@ -140,6 +150,7 @@ class StrategyVectorStore:
                 identifiers=identifiers,
                 source_path=path,
                 embedding=[],
+                template_file=template_file,
             )
             embedding = get_embedding(_doc_to_text(placeholder))
             docs.append(
@@ -153,6 +164,7 @@ class StrategyVectorStore:
                     identifiers=identifiers,
                     source_path=path,
                     embedding=embedding,
+                    template_file=template_file,
                 )
             )
         self.documents = docs
@@ -200,14 +212,14 @@ class StrategyVectorStore:
         max_strategies: int = 2,
         max_playbooks: int = 2,
         max_chars_per_doc: int = 700,
-    ) -> str | None:
+    ) -> RetrievalResult:
         if not self.documents:
-            return None
+            return RetrievalResult(context=None, template_id=None)
 
         query = self._build_query(llm_input)
         results = self.search(query, top_k=8)
         if not results:
-            return None
+            return RetrievalResult(context=None, template_id=None)
 
         available_timeframes = (llm_input.global_context or {}).get("available_timeframes") or []
         allowed = allowed_identifiers(available_timeframes)
@@ -237,7 +249,10 @@ class StrategyVectorStore:
             sections.append("STRATEGY_KNOWLEDGE:\n" + self._format_docs(strategies, allowed, max_chars_per_doc))
         if playbooks:
             sections.append("RULE_PLAYBOOKS:\n" + self._format_docs(playbooks, allowed, max_chars_per_doc))
-        return "\n\n".join(section for section in sections if section)
+        top_strategy = strategies[0] if strategies else None
+        template_id = top_strategy.template_file if top_strategy else None
+        context_str = "\n\n".join(section for section in sections if section) or None
+        return RetrievalResult(context=context_str, template_id=template_id)
 
     def _format_docs(self, docs: Iterable[VectorDocument], allowed: set[str], max_chars: int) -> str:
         formatted: List[str] = []
@@ -283,4 +298,4 @@ def vector_store_enabled() -> bool:
     return flag not in {"0", "false", "no"}
 
 
-__all__ = ["StrategyVectorStore", "get_strategy_vector_store", "vector_store_enabled"]
+__all__ = ["RetrievalResult", "StrategyVectorStore", "get_strategy_vector_store", "vector_store_enabled"]

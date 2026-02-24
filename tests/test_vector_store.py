@@ -49,6 +49,7 @@ def test_vector_store_loads_documents():
 
 def test_vector_store_retrieval_context():
     store = get_strategy_vector_store()
-    context = store.retrieve_context(_llm_input())
-    assert context is not None
-    assert "STRATEGY_KNOWLEDGE" in context
+    result = store.retrieve_context(_llm_input())
+    assert result is not None
+    assert result.context is not None
+    assert "STRATEGY_KNOWLEDGE" in result.context
