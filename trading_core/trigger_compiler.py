@@ -12,6 +12,7 @@ from typing import Iterable, List, Literal, Optional, Set, Tuple
 from data_loader.utils import timeframe_to_seconds
 from schemas.llm_strategist import IndicatorSnapshot, StrategyPlan, TriggerCondition
 from schemas.compiled_plan import CompiledExpression, CompiledPlan, CompiledTrigger
+from vector_store.retriever import allowed_identifiers_for_template as _vs_allowed_identifiers
 
 logger = logging.getLogger(__name__)
 
@@ -741,12 +742,21 @@ class ExitRuleSanitization:
 
 
 @dataclass
+class TemplateViolation:
+    """Record of a trigger blocked due to using identifiers outside the declared template."""
+    trigger_id: str
+    template_id: str
+    violations: List[str]  # identifier names not in the template's allowed set
+
+
+@dataclass
 class PlanEnforcementResult:
     """Summary of all corrections applied by enforce_plan_quality."""
     exit_binding_corrections: List[ExitBindingCorrection] = field(default_factory=list)
     hold_rules_stripped: List[HoldRuleStripped] = field(default_factory=list)
     identifier_corrections: List[IdentifierCorrection] = field(default_factory=list)
     exit_rule_sanitizations: List[ExitRuleSanitization] = field(default_factory=list)
+    template_violations: List[TemplateViolation] = field(default_factory=list)
 
     @property
     def total_corrections(self) -> int:
@@ -755,6 +765,7 @@ class PlanEnforcementResult:
             + len(self.hold_rules_stripped)
             + len(self.identifier_corrections)
             + len(self.exit_rule_sanitizations)
+            + len(self.template_violations)
         )
 
 
@@ -1121,6 +1132,92 @@ def autocorrect_identifiers(
     return corrections
 
 
+# Identifiers that are always valid regardless of which template is declared.
+# These cover position state, price, time-in-trade, exit terminals, and metadata
+# that every trigger may legitimately reference.
+_TEMPLATE_UNIVERSAL_ALLOWED: frozenset[str] = frozenset({
+    # Position state
+    "is_flat", "is_long", "is_short", "position", "position_qty", "position_value",
+    "entry_price", "avg_entry_price", "entry_side", "position_opened_at",
+    # PnL and time-in-trade
+    "unrealized_pnl_pct", "unrealized_pnl_abs", "unrealized_pnl",
+    "position_pnl_pct", "position_pnl_abs",
+    "position_age_minutes", "position_age_hours",
+    "holding_minutes", "holding_hours",
+    "time_in_trade_min", "time_in_trade_hours",
+    # Exit terminals (always valid — stop/target/flatten semantics)
+    "stop_hit", "target_hit", "force_flatten", "below_stop", "above_target",
+    # Market structure
+    "nearest_support", "nearest_resistance",
+    "distance_to_support_pct", "distance_to_resistance_pct",
+    "trend", "recent_tests",
+    # State labels
+    "trend_state", "vol_state",
+    # Symbol / timeframe metadata
+    "symbol", "timeframe",
+    # Raw price / volume (always available)
+    "close", "open", "high", "low", "volume",
+})
+
+
+def enforce_template_identifiers(
+    plan: StrategyPlan,
+) -> List[TemplateViolation]:
+    """Block triggers whose identifiers are not in the declared template's allowed set.
+
+    Emergency exits are exempt (same rule as other enforcement passes).
+    Returns the list of violations; mutates plan.triggers in-place to remove blocked ones.
+    If TEMPLATE_ENFORCEMENT_ENABLED=false, runs but returns violations without mutating.
+    """
+    import os as _os
+    template_id = plan.template_id
+    if not template_id:
+        return []
+
+    enforcement_enabled = _os.environ.get("TEMPLATE_ENFORCEMENT_ENABLED", "true").strip().lower() not in {
+        "0", "false", "no"
+    }
+
+    template_allowed = _vs_allowed_identifiers(template_id)
+    if not template_allowed:
+        logger.warning(
+            "Template '%s' not found in vector store; skipping template enforcement (fail open)",
+            template_id,
+        )
+        return []
+
+    effective_allowed = template_allowed | _TEMPLATE_UNIVERSAL_ALLOWED
+
+    violations: List[TemplateViolation] = []
+    kept: List[TriggerCondition] = []
+    for trigger in plan.triggers:
+        if trigger.category == "emergency_exit":
+            kept.append(trigger)
+            continue
+        bad: List[str] = []
+        for expr in (trigger.entry_rule, trigger.hold_rule):
+            if not expr:
+                continue
+            for name in _collect_identifiers(expr):
+                if name.lower() in {"true", "false", "none"}:
+                    continue
+                if name not in effective_allowed:
+                    bad.append(name)
+        if bad:
+            violations.append(TemplateViolation(
+                trigger_id=trigger.id,
+                template_id=template_id,
+                violations=sorted(set(bad)),
+            ))
+        else:
+            kept.append(trigger)
+
+    if enforcement_enabled and violations:
+        plan.triggers = kept
+
+    return violations
+
+
 def enforce_plan_quality(
     plan: StrategyPlan,
     available_timeframes: Set[str],
@@ -1190,15 +1287,27 @@ def enforce_plan_quality(
             s.sanitized_rule,
         )
 
+    # Template enforcement runs after all other passes so it sees fully corrected triggers.
+    result.template_violations = enforce_template_identifiers(plan)
+    for v in result.template_violations:
+        logger.warning(
+            "Trigger '%s' BLOCKED [template_identifier_violation] "
+            "template='%s' violating_identifiers=%s",
+            v.trigger_id,
+            v.template_id,
+            v.violations,
+        )
+
     if result.total_corrections:
         logger.info(
             "Plan enforcement: %d corrections applied "
-            "(%d exit-binding, %d hold-rule, %d identifier, %d exit-sanitized)",
+            "(%d exit-binding, %d hold-rule, %d identifier, %d exit-sanitized, %d template-violations)",
             result.total_corrections,
             len(result.exit_binding_corrections),
             len(result.hold_rules_stripped),
             len(result.identifier_corrections),
             len(result.exit_rule_sanitizations),
+            len(result.template_violations),
         )
 
     return result

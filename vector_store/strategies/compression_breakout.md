@@ -3,9 +3,7 @@ title: Compression Breakout
 type: strategy
 regimes: [range, volatile]
 tags: [breakout, compression, volatility, consolidation]
-identifiers: [compression_flag, bb_bandwidth_pct_rank, expansion_flag, breakout_confirmed,
-              is_impulse_candle, is_inside_bar, vol_burst, donchian_upper_short,
-              donchian_lower_short, volume_multiple, atr_14, candle_strength]
+identifiers: [compression_flag, bb_bandwidth_pct_rank, expansion_flag, breakout_confirmed, is_impulse_candle, is_inside_bar, vol_burst, donchian_upper_short, donchian_lower_short, volume_multiple, atr_14, candle_strength]
 template_file: compression_breakout
 ---
 # Compression Breakout

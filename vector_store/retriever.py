@@ -298,4 +298,24 @@ def vector_store_enabled() -> bool:
     return flag not in {"0", "false", "no"}
 
 
-__all__ = ["RetrievalResult", "StrategyVectorStore", "get_strategy_vector_store", "vector_store_enabled"]
+def allowed_identifiers_for_template(template_id: str) -> set[str]:
+    """Return the allowed indicator identifiers for a named template.
+
+    Looks up the vector store doc whose doc_id or template_file matches template_id
+    and returns its identifiers as a set.  Returns an empty set if the template is not
+    found — callers should treat an empty set as "fail open" (no enforcement).
+    """
+    store = get_strategy_vector_store()
+    for doc in store.documents:
+        if doc.doc_id == template_id or doc.template_file == template_id:
+            return set(doc.identifiers)
+    return set()
+
+
+__all__ = [
+    "RetrievalResult",
+    "StrategyVectorStore",
+    "allowed_identifiers_for_template",
+    "get_strategy_vector_store",
+    "vector_store_enabled",
+]

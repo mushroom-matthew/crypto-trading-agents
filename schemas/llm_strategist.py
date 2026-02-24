@@ -357,6 +357,22 @@ class StrategyPlan(SerializableModel):
     global_view: Optional[str] = None
     regime: Literal["bull", "bear", "range", "high_vol", "mixed"]
     stance: Literal["active", "defensive", "wait"] = "active"
+    template_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Named strategy template selected by the LLM from the provided candidate list. "
+            "Must match a template ID from the vector store (e.g., 'compression_breakout'). "
+            "Null if no template applies to current conditions."
+        ),
+    )
+    template_parameters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional threshold overrides for the selected template. "
+            "Key: parameter name (e.g., 'entry_vol_multiple_min'). "
+            "Value: float. Only parameter names documented in the template are valid."
+        ),
+    )
     triggers: List[TriggerCondition] = Field(default_factory=list)
     risk_constraints: RiskConstraint | None = None
     sizing_rules: List[PositionSizingRule] = Field(default_factory=list)

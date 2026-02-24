@@ -392,9 +392,47 @@ class LLMClient:
             base = f"{base}\n\n{prompt_context}"
         if strategy_context:
             base = f"{base}\n\n{strategy_context}"
+            # Inject template selection instructions after strategy context so the LLM
+            # knows which template IDs are available and must declare one in its output.
+            template_block = self._build_template_selection_block()
+            if template_block:
+                base = f"{base}\n\n{template_block}"
         if vector_context:
             base = f"{base}\n\n{vector_context}"
         return base
+
+    def _build_template_selection_block(self) -> str:
+        """Build the TEMPLATE SELECTION instruction block from live vector store docs.
+
+        Auto-generates the template list from docs that have a template_file key, so
+        adding a new vector store doc automatically extends the selectable template list.
+        """
+        if not vector_store_enabled():
+            return ""
+        try:
+            store = get_strategy_vector_store()
+            templates = [
+                (doc.template_file, doc.title)
+                for doc in store.documents
+                if doc.doc_type == "strategy" and doc.template_file
+            ]
+            if not templates:
+                return ""
+            lines = [
+                "TEMPLATE SELECTION:",
+                "Declare which template you are using as `template_id` in your JSON response.",
+                "Your triggers MUST only use identifiers listed in the selected template.",
+                "The trigger compiler will BLOCK triggers using identifiers outside the template's allowed set.",
+                "",
+                "Available templates (use the exact id string):",
+            ]
+            for tid, title in templates:
+                lines.append(f"  - {tid}  ({title})")
+            lines.append("  - null  (omit template_id if no template fits current market conditions)")
+            return "\n".join(lines)
+        except Exception as exc:
+            logging.warning("Failed to build template selection block: %s", exc)
+            return ""
 
     def _fallback_plan(self, llm_input: LLMInput) -> StrategyPlan:
         now = datetime.now(timezone.utc)

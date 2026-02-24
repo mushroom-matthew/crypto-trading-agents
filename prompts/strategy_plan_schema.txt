@@ -26,6 +26,16 @@ You MUST include the following top-level keys in every response:
 - sizing_rules (array)
 - triggers (array; can be empty but must exist)
 
+Optional top-level keys (include when applicable):
+- template_id           Optional[str]   Named template you selected from the TEMPLATE SELECTION
+                                        block above. Use the exact id string (e.g., "compression_breakout").
+                                        Omit or set null if no template applies. When present, the
+                                        trigger compiler enforces that all trigger identifiers are
+                                        members of that template's allowed set.
+- template_parameters   Optional[dict]  Threshold overrides for the selected template.
+                                        Example: {"entry_vol_multiple_min": 1.5, "bb_bandwidth_max": 0.25}
+                                        Only parameter names documented in the template are valid.
+
 Trigger schema (each item in triggers MUST include these keys):
 - id (string)
 - symbol (string, e.g., "BTC-USD")
