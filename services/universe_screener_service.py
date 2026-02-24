@@ -121,8 +121,12 @@ class UniverseScreenerService:
         "AVAX-USD",
         "LINK-USD",
         "DOT-USD",
-        "MATIC-USD",
+        "POL-USD",
     ]
+    SYMBOL_ALIASES = {
+        "MATIC-USD": "POL-USD",
+        "MATIC/USD": "POL/USD",
+    }
 
     def __init__(
         self,
@@ -132,7 +136,8 @@ class UniverseScreenerService:
         store: ScreenerStateStore | None = None,
         batch_annotation_transport: Callable[[str, str], str] | None = None,
     ) -> None:
-        self.universe = universe or self._load_universe_from_env() or list(self.DEFAULT_UNIVERSE)
+        raw_universe = universe or self._load_universe_from_env() or list(self.DEFAULT_UNIVERSE)
+        self.universe = [self._canonical_symbol(sym) for sym in raw_universe]
         self.ohlcv_fetcher = ohlcv_fetcher
         self.store = store or ScreenerStateStore()
         self.batch_annotation_transport = batch_annotation_transport
@@ -460,6 +465,7 @@ class UniverseScreenerService:
         )
 
     async def _fetch_ohlcv_df(self, symbol: str, timeframe: str, lookback_bars: int) -> pd.DataFrame:
+        symbol = self._canonical_symbol(symbol)
         if self.ohlcv_fetcher is not None:
             payload = self.ohlcv_fetcher(symbol, timeframe, lookback_bars)
             if inspect.isawaitable(payload):
@@ -469,8 +475,18 @@ class UniverseScreenerService:
         lookback_days = self._bars_to_lookback_days(timeframe, lookback_bars)
         from services.market_data_worker import fetch_ohlcv_history
 
-        candles = await asyncio.to_thread(fetch_ohlcv_history, symbol, timeframe, lookback_days)
+        candles = await asyncio.to_thread(
+            fetch_ohlcv_history,
+            symbol,
+            timeframe,
+            lookback_days,
+            allow_synthetic_fallback=False,
+        )
         return self._coerce_to_dataframe(candles)
+
+    @classmethod
+    def _canonical_symbol(cls, symbol: str) -> str:
+        return cls.SYMBOL_ALIASES.get(str(symbol).strip().upper(), str(symbol).strip().upper())
 
     @staticmethod
     def _bars_to_lookback_days(timeframe: str, lookback_bars: int) -> int:

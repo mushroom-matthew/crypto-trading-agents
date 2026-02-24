@@ -237,6 +237,22 @@ class PaperTradingSessionConfig(BaseModel):
         description="Experiment specification (see ExperimentSpec schema)"
     )
 
+    # ============================================================================
+    # Research Budget (Runbook 48)
+    # ============================================================================
+    research_budget_enabled: bool = Field(
+        default=True,
+        description="Allocate a separate capital pool for hypothesis testing"
+    )
+    research_budget_fraction: Optional[float] = Field(
+        default=None, ge=0.01, le=0.50,
+        description="Fraction of initial_cash allocated to research (0.01–0.50, default 0.10)"
+    )
+    research_max_loss_pct: Optional[float] = Field(
+        default=None, ge=5.0, le=100.0,
+        description="Max loss as % of research capital before pausing (5–100%, default 50%)"
+    )
+
 
 class SessionStartResponse(BaseModel):
     """Response when starting a paper trading session."""
@@ -458,6 +474,10 @@ async def start_session(config: PaperTradingSessionConfig):
             "learning_max_trades_per_day": config.learning_max_trades_per_day,
             "experiment_id": config.experiment_id,
             "experiment_spec": config.experiment_spec,
+            # Research budget
+            "research_budget_enabled": config.research_budget_enabled,
+            "research_budget_fraction": config.research_budget_fraction,
+            "research_max_loss_pct": config.research_max_loss_pct,
         }
 
         # Start workflow
@@ -1114,6 +1134,13 @@ async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str =
     """
     import ccxt.async_support as ccxt  # type: ignore
 
+    # Exchange symbol migrations / aliases (Coinbase migrated MATIC -> POL).
+    symbol_aliases = {
+        "MATIC-USD": "POL-USD",
+        "MATIC/USD": "POL/USD",
+    }
+    symbol = symbol_aliases.get(symbol.upper(), symbol)
+
     # Map friendly pair format to ccxt symbol
     ccxt_symbol = symbol.replace("-", "/")
     # Map UI timeframe labels to ccxt timeframe strings
@@ -1121,6 +1148,13 @@ async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str =
     tf = timeframe.strip()
     ccxt_tf = tf_map.get(tf, "1m")
     ohlcv: List[List[float]] = []
+    exchange_timeout_seconds = float(os.environ.get("PAPER_TRADING_CANDLE_FETCH_TIMEOUT_SECONDS", "10"))
+
+    async def _fetch_with_timeout(fetch_tf: str, *, fetch_limit: int) -> List[List[float]]:
+        return await asyncio.wait_for(
+            exchange.fetch_ohlcv(ccxt_symbol, fetch_tf, limit=fetch_limit),
+            timeout=exchange_timeout_seconds,
+        )
 
     def _aggregate_fixed_hour_bars(rows: List[List[float]], hours: int) -> List[List[float]]:
         """Aggregate lower timeframe rows into fixed-hour candles."""
@@ -1169,7 +1203,7 @@ async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str =
         if tf in {"1w", "1M"}:
             # Weekly needs ~7 days/bar; monthly ~31 days/bar.
             lookback_days = max(limit * (7 if tf == "1w" else 31), 90)
-            daily = await exchange.fetch_ohlcv(ccxt_symbol, "1d", limit=lookback_days)
+            daily = await _fetch_with_timeout("1d", fetch_limit=lookback_days)
             buckets: Dict[str, Dict[str, float]] = {}
             order: List[str] = []
 
@@ -1215,18 +1249,21 @@ async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str =
         elif tf == "4h":
             # Prefer native 4h bars, but fallback to aggregating 1h if unavailable.
             try:
-                ohlcv = await exchange.fetch_ohlcv(ccxt_symbol, "4h", limit=limit)
+                ohlcv = await _fetch_with_timeout("4h", fetch_limit=limit)
             except Exception as native_err:
                 logger.info("Native 4h candles unavailable for %s: %s", symbol, native_err)
                 ohlcv = []
             if not ohlcv:
                 lookback_hours = max(limit * 4 + 8, 240)
-                hourly = await exchange.fetch_ohlcv(ccxt_symbol, "1h", limit=lookback_hours)
+                hourly = await _fetch_with_timeout("1h", fetch_limit=lookback_hours)
                 ohlcv = _aggregate_fixed_hour_bars(hourly, 4)
                 if len(ohlcv) > limit:
                     ohlcv = ohlcv[-limit:]
         else:
-            ohlcv = await exchange.fetch_ohlcv(ccxt_symbol, ccxt_tf, limit=limit)
+            ohlcv = await _fetch_with_timeout(ccxt_tf, fetch_limit=limit)
+    except asyncio.TimeoutError:
+        logger.error("Timed out fetching candles for %s (%s)", symbol, ccxt_tf)
+        raise HTTPException(status_code=504, detail=f"Exchange timeout fetching candles for {symbol}")
     except Exception as e:
         logger.error(f"Failed to fetch candles for {symbol}: {e}")
         raise HTTPException(status_code=502, detail=f"Exchange error: {e}")

@@ -30,8 +30,19 @@ _BACKEND = CCXTAPILoader(
 )
 
 
-def fetch_ohlcv_history(symbol: str, timeframe: str, lookback_days: int) -> List[Candle]:
-    """Retrieve OHLCV data from Coinbase; falls back to synthetic data on failure."""
+def fetch_ohlcv_history(
+    symbol: str,
+    timeframe: str,
+    lookback_days: int,
+    *,
+    allow_synthetic_fallback: bool = True,
+) -> List[Candle]:
+    """Retrieve OHLCV data from Coinbase.
+
+    By default this falls back to synthetic data (useful for tests / non-critical
+    flows). Callers that need real-only data (e.g. universe screening) should pass
+    ``allow_synthetic_fallback=False`` and handle the exception.
+    """
 
     try:
         end = datetime.now(tz=timezone.utc)
@@ -50,6 +61,9 @@ def fetch_ohlcv_history(symbol: str, timeframe: str, lookback_days: int) -> List
         ]
         return candles
     except Exception:
+        if not allow_synthetic_fallback:
+            logger.exception("Real-only OHLCV fetch failed for %s %s", symbol, timeframe)
+            raise
         logger.exception("Falling back to synthetic OHLCV for %s %s", symbol, timeframe)
         return _synthetic_candles(lookback_days)
 
