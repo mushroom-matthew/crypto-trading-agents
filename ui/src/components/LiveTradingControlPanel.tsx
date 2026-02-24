@@ -57,7 +57,7 @@ export function LiveTradingControlPanel() {
 
   const screenerErrorStatus = (preflightQuery.error as any)?.response?.status as number | undefined;
   const runScreenerNow = useMutation({
-    mutationFn: () => screenerAPI.runOnce({ timeframe: '1h', lookback_bars: 50 }),
+    mutationFn: () => screenerAPI.runOnce({ timeframes: ['1m', '5m', '15m', '1h', '4h'], lookback_bars: 50 }),
     onSuccess: async () => {
       await preflightQuery.refetch();
     },
@@ -184,6 +184,7 @@ export function LiveTradingControlPanel() {
           {runScreenerNow.data && (
             <div className="rounded-md border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">
               Screener refreshed: {runScreenerNow.data.top_candidates} candidates
+              {runScreenerNow.data.timeframes?.length ? ` across ${runScreenerNow.data.timeframes.join(', ')}` : ''}
               {runScreenerNow.data.selected_symbol ? `, selected ${runScreenerNow.data.selected_symbol}` : ''}.
             </div>
           )}
@@ -255,6 +256,12 @@ export function LiveTradingControlPanel() {
                                 </span>
                               </div>
                               <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">{item.thesis}</p>
+                              <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400 flex flex-wrap gap-2">
+                                <span>Hold: <span className="font-mono">{item.expected_hold_timeframe}</span></span>
+                                {item.source_timeframe && (
+                                  <span>Screened: <span className="font-mono">{item.source_timeframe}</span></span>
+                                )}
+                              </div>
                             </div>
                             <div className="shrink-0 text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
                               <CheckCircle2 className={cn('w-3.5 h-3.5', staged?.symbol === item.symbol ? 'text-red-500' : 'text-gray-400')} />

@@ -238,6 +238,35 @@ async def test_llm_annotation_invalid_output_falls_back_to_deterministic():
     assert batch.annotation_meta["mode"] == "deterministic_fallback"
 
 
+@pytest.mark.asyncio
+async def test_screen_timeframe_sweep_records_source_timeframes_and_short_groups():
+    frames = {
+        "AAA-USD": _ohlcv_frame(last_volume=4200.0, trend_per_bar=0.0, flat=True),
+        "BBB-USD": _ohlcv_frame(last_volume=3900.0, trend_per_bar=0.0, flat=True),
+    }
+
+    def fetcher(symbol, timeframe, lookback_bars):
+        frame = frames[symbol].copy()
+        if str(timeframe) in {"1m", "5m"}:
+            # Simulate stronger short-tf expansion so the grouping can route into short holds.
+            frame.loc[frame.index[-1], "volume"] = 6500.0
+            frame.loc[frame.index[-1], "high"] = float(frame.loc[frame.index[-1], "close"]) + 3.0
+            frame.loc[frame.index[-1], "low"] = float(frame.loc[frame.index[-1], "close"]) - 3.0
+        return frame
+
+    service = UniverseScreenerService(universe=list(frames), ohlcv_fetcher=fetcher)
+    result = await service.screen_timeframe_sweep(timeframes=["1m", "5m", "1h"], lookback_bars=50)
+
+    assert result.screener_config["mode"] == "timeframe_sweep"
+    assert result.screener_config["timeframes"] == ["1m", "5m", "1h"]
+    assert all(c.source_timeframe in {"1m", "5m", "1h"} for c in result.top_candidates)
+
+    batch = service.build_recommendation_batch(result, max_per_group=10)
+    all_items = [item for group in batch.groups for item in group.recommendations]
+    assert all(item.source_timeframe in {"1m", "5m", "1h", None} for item in all_items)
+    assert any(item.source_timeframe in {"1m", "5m"} for item in all_items)
+
+
 def test_screener_state_store_round_trip(tmp_path):
     store = ScreenerStateStore(
         result_path=tmp_path / "result.json",

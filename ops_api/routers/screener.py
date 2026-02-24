@@ -23,20 +23,27 @@ router = APIRouter(prefix="/screener", tags=["screener"])
 
 @router.post("/run-once")
 async def run_screener_once(
-    timeframe: str = Query(default="1h"),
+    timeframe: str | None = Query(default=None),
+    timeframes: str | None = Query(default=None, description="Comma-separated sweep timeframes, e.g. 1m,5m,15m,1h,4h"),
     lookback_bars: int = Query(default=50, ge=30, le=500),
 ) -> dict:
     """Run a single screener pass immediately and persist latest result/recommendation."""
     try:
         service = UniverseScreenerService()
-        result = await service.screen(timeframe=timeframe, lookback_bars=lookback_bars)
-        recommendation = service.recommend_from_result(result, timeframe=timeframe) if result.top_candidates else None
+        sweep = [tf.strip().lower() for tf in (timeframes or "").split(",") if tf.strip()]
+        if sweep:
+            result = await service.screen_timeframe_sweep(timeframes=sweep, lookback_bars=lookback_bars)
+        else:
+            tf = str(timeframe or "1h")
+            result = await service.screen(timeframe=tf, lookback_bars=lookback_bars)
+        recommendation = service.recommend_from_result(result) if result.top_candidates else None
         service.persist_latest(result, recommendation)
         return {
             "status": "ok",
             "run_id": result.run_id,
             "as_of": result.as_of,
-            "timeframe": timeframe,
+            "timeframe": ("sweep" if sweep else str(timeframe or "1h")),
+            "timeframes": sweep or None,
             "lookback_bars": lookback_bars,
             "top_candidates": len(result.top_candidates),
             "selected_symbol": recommendation.selected_symbol if recommendation else None,

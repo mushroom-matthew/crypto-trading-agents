@@ -17,8 +17,13 @@ async def run_universe_screen(config: dict[str, Any]) -> dict[str, Any]:
 
     service = UniverseScreenerService(universe=config.get("universe"))
     timeframe = str(config.get("timeframe") or "1h")
+    raw_timeframes = config.get("timeframes")
+    timeframes = [str(tf).strip().lower() for tf in raw_timeframes if str(tf).strip()] if isinstance(raw_timeframes, list) else []
     lookback_bars = int(config.get("lookback_bars", 50))
-    result = await service.screen(timeframe=timeframe, lookback_bars=lookback_bars)
+    if timeframes:
+        result = await service.screen_timeframe_sweep(timeframes=timeframes, lookback_bars=lookback_bars)
+    else:
+        result = await service.screen(timeframe=timeframe, lookback_bars=lookback_bars)
     recommendation = service.recommend_from_result(result, timeframe=timeframe) if result.top_candidates else None
     return {
         "screener_result": result.model_dump(mode="json"),

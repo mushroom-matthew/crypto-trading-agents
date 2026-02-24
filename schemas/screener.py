@@ -19,6 +19,7 @@ class SymbolAnomalyScore(SerializableModel):
     """Per-symbol anomaly score from the screener."""
 
     symbol: str
+    source_timeframe: str | None = None
     as_of: datetime
     volume_z: float
     atr_expansion: float
@@ -64,6 +65,7 @@ class InstrumentRecommendationItem(SerializableModel):
     symbol: str
     hypothesis: str
     template_id: str | None = None
+    source_timeframe: str | None = None
     expected_hold_timeframe: str
     thesis: str
     confidence: Confidence

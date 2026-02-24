@@ -127,6 +127,7 @@ class UniverseScreenerService:
         "MATIC-USD": "POL-USD",
         "MATIC/USD": "POL/USD",
     }
+    DEFAULT_SWEEP_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"]
 
     def __init__(
         self,
@@ -157,6 +158,22 @@ class UniverseScreenerService:
             return max(1, int(os.environ.get("SCREENER_TOP_N", "8")))
         except ValueError:
             return 8
+
+    @classmethod
+    def _default_sweep_timeframes(cls) -> list[str]:
+        raw = os.environ.get("SCREENER_SWEEP_TIMEFRAMES")
+        if raw:
+            items = [str(x).strip().lower() for x in raw.split(",") if str(x).strip()]
+        else:
+            items = list(cls.DEFAULT_SWEEP_TIMEFRAMES)
+        seen: set[str] = set()
+        out: list[str] = []
+        for tf in items:
+            if tf in seen:
+                continue
+            seen.add(tf)
+            out.append(tf)
+        return out or list(cls.DEFAULT_SWEEP_TIMEFRAMES)
 
     @staticmethod
     def _load_universe_from_env() -> list[str] | None:
@@ -204,6 +221,52 @@ class UniverseScreenerService:
                 "top_n": top_n,
                 "timeframe": timeframe,
                 "lookback_bars": lookback_bars,
+                "template_thresholds": {
+                    "compression_score_gt": 0.60,
+                    "expansion_score_gt": 0.55,
+                    "low_anomaly_composite_lt": 0.30,
+                },
+            },
+        )
+
+    async def screen_timeframe_sweep(
+        self,
+        *,
+        timeframes: list[str] | None = None,
+        lookback_bars: int = 50,
+    ) -> ScreenerResult:
+        """Score the universe across multiple timeframes and merge into one ranked list."""
+        sweep = [str(tf).strip().lower() for tf in (timeframes or self._default_sweep_timeframes()) if str(tf).strip()]
+        if not sweep:
+            sweep = list(self._default_sweep_timeframes())
+
+        scores: list[SymbolAnomalyScore] = []
+        scored_pairs = 0
+        for timeframe in sweep:
+            partial = await self.screen(timeframe=timeframe, lookback_bars=lookback_bars)
+            scored_pairs += partial.universe_size
+            for candidate in partial.top_candidates:
+                # Preserve the originating timeframe on the merged item for UI transparency.
+                candidate.source_timeframe = timeframe
+                components = dict(candidate.score_components or {})
+                components["source_timeframe"] = timeframe
+                candidate.score_components = components
+                scores.append(candidate)
+
+        scores.sort(key=lambda item: item.composite_score, reverse=True)
+        top_n = self._top_n()
+        return ScreenerResult(
+            run_id=str(uuid4()),
+            as_of=_utcnow(),
+            universe_size=len(self.universe),
+            top_candidates=scores[: max(top_n, top_n * max(1, len(sweep)))],
+            screener_config={
+                "weights": self._weights(),
+                "top_n": top_n,
+                "mode": "timeframe_sweep",
+                "timeframes": sweep,
+                "lookback_bars": lookback_bars,
+                "scored_symbol_timeframe_pairs": scored_pairs,
                 "template_thresholds": {
                     "compression_score_gt": 0.60,
                     "expansion_score_gt": 0.55,
@@ -271,6 +334,7 @@ class UniverseScreenerService:
         limit = max_per_group or self._max_recommendations_per_group()
         ranked = sorted(result.top_candidates, key=lambda c: c.composite_score, reverse=True)
         grouped: dict[tuple[str, str], list[InstrumentRecommendationItem]] = {}
+        grouped_symbols: dict[tuple[str, str], set[str]] = {}
         group_order: list[tuple[str, str]] = []
 
         for idx, candidate in enumerate(ranked, start=1):
@@ -279,13 +343,21 @@ class UniverseScreenerService:
             key = (hypothesis, timeframe)
             if key not in grouped:
                 grouped[key] = []
+                grouped_symbols[key] = set()
                 group_order.append(key)
             if len(grouped[key]) >= limit:
+                continue
+            if candidate.symbol in grouped_symbols[key]:
                 continue
             item = InstrumentRecommendationItem(
                 symbol=candidate.symbol,
                 hypothesis=hypothesis,
                 template_id=self._candidate_template_id(candidate),
+                source_timeframe=(
+                    str(candidate.source_timeframe or candidate.score_components.get("source_timeframe"))
+                    if (candidate.source_timeframe or candidate.score_components.get("source_timeframe"))
+                    else None
+                ),
                 expected_hold_timeframe=timeframe,
                 thesis=self._candidate_thesis(candidate, hypothesis, timeframe),
                 confidence=self._candidate_confidence(candidate),  # type: ignore[arg-type]
@@ -296,6 +368,7 @@ class UniverseScreenerService:
                 score_components=dict(candidate.score_components or {}),
             )
             grouped[key].append(item)
+            grouped_symbols[key].add(candidate.symbol)
 
         groups: list[InstrumentRecommendationGroup] = []
         for hypothesis, timeframe in group_order:
@@ -623,11 +696,18 @@ class UniverseScreenerService:
         return "uncertain_wait"
 
     def _candidate_hold_timeframe(self, candidate: SymbolAnomalyScore, hypothesis: str) -> str:
+        source_tf = str(candidate.source_timeframe or candidate.score_components.get("source_timeframe") or "").lower()
         if hypothesis == "compression_breakout":
+            if source_tf in {"1m", "5m"} and candidate.vol_state in {"high", "extreme"}:
+                return source_tf
             return "1h" if candidate.vol_state in {"normal", "high"} else "4h"
         if hypothesis == "volatile_breakout":
+            if source_tf in {"1m", "5m", "15m"} and (candidate.atr_expansion > 0.25 or candidate.vol_state in {"high", "extreme"}):
+                return source_tf
             return "15m" if candidate.atr_expansion > 0.4 or candidate.vol_state == "extreme" else "1h"
         if hypothesis == "range_mean_revert":
+            if source_tf in {"1m", "5m"} and abs(candidate.volume_z) < 2.0:
+                return source_tf
             return "15m" if abs(candidate.volume_z) < 1.5 else "1h"
         if hypothesis in {"bull_trending", "bear_defensive"}:
             return "4h" if candidate.trend_state in {"uptrend", "downtrend"} else "1h"
@@ -652,6 +732,7 @@ class UniverseScreenerService:
     def _candidate_thesis(self, candidate: SymbolAnomalyScore, hypothesis: str, timeframe: str) -> str:
         return (
             f"{candidate.symbol}: {hypothesis} candidate for {timeframe} hold window. "
+            f"Screened on {candidate.source_timeframe or candidate.score_components.get('source_timeframe') or 'n/a'}. "
             f"Composite={candidate.composite_score:.2f}, trend={candidate.trend_state}, vol={candidate.vol_state}, "
             f"compression={_safe_float(candidate.score_components.get('compression_score')):.2f}, "
             f"expansion={_safe_float(candidate.score_components.get('expansion_score')):.2f}."
@@ -696,7 +777,7 @@ class UniverseScreenerService:
 
     @staticmethod
     def _timeframe_priority(timeframe: str) -> int:
-        order = {"15m": 0, "1h": 1, "4h": 2}
+        order = {"1m": 0, "5m": 1, "15m": 2, "1h": 3, "4h": 4}
         return order.get(timeframe, 99)
 
     @staticmethod

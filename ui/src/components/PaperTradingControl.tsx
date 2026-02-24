@@ -86,7 +86,7 @@ export function PaperTradingControl() {
   });
   const screenerPreflight = screenerPreflightQuery.data;
   const runScreenerNow = useMutation({
-    mutationFn: () => screenerAPI.runOnce({ timeframe: '1h', lookback_bars: 50 }),
+    mutationFn: () => screenerAPI.runOnce({ timeframes: ['1m', '5m', '15m', '1h', '4h'], lookback_bars: 50 }),
     onSuccess: async () => {
       await screenerPreflightQuery.refetch();
     },
@@ -396,6 +396,7 @@ export function PaperTradingControl() {
               {runScreenerNow.data && (
                 <p className="text-xs text-sky-800 dark:text-sky-200">
                   Screener refreshed: {runScreenerNow.data.top_candidates} candidates
+                  {runScreenerNow.data.timeframes?.length ? ` across ${runScreenerNow.data.timeframes.join(', ')}` : ''}
                   {runScreenerNow.data.selected_symbol ? `, selected ${runScreenerNow.data.selected_symbol}` : ''}.
                 </p>
               )}
@@ -479,6 +480,9 @@ export function PaperTradingControl() {
                                   </p>
                                   <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-gray-500">
                                     <span>Hold: <span className="font-mono">{item.expected_hold_timeframe}</span></span>
+                                    {item.source_timeframe && (
+                                      <span>Screened: <span className="font-mono">{item.source_timeframe}</span></span>
+                                    )}
                                     {item.template_id && (
                                       <span>Template: <span className="font-mono">{item.template_id}</span></span>
                                     )}
@@ -492,14 +496,13 @@ export function PaperTradingControl() {
                                 <button
                                   type="button"
                                   onClick={() => applyScreenerCandidateToForm(item)}
-                                  disabled={isRunning}
                                   className={cn(
                                     'shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border',
-                                    isRunning
-                                      ? 'opacity-50 cursor-not-allowed border-gray-300'
-                                      : 'border-sky-300 dark:border-sky-700 hover:bg-sky-100/80 dark:hover:bg-sky-900/40'
+                                    'border-sky-300 dark:border-sky-700 hover:bg-sky-100/80 dark:hover:bg-sky-900/40'
                                   )}
-                                  title="Apply symbol/template/timeframe hint to the session form"
+                                  title={isRunning
+                                    ? 'Apply symbol/template/timeframe hint to the next session form (current session remains selected)'
+                                    : 'Apply symbol/template/timeframe hint to the session form'}
                                 >
                                   <CheckCircle2 className="w-3.5 h-3.5" />
                                   Use

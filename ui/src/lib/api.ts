@@ -314,6 +314,7 @@ export interface ScreenerRecommendationItem {
   symbol: string;
   hypothesis: string;
   template_id?: string | null;
+  source_timeframe?: string | null;
   expected_hold_timeframe: string;
   thesis: string;
   confidence: 'high' | 'medium' | 'low';
@@ -953,17 +954,22 @@ export interface PaperTradingEquityCurve {
 }
 
 export const screenerAPI = {
-  runOnce: async (params?: { timeframe?: string; lookback_bars?: number }): Promise<{
+  runOnce: async (params?: { timeframe?: string; timeframes?: string[]; lookback_bars?: number }): Promise<{
     status: string;
     run_id: string;
     as_of: string;
     timeframe: string;
+    timeframes?: string[] | null;
     lookback_bars: number;
     top_candidates: number;
     selected_symbol?: string | null;
   }> => {
+    const queryParams = {
+      ...params,
+      timeframes: params?.timeframes?.length ? params.timeframes.join(',') : undefined,
+    };
     const response = await api.post('/screener/run-once', null, {
-      params,
+      params: queryParams,
     });
     return response.data;
   },
