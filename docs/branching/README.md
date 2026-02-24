@@ -35,13 +35,14 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - **Phase 4:** `[implemented]` (commit evidence exists for runbooks `21–27`, e.g. `73c0d61`, `dedebc9`).
 - **Phase 4B:** `[implemented]` (deeper code audit confirms `28–31` are landed: `JudgeAction` contract + TTL/persistence/routing, structured multipliers + clamps, immediate intraday application, and stance enforcement).
 - **Phase 5:** `[pending]` (`07`, `08` infra expansion not marked complete).
-- **Phase 6:** `[mostly implemented]` (`37`, `38`, `40`, `41`, `42`, `43`, `44`, `45` have implementation commit/code evidence; `39` universe screener remains not implemented and validation-gated).
-- **Phase 7:** `[docs/prereq scaffolding only]` (`46–48` runbooks exist and `3d47cdb` added docs/playbook structure, but runbook-specific runtime artifacts are not landed: no `StrategyPlan.template_id`, no hard template binding pass, no research budget service/schemas/router).
+- **Phase 6:** `[complete]` (`37`, `38`, `39`, `40`, `41`, `42`, `43`, `44`, `45` all implemented; R39 universe screener merged `b7c5d5f`, now in paper trading validation gate).
+- **Phase 7:** `[partial]` (`48` research budget runtime implemented `aa90202`; `46` and `47` remain pending their gates: R39 paper trading for R46, R46 accuracy for R47).
 - **Phase 8:** `[planning/docs]` (runbooks `49–56` are authored design contracts; code implementation not yet landed).
 
 ## Current Active Priorities (Git-Derived)
-- **Primary execution frontier:** finish **Phase 6** by implementing **Runbook `39` (Universe Screener)**, then validate in paper trading.
-- **Next architectural frontier:** **Phase 7 (`46–48`)** runtime implementation (template routing/binding + research budget loop). Current state is mostly docs/spec scaffolding.
+- **Primary execution frontier:** **Start paper trading session** to validate Phase 6 (R39 screener + R40/42 templates). This is the gate for R46 and R47.
+- **Running in parallel:** **R48 research budget** is live — paper trading session should set `RESEARCH_BUDGET_FRACTION=0.10` and create an ExperimentSpec for at least one playbook (e.g. `bollinger_squeeze`) to begin accumulating validation evidence.
+- **Next implementation frontier:** **R46** (template routing, gated on R39 running in paper trading) → **R47** (hard binding, gated on R46 ≥ 80% accuracy).
 - **Then:** **Phase 8 (`49–56`)** reasoning-agent operating system contracts (currently docs-only).
 - **Parallel / optional tracks:** **Phase 5 (`07`, `08`)** infra expansion and **Runbook `19`** (`p_hat` integration, optional/reversible).
 
@@ -49,7 +50,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [01-strategist-simplification.md](01-strategist-simplification.md): Simplify LLM strategist - allow empty triggers, remove risk redundancy, vector store prep. **Phase 1 COMPLETE** (schema, classifier, prompt, risk removal, stance tracking). Vector store and regime alerts deferred.
 - [37-risk-budget-commit-actual.md](37-risk-budget-commit-actual.md): **P0 — Real-money blocker.** Fix 255x overcharge in `_commit_risk_budget()` — deduct actual_risk_at_stop, not theoretical cap. Budget exhausts after 2–4 trades with microscopic positions. `✅ implemented`
 - [38-candlestick-pattern-features.md](38-candlestick-pattern-features.md): Add candlestick morphology to the feature vector — 15 new identifiers (is_hammer, is_engulfing, is_inside_bar, candle_strength, etc.) in `metrics/candlestick.py`. Prerequisite for reversal and breakout templates. `✅ implemented`
-- [39-universe-screener.md](39-universe-screener.md): Autonomous instrument screening — anomaly scoring across a configurable crypto universe, LLM instrument recommendation with thesis and strategy type. Shifts LLM role from "write RSI rules" to "choose what to trade and why." `[pending; not yet implemented]`
+- [39-universe-screener.md](39-universe-screener.md): Autonomous instrument screening — anomaly scoring across a configurable crypto universe, LLM instrument recommendation with thesis and strategy type. Shifts LLM role from "write RSI rules" to "choose what to trade and why." `✅ implemented` — now in **paper trading validation gate** (30-day window before live capital).
 - [40-compression-breakout-template.md](40-compression-breakout-template.md): Compression→expansion breakout strategy template — 4 new indicators (bb_bandwidth_pct_rank, compression_flag, expansion_flag, breakout_confirmed) and canonical breakout prompt. Depends on Runbook 38. `✅ implemented`
 - [41-htf-structure-cascade.md](41-htf-structure-cascade.md): Always load daily candles as an anchor layer — 12 new `htf_*` fields (daily_high, daily_low, prev_daily_high, 5d_high, daily_atr, etc.) for level-based stop and target anchoring. Prerequisite for Runbook 42. `✅ implemented`
 - [42-level-anchored-stops.md](42-level-anchored-stops.md): Absolute stop/target prices stored per TradeLeg at fill time — 7 stop anchor types (htf_daily_low, donchian_lower, candle_low, atr, etc.), 6 target types (measured_move, htf_daily_high, r_multiple). Exposes `below_stop` and `above_target` as trigger identifiers. Depends on Runbooks 41 and 38. `✅ implemented`
@@ -58,7 +59,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [45-adaptive-trade-management.md](45-adaptive-trade-management.md): Adaptive trade management (R-multiple state machine, trailing/partial management semantics) integrated into backtest execution paths. `✅ implemented`
 - [46-template-matched-plan-generation.md](46-template-matched-plan-generation.md): Wire vector store retrieval to concrete prompt templates — adds `compression_breakout.md` to vector store, `RetrievalResult` returns `template_id`, `generate_plan()` loads matching `prompts/strategies/*.txt` automatically. Zero schema changes. Gate: R39 screener in paper trading. `[runbook authored; runtime implementation pending]`
 - [47-hard-template-binding.md](47-hard-template-binding.md): `template_id` field on `StrategyPlan` + trigger compiler enforcement — triggers using identifiers outside the declared template's allowed set are blocked at compile time. Backwards compatible (Optional field). Gate: R46 retrieval routing validated ≥ 80% accuracy. `[runbook authored; runtime implementation pending]`
-- [48-research-budget-paper-trading.md](48-research-budget-paper-trading.md): Research budget in paper trading — separate ledger + capital pool for hypothesis testing; `PlaybookOutcomeAggregator` writes validated stats to `vector_store/playbooks/*.md`; judge gains `suggest_experiment` and `update_playbook` actions. All 7 playbooks updated with hypothesis + validation evidence structure. Parallel-safe with Runbooks 46/47. `[runbook authored; playbook-doc scaffolding landed, runtime implementation pending]`
+- [48-research-budget-paper-trading.md](48-research-budget-paper-trading.md): Research budget in paper trading — separate ledger + capital pool for hypothesis testing; `PlaybookOutcomeAggregator` writes validated stats to `vector_store/playbooks/*.md`; judge gains `suggest_experiment` and `update_playbook` actions. All 7 playbooks updated with hypothesis + validation evidence structure. Parallel-safe with Runbooks 46/47. `✅ implemented`
 - [49-market-snapshot-definition.md](49-market-snapshot-definition.md): Multimodal `MarketSnapshot` contract (numerical + derived + text + visual encodings) as the single source of truth for strategist/judge invocations. Enforces timestamped provenance, normalization, staleness checks, and snapshot hashing. `[docs-only runbook]`
 - [50-dual-reflection-templates.md](50-dual-reflection-templates.md): Dual-level reflection framework — fast policy-loop reflection (event-driven coherence/invariants/memory-check) plus scheduled high-level reflection (batch outcomes, regime drift, playbook updates), with deterministic tick-level validation kept separate from LLM reflection. `[docs-only runbook]`
 - [51-memory-store-diversified-retrieval.md](51-memory-store-diversified-retrieval.md): Diversified episode memory store and contrastive retrieval (`wins`, `losses`, `failure_modes`) for strategist and judge grounding. Builds on Signal Ledger outcome data and adds regime fingerprints + playbook metadata. `[docs-only runbook]`
@@ -162,8 +163,8 @@ Runbooks 32–36 were implemented as a compile-time enforcement / telemetry hard
 19. **07**: AWS deploy / CI/CD
 20. **08**: Multi-wallet (Phantom/Solana/EVM read-only + reconciliation)
 
-### Phase 6 — Strategy intelligence (new direction, 2026-02) [MOSTLY IMPLEMENTED; R39 PENDING]
-Runbooks 37–45 represent a product direction shift: from "LLM writes indicator rules" toward "LLM reasons about market structure and chooses instruments." Most of the substrate/templates/management work is landed; the main remaining frontier in this phase is Runbook 39 (Universe Screener), which is also paper-trading validation gated.
+### Phase 6 — Strategy intelligence (new direction, 2026-02) ✅ COMPLETE — in paper trading validation
+Runbooks 37–45 (plus R39) are fully implemented. The full instrument-selection + breakout-template stack is now running. R39 (Universe Screener) is the final piece and is now in its 30-day paper trading validation gate before live capital routing.
 
 **P0 — Must ship before real money:**
 21. **37**: Risk budget commit actual (255x overcharge blocks all real-capital use cases) ✅ implemented
@@ -182,28 +183,26 @@ Runbooks 37–45 represent a product direction shift: from "LLM writes indicator
 28. **45**: Adaptive trade management (R-multiple state machine, trailing/partials) ✅ implemented
 
 **Stratum C — Market intelligence (after Stratum B validates in paper trading):**
-29. **39**: Universe screener (standalone; can be built in parallel but validated after 40/42) `[pending; no runtime implementation yet]`
-    - **Amendment (2026-02-21)**: Screener pre-selects `template_id` deterministically from
-      composite score breakdown (compression_score > 0.60 → `compression_breakout`, etc.).
-      Sniffer tuning via `SCREENER_COMPRESSION_WEIGHT` is now the user's strategic lever —
-      it controls which template gets applied at the instrument level without requiring
-      trigger authorship. See amendment section in [39-universe-screener.md](39-universe-screener.md).
+29. **39**: Universe screener ✅ implemented (`b7c5d5f`) — **now in paper trading validation gate**.
+    - Amendment (2026-02-21): Screener pre-selects `template_id` deterministically from
+      composite score breakdown. Sniffer tuning via `SCREENER_COMPRESSION_WEIGHT` is the
+      user's strategic lever. See [39-universe-screener.md](39-universe-screener.md).
 
 > **Why this order:** Runbook 37 is a correctness bug with zero-cost fix — ship immediately. Candlestick features (38) and HTF structure (41) are additive with no risk of regression and unlock everything downstream. The breakout template (40) and level-anchored stops (42) depend on those features and should be validated together via a paper trading backtest before the universe screener (39) is enabled — you want a working strategy before adding autonomous instrument selection.
 
 > **Paper trading as the validation gate:** Unlike prior runbooks that were validated via backtest, Runbook 39 (universe screener) can only be meaningfully validated via paper trading. The screener surfaces real-time anomalies; no historical simulation can test whether it would have identified the right instrument at the right time. Plan for a 30-day paper trading period after 39 ships before enabling live capital routing.
 
-### Phase 7 — Template-Bound Instrument Strategy (new direction, 2026-02) [DOCS / PREREQ SCAFFOLDING ONLY]
+### Phase 7 — Template-Bound Instrument Strategy (new direction, 2026-02) [PARTIAL — R48 ✅, R46/47 PENDING]
 
 Runbooks 46–47 complete the shift from "LLM authors trigger rules" to "LLM selects and
 parameterizes a known template." The vector store retrieval infrastructure is already
 active (`STRATEGY_VECTOR_STORE_ENABLED=true`); these runbooks close the gap between
 retrieval-as-hints and retrieval-as-binding.
 
-> **Current status (git audit):** vector store retrieval infrastructure is active, and
-> playbook markdown scaffolding was updated (`3d47cdb`), but Runbooks 46–48 runtime
-> contracts are not yet landed (no `StrategyPlan.template_id`, no hard template binding
-> compiler pass, no research budget service/schemas/router).
+> **Current status (`aa90202`):** R48 (research budget) is fully implemented and merged.
+> R46 and R47 runtime contracts remain pending their gates: R46 is gated on R39 running
+> in paper trading; R47 is gated on R46 routing accuracy ≥ 80%. Both gates can be
+> assessed during the R39 validation window.
 
 > **Architecture context:** The `vector_store/strategies/` docs are retrieval targets.
 > The `prompts/strategies/*.txt` files are the actual system prompts. The two systems are
@@ -229,10 +228,7 @@ retrieval-as-hints and retrieval-as-binding.
     trades tagged with `experiment_id` and `playbook_id`. `PlaybookOutcomeAggregator`
     writes validated stats to `vector_store/playbooks/*.md` `## Validation Evidence`
     sections. Judge gains `suggest_experiment` and `update_playbook` action types.
-    All 7 existing playbooks updated with `hypothesis`, `min_sample_size`, and
-    `## Research Trade Attribution` sections. New meta-playbook:
-    `vector_store/playbooks/experiment_framework.md`.
-    _Can start immediately; does not block on Stratum D/E._ `[runbook authored; playbook-doc scaffolding landed, runtime implementation pending]`
+    _Can start immediately; does not block on Stratum D/E._ `✅ implemented` (`aa90202`)
 
 > **Why this order matters:** Binding without accurate retrieval produces wrong plans
 > silently (LLM declares `compression_breakout` but indicators are trending — triggers
