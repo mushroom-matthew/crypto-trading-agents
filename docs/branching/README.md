@@ -277,6 +277,9 @@ system around multimodal inputs, reflection, memory, and evidence gating.
 
 ## Backlog Runbooks (_)
 - [_per-instrument-workflow.md](_per-instrument-workflow.md): Per-instrument `InstrumentStrategyWorkflow` (one Temporal workflow per active symbol). Deferred until Runbooks 39+46+47 are validated via 30-day paper trading and open architectural questions (workflow ID namespace, multi-timeframe, judge routing) are resolved with operational evidence.
+  - Routing note (draft ADR, 2026-02-24): use symbol-local judge feedback plus a shared deterministic portfolio control plane that broadcasts typed constraint envelopes (not direct portfolio-judge broadcasts to symbols). See [ADR-portfolio-judge-routing-and-control-plane.md](ADR-portfolio-judge-routing-and-control-plane.md).
+- [_portfolio-control-plane.md](_portfolio-control-plane.md): Shared portfolio allocator / constraint coordinator for per-instrument workflows (risk budgets, concentration/correlation caps, broadcast constraints, reservation/release semantics).
+- [_portfolio-monitor-and-reflection.md](_portfolio-monitor-and-reflection.md): Portfolio-level monitoring and slow-loop reflection layer (drawdown/concentration/correlation diagnostics, monitor-only alerts, shared portfolio recommendations).
 - [_emergency-exit-runbook-judge-loop-design.md](_emergency-exit-runbook-judge-loop-design.md): Judge/strategist loop design gaps (non-test items).
 - [_synthetic-data-testing.md](_synthetic-data-testing.md): Synthetic data generation for deterministic trigger testing.
 - [later/_comp-audit-risk-followups.md](later/_comp-audit-risk-followups.md): Follow-ups from comp-audit-risk-core.

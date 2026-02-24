@@ -146,6 +146,10 @@ portfolio-level cash and positions regardless of which instrument workflows are 
 4. **Judge feedback routing**: Currently judge evaluates a StrategyRun. With per-symbol
    workflows, does the judge evaluate per symbol? Or does it still evaluate the portfolio
    and broadcast constraints to all active instrument workflows?
+   - Proposed resolution (draft ADR, 2026-02-24): keep symbol judge feedback per symbol,
+     and route portfolio-level recommendations through a shared deterministic portfolio
+     control plane that broadcasts typed constraint envelopes. See
+     `ADR-portfolio-judge-routing-and-control-plane.md`.
 
 5. **Instrument deactivation**: When screener stops recommending a symbol, the
    InstrumentStrategyWorkflow should flatten its position then terminate (or pause).
