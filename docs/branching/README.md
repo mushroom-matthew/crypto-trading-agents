@@ -36,7 +36,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - **Phase 4B:** `[implemented]` (deeper code audit confirms `28–31` are landed: `JudgeAction` contract + TTL/persistence/routing, structured multipliers + clamps, immediate intraday application, and stance enforcement).
 - **Phase 5:** `[pending]` (`07`, `08` infra expansion not marked complete).
 - **Phase 6:** `[complete]` (`37`, `38`, `39`, `40`, `41`, `42`, `43`, `44`, `45` all implemented; R39 universe screener merged `b7c5d5f`, now in paper trading validation gate).
-- **Phase 7:** `[partial]` (`48` research budget runtime implemented `aa90202`; `46` and `47` remain pending their gates: R39 paper trading for R46, R46 accuracy for R47).
+- **Phase 7:** `[partial]` (`48` research budget runtime implemented `aa90202`; `46` template routing implemented `dc5bb98`; `47` remains pending R46 accuracy gate ≥ 80%).
 - **Phase 8:** `[planning/docs]` (runbooks `49–56` are authored design contracts; code implementation not yet landed).
 
 ## Current Active Priorities (Git-Derived)
@@ -57,7 +57,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [43-signal-ledger-and-reconciler.md](43-signal-ledger-and-reconciler.md): Signal Ledger + Outcome Reconciler — `SignalEvent` schema with full provenance, persistent `signal_ledger` table, fill drift telemetry (slippage_bps, fill_latency_ms), MFE/MAE tracking, and 5 statistical capital gates. Foundation for monetizable signal track record. Depends on Runbook 42 for stop/target fields. `✅ implemented`
 - [44-setup-event-generator.md](44-setup-event-generator.md): Setup event generator with frozen feature snapshots + hashes and template/version provenance for post-trade analysis. `✅ implemented`
 - [45-adaptive-trade-management.md](45-adaptive-trade-management.md): Adaptive trade management (R-multiple state machine, trailing/partial management semantics) integrated into backtest execution paths. `✅ implemented`
-- [46-template-matched-plan-generation.md](46-template-matched-plan-generation.md): Wire vector store retrieval to concrete prompt templates — adds `compression_breakout.md` to vector store, `RetrievalResult` returns `template_id`, `generate_plan()` loads matching `prompts/strategies/*.txt` automatically. Zero schema changes. Gate: R39 screener in paper trading. `[runbook authored; runtime implementation pending]`
+- [46-template-matched-plan-generation.md](46-template-matched-plan-generation.md): Wire vector store retrieval to concrete prompt templates — adds `compression_breakout.md` to vector store, `RetrievalResult` returns `template_id`, `generate_plan()` loads matching `prompts/strategies/*.txt` automatically. Zero schema changes. Gate: R39 screener in paper trading. `✅ implemented`
 - [47-hard-template-binding.md](47-hard-template-binding.md): `template_id` field on `StrategyPlan` + trigger compiler enforcement — triggers using identifiers outside the declared template's allowed set are blocked at compile time. Backwards compatible (Optional field). Gate: R46 retrieval routing validated ≥ 80% accuracy. `[runbook authored; runtime implementation pending]`
 - [48-research-budget-paper-trading.md](48-research-budget-paper-trading.md): Research budget in paper trading — separate ledger + capital pool for hypothesis testing; `PlaybookOutcomeAggregator` writes validated stats to `vector_store/playbooks/*.md`; judge gains `suggest_experiment` and `update_playbook` actions. All 7 playbooks updated with hypothesis + validation evidence structure. Parallel-safe with Runbooks 46/47. `✅ implemented`
 - [49-market-snapshot-definition.md](49-market-snapshot-definition.md): Multimodal `MarketSnapshot` contract (numerical + derived + text + visual encodings) as the single source of truth for strategist/judge invocations. Enforces timestamped provenance, normalization, staleness checks, and snapshot hashing. `[docs-only runbook]`
@@ -213,7 +213,7 @@ retrieval-as-hints and retrieval-as-binding.
 28. **46**: [Template-matched plan generation](46-template-matched-plan-generation.md) —
     Adds `compression_breakout.md` to vector store; wires retrieval to load the
     corresponding `prompts/strategies/*.txt` template automatically. Zero schema changes.
-    _Gate: Runbook 39 screener running in paper trading._ `[runbook authored; runtime implementation pending]`
+    _Gate: Runbook 39 screener running in paper trading._ `✅ implemented` (`dc5bb98`)
 
 **Stratum E — Hard binding (after Stratum D validated):**
 29. **47**: [Hard template binding](47-hard-template-binding.md) — Adds `template_id`
