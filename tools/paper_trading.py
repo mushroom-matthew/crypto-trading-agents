@@ -73,6 +73,10 @@ class PaperTradingConfig(BaseModel):
     llm_model: Optional[str] = None
     exit_binding_mode: Literal["none", "category"] = "category"
     conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
+    # Research budget (Runbook 48)
+    research_budget_enabled: bool = True
+    research_budget_fraction: Optional[float] = None   # None → fall back to env var
+    research_max_loss_pct: Optional[float] = None      # % of research capital (None → 50%)
 
 
 class SessionState(BaseModel):
@@ -822,6 +826,7 @@ class PaperTradingWorkflow:
     @workflow.query
     def get_session_status(self) -> Dict[str, Any]:
         """Get current session status."""
+        research = self.research.model_dump() if self.research else None
         return {
             "session_id": self.session_id,
             "symbols": self.symbols,
@@ -830,6 +835,8 @@ class PaperTradingWorkflow:
             "last_plan_time": self.last_plan_time.isoformat() if self.last_plan_time else None,
             "has_plan": self.current_plan is not None,
             "plan_interval_hours": self.plan_interval_hours,
+            "research": research,
+            "active_experiments": self.active_experiments,
         }
 
     @workflow.query
@@ -914,17 +921,30 @@ class PaperTradingWorkflow:
             self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
 
             # Initialize research budget (separate capital pool)
-            research_fraction = float(os.environ.get("RESEARCH_BUDGET_FRACTION", "0.10"))
-            research_capital = parsed_config.initial_cash * research_fraction
-            max_loss_usd = float(
-                os.environ.get("RESEARCH_MAX_LOSS_USD", str(research_capital * 0.5))
-            )
-            self.research = ResearchBudgetState(
-                initial_capital=research_capital,
-                cash=research_capital,
-                max_loss_usd=max_loss_usd,
-            )
-            self.active_experiments = []
+            if not parsed_config.research_budget_enabled:
+                self.research = None
+                self.active_experiments = []
+            else:
+                env_fraction = float(os.environ.get("RESEARCH_BUDGET_FRACTION", "0.10"))
+                research_fraction = (
+                    parsed_config.research_budget_fraction
+                    if parsed_config.research_budget_fraction is not None
+                    else env_fraction
+                )
+                research_capital = parsed_config.initial_cash * research_fraction
+                env_max_loss = research_capital * 0.5
+                max_loss_pct = (
+                    parsed_config.research_max_loss_pct
+                    if parsed_config.research_max_loss_pct is not None
+                    else 50.0
+                )
+                max_loss_usd = research_capital * (max_loss_pct / 100.0)
+                self.research = ResearchBudgetState(
+                    initial_capital=research_capital,
+                    cash=research_capital,
+                    max_loss_usd=max_loss_usd,
+                )
+                self.active_experiments = []
 
             # Initialize portfolio with starting allocations
             await self._initialize_portfolio(

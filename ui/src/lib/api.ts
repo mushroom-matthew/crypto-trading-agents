@@ -744,6 +744,11 @@ export interface PaperTradingSessionConfig {
   debug_trigger_max_samples?: number;
   indicator_debug_mode?: string;
   indicator_debug_keys?: string[];
+
+  // Research Budget (Runbook 48)
+  research_budget_enabled?: boolean;
+  research_budget_fraction?: number;
+  research_max_loss_pct?: number;
 }
 
 export interface PaperTradingSession {

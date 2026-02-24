@@ -59,6 +59,12 @@ export function PaperTradingControl() {
     indicator_debug_mode: 'off',
   });
 
+  const [researchSettings, setResearchSettings] = useState({
+    research_budget_enabled: true,
+    research_budget_fraction: 0.10,
+    research_max_loss_pct: 50,
+  });
+
   // Selected session
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
     return localStorage.getItem('selectedPaperTradingSessionId');
@@ -213,6 +219,7 @@ export function PaperTradingControl() {
         // Aggressive trading settings
         ...aggressiveSettings,
         ...planningSettings,
+        ...researchSettings,
       };
 
       return paperTradingAPI.startSession(config);
@@ -622,6 +629,12 @@ export function PaperTradingControl() {
               disabled={isRunning}
               showDayBoundaryReplan
             />
+            <ResearchBudgetPanel
+              config={researchSettings}
+              onChange={setResearchSettings}
+              disabled={isRunning}
+              sessionId={isRunning ? selectedSessionId ?? undefined : undefined}
+            />
 
             {/* Action Buttons */}
             <div className="flex gap-3 pt-4">
@@ -905,11 +918,6 @@ export function PaperTradingControl() {
                 );
               })()}
             </div>
-          )}
-
-          {/* Research Budget */}
-          {selectedSessionId && (
-            <ResearchBudgetPanel sessionId={selectedSessionId} isRunning={isRunning} />
           )}
 
           {/* Active Strategy Plan */}
