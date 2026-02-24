@@ -17,6 +17,38 @@ RecommendedAction = Literal["hold", "policy_adjust", "replan", "investigate_exec
 JudgeActionStatus = Literal["pending", "applied", "skipped", "expired"]
 JudgeActionScope = Literal["intraday", "daily", "manual"]
 
+# Extended action type including research-loop actions (Runbook 48)
+JudgeActionType = Literal[
+    "hold",
+    "replan",
+    "policy_adjust",
+    "stand_down",
+    "suggest_experiment",   # NEW: propose a research ExperimentSpec
+    "update_playbook",      # NEW: surface a playbook edit suggestion for human review
+]
+
+
+class ExperimentSuggestion(SerializableModel):
+    """Payload for a judge suggest_experiment action."""
+
+    playbook_id: str
+    hypothesis: str
+    target_symbols: List[str]
+    trigger_categories: List[str]
+    min_sample_size: int = 20
+    max_loss_usd: float = 50.0
+    rationale: str  # Why the judge is suggesting this experiment
+
+
+class PlaybookEditSuggestion(SerializableModel):
+    """Payload for a judge update_playbook action."""
+
+    playbook_id: str
+    section: Literal["Notes", "Patterns", "Validation Evidence"]
+    suggested_text: str
+    evidence_summary: str  # What evidence supports this edit
+    requires_human_review: bool = True  # Always True; human approves before applying
+
 
 class AttributionEvidence(SerializableModel):
     """Evidence backing a Judge attribution decision."""
@@ -191,6 +223,9 @@ class JudgeAction(SerializableModel):
     scope: Optional[JudgeActionScope] = Field(default=None, description="Intraday or daily action scope.")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     applied_at: Optional[datetime] = None
+    # Research-loop action payloads (Runbook 48)
+    experiment_suggestion: Optional[ExperimentSuggestion] = None
+    playbook_edit_suggestion: Optional[PlaybookEditSuggestion] = None
 
 
 def apply_trigger_floor(
