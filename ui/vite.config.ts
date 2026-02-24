@@ -101,6 +101,18 @@ export default defineConfig({
         target: 'http://localhost:8081',
         changeOrigin: true,
       },
+      '/screener': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/signals': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/research': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
     },
   },
 });

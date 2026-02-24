@@ -52,7 +52,8 @@ async def _get_session_state(session_id: str) -> Optional[Dict[str, Any]]:
         address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
         namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
         client = await Client.connect(address, namespace=namespace)
-        handle = client.get_workflow_handle(f"paper-trading-{session_id}")
+        # session_id is the full workflow id (e.g. "paper-trading-abc123")
+        handle = client.get_workflow_handle(session_id)
         state = await handle.query("get_session_status")
         return state
     except Exception as exc:

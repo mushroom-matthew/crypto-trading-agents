@@ -1122,4 +1122,58 @@ export const paperTradingAPI = {
   },
 };
 
+// ============================================================================
+// Research Budget Types
+// ============================================================================
+
+export interface ResearchBudgetStatus {
+  session_id: string;
+  research_enabled: boolean;
+  message?: string;
+  initial_capital?: number;
+  cash?: number;
+  total_pnl?: number;
+  paused?: boolean;
+  pause_reason?: string | null;
+  active_experiment_id?: string | null;
+  active_playbook_id?: string | null;
+  n_trades?: number;
+}
+
+export interface PlaybookEditSuggestion {
+  suggestion_id: string;
+  playbook_id: string;
+  section: string;
+  suggested_text: string;
+  evidence_summary: string;
+  requires_human_review: boolean;
+  status: string;
+}
+
+export const researchAPI = {
+  getBudget: async (sessionId: string): Promise<ResearchBudgetStatus> => {
+    const response = await api.get('/research/budget', { params: { session_id: sessionId } });
+    return response.data;
+  },
+
+  getExperiments: async (sessionId: string): Promise<Record<string, any>[]> => {
+    const response = await api.get('/research/experiments', { params: { session_id: sessionId } });
+    return response.data;
+  },
+
+  getEditSuggestions: async (): Promise<PlaybookEditSuggestion[]> => {
+    const response = await api.get('/research/playbooks/edit-suggestions');
+    return response.data;
+  },
+
+  applySuggestion: async (playbookId: string, suggestionId: string): Promise<{ status: string }> => {
+    const response = await api.post(
+      `/research/playbooks/${playbookId}/apply-suggestion`,
+      null,
+      { params: { suggestion_id: suggestionId } },
+    );
+    return response.data;
+  },
+};
+
 export default api;

@@ -24,6 +24,18 @@ def _paper_ledger_workflow_id(session_id: str) -> str:
     return f"{session_id}-ledger"
 
 
+def _is_not_found(err: Exception) -> bool:
+    """Return True when Temporal says the workflow/execution doesn't exist.
+
+    Temporal can surface "not found" in two ways:
+    1. RPCStatusCode.NOT_FOUND with message containing "not found"
+    2. "sql: no rows in result set" — execution record purged from the DB
+       (e.g. after a retention-period expiry or a container wipe).
+    """
+    msg = str(err).lower()
+    return "not found" in msg or "no rows in result set" in msg
+
+
 async def _cleanup_session_ledger(
     client: Any,
     session_id: str,
@@ -518,7 +530,7 @@ async def get_session_status(session_id: str):
         )
 
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -544,7 +556,7 @@ async def stop_session(session_id: str):
         return {"session_id": session_id, "status": "stopping", "message": "Stop signal sent to session and ledger"}
 
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -574,7 +586,7 @@ async def terminate_session(session_id: str):
     except HTTPException:
         raise
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -597,7 +609,7 @@ async def get_portfolio(session_id: str):
         try:
             await session_handle.query("get_session_status")
         except RPCError as e:
-            if "not found" in str(e).lower():
+            if _is_not_found(e):
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             raise
 
@@ -675,7 +687,7 @@ async def get_current_plan(session_id: str):
     except HTTPException:
         raise
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -752,7 +764,7 @@ async def update_trigger_rule(
             "message": "Trigger rule edit requested. Acceptance depends on compile validation in workflow.",
         }
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except HTTPException:
@@ -778,7 +790,7 @@ async def get_trigger_rule_edits(session_id: str, limit: int = 100):
             "edits": edits or [],
         }
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -801,7 +813,7 @@ async def force_replan(session_id: str):
         return {"session_id": session_id, "status": "replanning", "message": "Replan signal sent"}
 
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -824,7 +836,7 @@ async def get_trades(session_id: str, limit: int = 100):
         try:
             await session_handle.query("get_session_status")
         except RPCError as e:
-            if "not found" in str(e).lower():
+            if _is_not_found(e):
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             raise
 
@@ -887,7 +899,7 @@ async def get_trade_sets(session_id: str, limit: int = 50):
         try:
             await session_handle.query("get_session_status")
         except RPCError as e:
-            if "not found" in str(e).lower():
+            if _is_not_found(e):
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             raise
 
@@ -1077,7 +1089,7 @@ async def get_structure_snapshot(session_id: str, symbol: Optional[str] = None):
         }
     except RPCError as e:
         msg = str(e).lower()
-        if "not found" in msg:
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         # Backward compatibility for sessions started before this query existed.
         if "query" in msg and "get_last_indicators" in msg:
@@ -1256,7 +1268,7 @@ async def update_symbols(session_id: str, symbols: List[str]):
         return {"session_id": session_id, "symbols": normalized, "message": "Symbols updated"}
 
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -1327,7 +1339,7 @@ async def get_plan_history(session_id: str, limit: int = 50):
         }
 
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -1361,7 +1373,7 @@ async def get_equity_curve(session_id: str, limit: int = 500):
         }
 
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -1398,7 +1410,7 @@ async def update_strategy(session_id: str, request: UpdateStrategyRequest):
         }
 
     except RPCError as e:
-        if "not found" in str(e).lower():
+        if _is_not_found(e):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:

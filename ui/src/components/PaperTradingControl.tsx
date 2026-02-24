@@ -22,6 +22,7 @@ import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
 import { PlanningSettingsPanel, type PlanningSettings } from './PlanningSettingsPanel';
+import { ResearchBudgetPanel } from './ResearchBudgetPanel';
 
 export function PaperTradingControl() {
   const queryClient = useQueryClient();
@@ -904,6 +905,11 @@ export function PaperTradingControl() {
                 );
               })()}
             </div>
+          )}
+
+          {/* Research Budget */}
+          {selectedSessionId && (
+            <ResearchBudgetPanel sessionId={selectedSessionId} isRunning={isRunning} />
           )}
 
           {/* Active Strategy Plan */}
