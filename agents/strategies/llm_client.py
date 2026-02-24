@@ -164,6 +164,7 @@ class LLMClient:
                 "llm_failure_reason": None,
                 "raw_output": raw,
                 "prompt_hash": input_hash,
+                "retrieved_template_id": None,
             }
             _emit_llm_event(
                 {
@@ -181,13 +182,27 @@ class LLMClient:
         raw_output: str | None = None
         attempts = max(1, self.max_retries)
         start_time = time.monotonic()
+
+        # Resolve strategy context and template once before the retry loop.
+        strategy_context, retrieved_template_id = self._get_strategy_context(llm_input)
+        # Explicit prompt_template overrides any retrieved template.
+        effective_template = prompt_template
+        if not effective_template and retrieved_template_id:
+            template_path = (
+                Path(__file__).resolve().parents[2]
+                / "prompts" / "strategies"
+                / f"{retrieved_template_id}.txt"
+            )
+            if template_path.exists():
+                effective_template = template_path.read_text(encoding="utf-8").strip()
+                logging.info("Using retrieved template '%s' for plan generation", retrieved_template_id)
+
         for attempt in range(1, attempts + 1):
             try:
-                strategy_context = self._get_strategy_context(llm_input)
                 vector_context = self._get_vector_context(llm_input) if use_vector_store else None
                 prompt_context = build_prompt_context(llm_input)
                 system_prompt = self._build_system_prompt(
-                    prompt_template,
+                    effective_template,
                     vector_context,
                     prompt_context,
                     strategy_context,
@@ -222,6 +237,7 @@ class LLMClient:
                         "llm_failure_reason": None,
                         "raw_output": raw_output,
                         "prompt_hash": input_hash,
+                        "retrieved_template_id": retrieved_template_id,
                     }
                     _emit_llm_event(
                         {
@@ -257,6 +273,7 @@ class LLMClient:
             "llm_failure_reason": str(last_error) if last_error else "unknown_failure",
             "raw_output": raw_output,
             "prompt_hash": input_hash,
+            "retrieved_template_id": retrieved_template_id,
         }
         _emit_llm_event(
             {
@@ -343,16 +360,20 @@ class LLMClient:
             logging.warning("Failed to get vector context: %s", e)
             return None
 
-    def _get_strategy_context(self, llm_input: LLMInput) -> str | None:
-        """Get retrieved strategy/rule docs from the strategy vector store."""
+    def _get_strategy_context(self, llm_input: LLMInput) -> tuple[str | None, str | None]:
+        """Get retrieved strategy/rule docs from the strategy vector store.
+
+        Returns (context_block, template_id).
+        """
         if not vector_store_enabled():
-            return None
+            return None, None
         try:
             store = get_strategy_vector_store()
-            return store.retrieve_context(llm_input)
+            result = store.retrieve_context(llm_input)
+            return result.context, result.template_id
         except Exception as exc:
             logging.warning("Failed to get strategy context: %s", exc)
-            return None
+            return None, None
 
     def _build_system_prompt(
         self,
