@@ -348,7 +348,37 @@ uv run pytest tests/test_screener_workflow.py -vv
 
 ## Test Evidence
 ```
-TODO
+$ uv run pytest tests/test_universe_screener.py tests/test_screener_workflow.py -vv
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-9.0.2
+collected 6 items
+
+tests/test_universe_screener.py::test_screen_ranks_candidates_and_records_config PASSED
+tests/test_universe_screener.py::test_screen_skips_insufficient_data PASSED
+tests/test_universe_screener.py::test_zero_volume_and_flat_prices_produce_finite_scores PASSED
+tests/test_universe_screener.py::test_recommendation_uses_template_suggestion_for_compression_candidate PASSED
+tests/test_universe_screener.py::test_screener_state_store_round_trip PASSED
+tests/test_screener_workflow.py::test_universe_screener_workflow_runs_and_emits PASSED
+
+============================== 6 passed in 11.55s ==============================
+
+$ uv run pytest tests/test_universe_screener.py tests/test_screener_workflow.py -q
+......                                                                   [100%]
+6 passed in 9.42s
+
+$ uv run pytest tests/test_universe_screener.py tests/test_screener_workflow.py -vv
+...
+collected 8 items
+...
+============================== 8 passed in 9.06s ===============================
+
+$ cd ui && npm run build
+vite v7.3.0 building client environment for production...
+✓ built in 9.75s
+
+$ uv run pytest tests/test_universe_screener.py tests/test_screener_workflow.py -vv
+...
+============================== 10 passed in 10.36s ===============================
 ```
 
 ## Acceptance Criteria
@@ -362,7 +392,7 @@ TODO
 
 ## Human Verification Evidence
 ```
-TODO: Run the screener for one hour of live data. Verify:
+Not yet run (2026-02-23). Pending the runbook's 1-hour paper/live observation pass:
 - Top candidates change as market conditions shift
 - Composite scores are plausible (high-volume breakout symbols rank higher than flat ones)
 - LLM recommendation reasoning is coherent and tied to the score data
@@ -372,6 +402,8 @@ TODO: Run the screener for one hour of live data. Verify:
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-18 | Runbook created from product strategy audit | Claude |
+| 2026-02-23 | Implemented initial universe screener runtime (schemas, scoring service, Temporal workflow/activities, ops API endpoints, prompt, tests) with agent-mode workflow registration via `tools/` + compatibility shim | Codex |
+| 2026-02-24 | Added grouped shortlist/session-preflight UX support (paper + live control panel UI), optional LLM annotation/re-ranking with deterministic fallback, and validated backend tests + frontend build | Codex |
 
 ## Worktree Setup
 ```bash

@@ -12,6 +12,7 @@ from agents.strategies.llm_client import LLMClient
 from agents.strategies.plan_provider import StrategyPlanProvider
 from schemas.judge_feedback import DisplayConstraints, JudgeFeedback
 from schemas.llm_strategist import LLMInput, RiskConstraint, StrategyPlan
+from schemas.screener import InstrumentRecommendation
 from services.strategy_run_registry import StrategyRunRegistry, strategy_run_registry
 from services.risk_adjustment_service import effective_risk_limits
 from schemas.strategy_run import RiskLimitSettings
@@ -56,11 +57,13 @@ class StrategistPlanService:
         prompt_template: str | None = None,
         use_vector_store: bool = False,
         emit_events: bool = True,
+        instrument_recommendation: InstrumentRecommendation | dict | None = None,
     ) -> StrategyPlan:
         run = self.registry.get_strategy_run(run_id)
         plan_date = plan_date or datetime.now(timezone.utc)
         risk_limits = effective_risk_limits(run)
         llm_input = self._llm_input_with_risk_overrides(llm_input, risk_limits)
+        llm_input = self._llm_input_with_instrument_recommendation(llm_input, instrument_recommendation)
         plan = self.plan_provider.get_plan(
             run_id,
             plan_date,
@@ -182,6 +185,26 @@ class StrategistPlanService:
         params = dict(payload.risk_params or {})
         params.update(risk_limits.to_risk_params())
         payload.risk_params = params
+        return payload
+
+    @staticmethod
+    def _llm_input_with_instrument_recommendation(
+        llm_input: LLMInput,
+        instrument_recommendation: InstrumentRecommendation | dict | None,
+    ) -> LLMInput:
+        if not instrument_recommendation:
+            return llm_input
+        payload = llm_input.model_copy(deep=True)
+        rec = (
+            instrument_recommendation.model_dump(mode="json")
+            if isinstance(instrument_recommendation, InstrumentRecommendation)
+            else dict(instrument_recommendation)
+        )
+        global_context = dict(payload.global_context or {})
+        global_context["instrument_recommendation"] = rec
+        if rec.get("selected_symbol"):
+            global_context.setdefault("preferred_symbol", rec.get("selected_symbol"))
+        payload.global_context = global_context
         return payload
 
     @staticmethod

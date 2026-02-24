@@ -33,6 +33,7 @@ ALLOWED_MODULES = [
     "tools.market_data",
     "tools.paper_trading",  # Paper trading workflow
     "tools.strategy_signal",
+    "tools.universe_screener",
 ]
 
 

@@ -12,9 +12,11 @@ import {
 import {
   paperTradingAPI,
   promptsAPI,
+  screenerAPI,
   type PaperTradingSessionConfig,
   type CandleBar,
   type PaperTradingTradeSet,
+  type ScreenerRecommendationItem,
 } from '../lib/api';
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
@@ -31,6 +33,7 @@ export function PaperTradingControl() {
   const [selectedStrategyId, setSelectedStrategyId] = useState('default');
   const [planIntervalHours, setPlanIntervalHours] = useState(4);
   const [enableDiscovery, setEnableDiscovery] = useState(false);
+  const [annotateScreenerShortlist, setAnnotateScreenerShortlist] = useState(false);
 
   // Aggressive settings state (defaults match conservative settings)
   const [aggressiveSettings, setAggressiveSettings] = useState<AggressiveSettings>({
@@ -66,6 +69,15 @@ export function PaperTradingControl() {
     queryFn: () => promptsAPI.listStrategies(),
   });
   const strategies = strategiesData?.strategies || [];
+
+  // Screener preflight for session-start UX (grouped by hypothesis + timeframe)
+  const screenerPreflightQuery = useQuery({
+    queryKey: ['screener-session-preflight', 'paper', annotateScreenerShortlist],
+    queryFn: () => screenerAPI.getSessionPreflight('paper', { annotate: annotateScreenerShortlist }),
+    refetchInterval: 60000,
+    retry: false,
+  });
+  const screenerPreflight = screenerPreflightQuery.data;
 
   // Fetch session list
   const { data: sessionsData } = useQuery({
@@ -225,6 +237,18 @@ export function PaperTradingControl() {
   const isRunning = session?.status === 'running';
   const isStarting = startSession.isPending;
   const isLiteralFalseRule = (rule?: string | null) => (rule || '').trim().toLowerCase() === 'false';
+  const screenerErrorStatus = (screenerPreflightQuery.error as any)?.response?.status as number | undefined;
+  const applyScreenerCandidateToForm = (item: ScreenerRecommendationItem) => {
+    setSymbolsInput((prev) => mergePrimarySymbol(prev, item.symbol));
+    const strategyId = mapScreenerHypothesisToStrategyId(item.template_id || item.hypothesis, strategies);
+    if (strategyId) {
+      setSelectedStrategyId(strategyId);
+    }
+    const interval = recommendedPlanIntervalHours(item.expected_hold_timeframe);
+    if (interval) {
+      setPlanIntervalHours(interval);
+    }
+  };
   const selectedPositionMeta = portfolio?.position_meta?.[chartSymbol];
   const selectedPositionQty = portfolio?.positions?.[chartSymbol] ?? 0;
   const selectedEntryPrice = portfolio?.entry_prices?.[chartSymbol] ?? null;
@@ -281,6 +305,185 @@ export function PaperTradingControl() {
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Screener preflight shortlist (session-start UX) */}
+            <div className="rounded-lg border border-sky-200 dark:border-sky-800 bg-sky-50/80 dark:bg-sky-900/20 p-4">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <label className="block text-sm font-medium text-sky-900 dark:text-sky-200">
+                    Screener Preflight (Paper)
+                  </label>
+                  <p className="text-xs text-sky-700/90 dark:text-sky-300/80 mt-0.5">
+                    Grouped shortlist by supported strategy hypotheses and expected hold timeframe.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => screenerPreflightQuery.refetch()}
+                  disabled={screenerPreflightQuery.isFetching}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs border border-sky-300 dark:border-sky-700 hover:bg-sky-100/80 dark:hover:bg-sky-900/40 disabled:opacity-60"
+                >
+                  <RefreshCw className={cn('w-3.5 h-3.5', screenerPreflightQuery.isFetching && 'animate-spin')} />
+                  Refresh
+                </button>
+              </div>
+
+              <div className="mb-3 flex items-center gap-2">
+                <input
+                  id="annotateScreenerShortlist"
+                  type="checkbox"
+                  checked={annotateScreenerShortlist}
+                  onChange={(e) => setAnnotateScreenerShortlist(e.target.checked)}
+                  className="w-4 h-4 text-sky-600 rounded"
+                />
+                <label htmlFor="annotateScreenerShortlist" className="text-xs text-sky-800 dark:text-sky-200">
+                  Optional LLM annotate / re-rank (deterministic fallback on failure)
+                </label>
+              </div>
+
+              {screenerPreflightQuery.isLoading && (
+                <div className="text-xs text-sky-800 dark:text-sky-200 flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Loading screener preflight…
+                </div>
+              )}
+
+              {!screenerPreflightQuery.isLoading && screenerErrorStatus === 404 && (
+                <p className="text-xs text-sky-800 dark:text-sky-200">
+                  No screener data yet. Start the screener workflow to populate grouped recommendations.
+                </p>
+              )}
+
+              {!screenerPreflightQuery.isLoading && screenerPreflightQuery.error && screenerErrorStatus !== 404 && (
+                <p className="text-xs text-red-600 dark:text-red-400">
+                  Failed to load screener preflight: {(screenerPreflightQuery.error as Error).message}
+                </p>
+              )}
+
+              {screenerPreflight && screenerPreflight.shortlist.groups.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="px-2 py-1 rounded-full bg-white/90 dark:bg-gray-800 border border-sky-200 dark:border-sky-700 font-mono">
+                      {formatDateTime(screenerPreflight.as_of)}
+                    </span>
+                    <span className="px-2 py-1 rounded-full bg-white/90 dark:bg-gray-800 border border-sky-200 dark:border-sky-700">
+                      {screenerPreflight.shortlist.groups.length} groups
+                    </span>
+                    <span className="px-2 py-1 rounded-full bg-white/90 dark:bg-gray-800 border border-sky-200 dark:border-sky-700">
+                      up to {screenerPreflight.shortlist.max_per_group}/group
+                    </span>
+                    <span className={cn(
+                      'px-2 py-1 rounded-full border text-[11px]',
+                      screenerPreflight.shortlist.annotation_meta?.applied
+                        ? 'bg-violet-100 text-violet-700 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-800'
+                        : 'bg-white/90 dark:bg-gray-800 border-sky-200 dark:border-sky-700 text-gray-600 dark:text-gray-300'
+                    )}>
+                      {screenerPreflight.shortlist.annotation_meta?.applied ? 'LLM annotated' : 'Deterministic'}
+                    </span>
+                    {screenerPreflight.suggested_default_symbol && (
+                      <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                        Suggested: {screenerPreflight.suggested_default_symbol}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 max-h-96 overflow-y-auto pr-1">
+                    {screenerPreflight.shortlist.groups.map((group) => (
+                      <div
+                        key={`${group.hypothesis}:${group.timeframe}`}
+                        className="rounded-lg border border-sky-200/80 dark:border-sky-800 p-3 bg-white/70 dark:bg-gray-900/30"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="flex items-center flex-wrap gap-2">
+                              <span className="text-sm font-semibold">{group.label}</span>
+                              <span className="text-[11px] px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300 font-mono">
+                                {group.hypothesis}
+                              </span>
+                              <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300 font-mono">
+                                {group.timeframe}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                              {group.rationale}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="mt-2 space-y-2">
+                          {group.recommendations.map((item) => (
+                            <div
+                              key={`${group.hypothesis}:${group.timeframe}:${item.symbol}:${item.rank_global}`}
+                              className="rounded-md border border-gray-200 dark:border-gray-700 p-2.5"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-mono font-semibold">{item.symbol}</span>
+                                    <span className={cn(
+                                      'text-[11px] px-1.5 py-0.5 rounded font-semibold',
+                                      item.confidence === 'high'
+                                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                                        : item.confidence === 'medium'
+                                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+                                          : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+                                    )}>
+                                      {item.confidence}
+                                    </span>
+                                    <span className="text-[11px] text-gray-500 font-mono">
+                                      score {item.composite_score.toFixed(2)} · #{item.rank_global}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">
+                                    {item.thesis}
+                                  </p>
+                                  <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-gray-500">
+                                    <span>Hold: <span className="font-mono">{item.expected_hold_timeframe}</span></span>
+                                    {item.template_id && (
+                                      <span>Template: <span className="font-mono">{item.template_id}</span></span>
+                                    )}
+                                    {item.key_levels?.support != null && item.key_levels?.resistance != null && (
+                                      <span>
+                                        Levels: <span className="font-mono">S {Number(item.key_levels.support).toFixed(2)} / R {Number(item.key_levels.resistance).toFixed(2)}</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => applyScreenerCandidateToForm(item)}
+                                  disabled={isRunning}
+                                  className={cn(
+                                    'shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border',
+                                    isRunning
+                                      ? 'opacity-50 cursor-not-allowed border-gray-300'
+                                      : 'border-sky-300 dark:border-sky-700 hover:bg-sky-100/80 dark:hover:bg-sky-900/40'
+                                  )}
+                                  title="Apply symbol/template/timeframe hint to the session form"
+                                >
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  Use
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {screenerPreflight.notes?.length > 0 && (
+                    <div className="pt-1 space-y-1">
+                      {screenerPreflight.notes.slice(0, 2).map((note, idx) => (
+                        <p key={idx} className="text-[11px] text-sky-800/90 dark:text-sky-200/90">
+                          {note}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Symbols */}
@@ -1256,6 +1459,47 @@ function formatTimeAxis(value: number, timeframe: string): string {
     return dt.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' });
   }
   return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function mergePrimarySymbol(current: string, symbol: string): string {
+  const incoming = symbol.trim().toUpperCase();
+  const existing = current
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean)
+    .filter((s) => s !== incoming);
+  return [incoming, ...existing].join(', ');
+}
+
+function mapScreenerHypothesisToStrategyId(
+  hypothesisOrTemplate: string | null | undefined,
+  strategies: Array<{ id: string }>
+): string | null {
+  const id = (hypothesisOrTemplate || '').trim();
+  if (!id) return null;
+  const available = new Set(strategies.map((s) => s.id));
+  if (available.has(id)) return id;
+
+  const aliases: Record<string, string[]> = {
+    compression_breakout: ['compression_breakout', 'volatility_breakout'],
+    volatile_breakout: ['volatility_breakout', 'momentum_trend_following'],
+    bull_trending: ['momentum_trend_following', 'aggressive_active', 'balanced_hybrid'],
+    bear_defensive: ['conservative_defensive', 'balanced_hybrid'],
+    range_mean_revert: ['mean_reversion', 'balanced_hybrid'],
+    uncertain_wait: ['conservative_defensive', 'balanced_hybrid'],
+  };
+  for (const candidate of aliases[id] || []) {
+    if (available.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+function recommendedPlanIntervalHours(timeframe: string): number | null {
+  const tf = timeframe.trim().toLowerCase();
+  if (tf === '15m') return 1;
+  if (tf === '1h') return 4;
+  if (tf === '4h') return 8;
+  return null;
 }
 
 function CandlestickChart({ candles, trades, executions = [], timeframe, stopPrice, targetPrice, openPosition }: CandlestickChartProps) {
