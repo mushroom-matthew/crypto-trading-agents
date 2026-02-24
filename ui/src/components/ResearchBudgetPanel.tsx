@@ -55,6 +55,7 @@ function ResearchBudgetPanelInner<T extends ResearchBudgetSettings>({
   const debouncedOnChange = useDebouncedCallback(onChange, 150);
 
   const isRunning = !!sessionId && disabled;
+  const hasSelectedSession = !!sessionId;
 
   // ── Live status queries (only when running + expanded) ──────────────────
 
@@ -62,7 +63,7 @@ function ResearchBudgetPanelInner<T extends ResearchBudgetSettings>({
     queryKey: ['research-budget', sessionId],
     queryFn: () => researchAPI.getBudget(sessionId!),
     refetchInterval: isRunning ? 10000 : false,
-    enabled: isRunning && isExpanded,
+    enabled: hasSelectedSession && isExpanded,
     retry: false,
   });
 
@@ -210,17 +211,23 @@ function ResearchBudgetPanelInner<T extends ResearchBudgetSettings>({
             )}
           </div>
 
-          {/* ── Live status (only while running) ── */}
-          {isRunning && enabled && (
+          {/* ── Session status (selected session, running or stopped) ── */}
+          {hasSelectedSession && enabled && (
             <div className="border-t border-violet-100 dark:border-violet-800 pt-4 space-y-3">
               <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
-                Live Status
+                {isRunning ? 'Live Status' : 'Selected Session Status'}
               </p>
 
               {budgetQuery.isLoading && (
                 <div className="flex items-center gap-2 text-sm text-gray-400">
                   <Loader2 className="w-4 h-4 animate-spin" /> Loading…
                 </div>
+              )}
+
+              {!budgetQuery.isLoading && budgetQuery.error && (
+                <p className="text-xs text-red-600 dark:text-red-400">
+                  Failed to load research budget: {(budgetQuery.error as Error).message}
+                </p>
               )}
 
               {budget && !budget.research_enabled && (

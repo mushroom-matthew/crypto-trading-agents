@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
@@ -55,6 +55,24 @@ PAPER_TRADING_CONTINUE_EVERY = int(os.environ.get("PAPER_TRADING_CONTINUE_EVERY"
 PAPER_TRADING_HISTORY_LIMIT = int(os.environ.get("PAPER_TRADING_HISTORY_LIMIT", "9000"))
 DEFAULT_PLAN_INTERVAL_HOURS = float(os.environ.get("PAPER_TRADING_PLAN_INTERVAL_HOURS", "4"))
 PLAN_CACHE_DIR = Path(os.environ.get("PAPER_TRADING_PLAN_CACHE", ".cache/paper_trading_plans"))
+
+
+def _is_missing_stop_validation_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "must define a stop" in text and "stop_anchor_type" in text
+
+
+def _missing_stop_repair_instructions(error_text: str) -> str:
+    return (
+        "REPAIR REQUIRED: The previous plan failed validation because one or more ENTRY triggers "
+        "(direction='long' or 'short') omitted a stop.\n"
+        "For EVERY entry trigger, you must define exactly one stop mechanism:\n"
+        "- Preferred: stop_anchor_type (e.g. 'htf_daily_extreme', 'atr', 'donchian_extreme'), optionally with stop_atr_mult when anchor='atr'\n"
+        "- OR: stop_anchor_type='pct' with stop_loss_pct > 0\n"
+        "Do not leave stop_anchor_type and stop_loss_pct both null for entry triggers.\n"
+        "Return a full valid StrategyPlan JSON; preserve the intended strategy logic while adding stops.\n"
+        f"Validation error details:\n{error_text}"
+    )
 
 
 class PaperTradingConfig(BaseModel):
@@ -201,12 +219,29 @@ async def generate_strategy_plan_activity(
         effective_prompt = f"{repair_instructions}\n\n{strategy_prompt or ''}"
 
     llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
-    plan = llm_client.generate_plan(
-        llm_input,
-        prompt_template=effective_prompt,
-        run_id=session_id,
-        plan_id=str(uuid4()),
-    )
+    try:
+        plan = llm_client.generate_plan(
+            llm_input,
+            prompt_template=effective_prompt,
+            run_id=session_id,
+            plan_id=str(uuid4()),
+        )
+    except ValidationError as exc:
+        # Schema validation can fail inside LLMClient before the workflow-level
+        # validator/repair pass runs. Catch the common missing-stop error and
+        # issue one targeted repair request so the activity does not hard-fail.
+        if repair_instructions or not _is_missing_stop_validation_error(exc):
+            raise
+        logger.warning("LLM plan failed missing-stop validation; retrying with targeted repair prompt")
+        return await generate_strategy_plan_activity(
+            symbols=symbols,
+            portfolio_state=portfolio_state,
+            strategy_prompt=strategy_prompt,
+            market_context=market_context,
+            llm_model=llm_model,
+            session_id=session_id,
+            repair_instructions=_missing_stop_repair_instructions(str(exc)),
+        )
 
     plan_dict = plan.model_dump()
 
@@ -959,6 +994,17 @@ class PaperTradingWorkflow:
                     "symbols": self.symbols,
                     "initial_cash": parsed_config.initial_cash,
                     "initial_allocations": parsed_config.initial_allocations,
+                    "research_budget": (
+                        {
+                            "enabled": True,
+                            "initial_capital": self.research.initial_capital,
+                            "cash": self.research.cash,
+                            "max_loss_usd": self.research.max_loss_usd,
+                            "paused": self.research.paused,
+                        }
+                        if self.research is not None
+                        else {"enabled": False}
+                    ),
                 }],
                 schedule_to_close_timeout=timedelta(seconds=10),
             )

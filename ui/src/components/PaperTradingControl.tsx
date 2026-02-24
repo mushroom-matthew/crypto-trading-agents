@@ -636,7 +636,7 @@ export function PaperTradingControl() {
               config={researchSettings}
               onChange={setResearchSettings}
               disabled={isRunning}
-              sessionId={isRunning ? selectedSessionId ?? undefined : undefined}
+              sessionId={selectedSessionId ?? undefined}
             />
 
             {/* Action Buttons */}
