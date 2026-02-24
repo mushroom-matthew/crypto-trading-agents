@@ -4,6 +4,7 @@ import { TrendingUp, TrendingDown, AlertCircle, DollarSign, PieChart, Activity, 
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { MarketTicker } from './MarketTicker';
 import { EventTimeline } from './EventTimeline';
+import { LiveTradingControlPanel } from './LiveTradingControlPanel';
 import { useWebSocket, type WebSocketMessage } from '../hooks/useWebSocket';
 import { buildWebSocketUrl } from '../lib/websocket';
 
@@ -289,6 +290,8 @@ export function LiveTradingMonitor() {
 
   return (
     <div className="space-y-6">
+      <LiveTradingControlPanel />
+
       {/* Market Ticker */}
       <MarketTicker />
 

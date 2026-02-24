@@ -310,6 +310,55 @@ export interface PortfolioStateSnapshot {
   return_pct: number;
 }
 
+export interface ScreenerRecommendationItem {
+  symbol: string;
+  hypothesis: string;
+  template_id?: string | null;
+  expected_hold_timeframe: string;
+  thesis: string;
+  confidence: 'high' | 'medium' | 'low';
+  composite_score: number;
+  key_levels?: Record<string, number> | null;
+  rank_global: number;
+  rank_in_group: number;
+  score_components?: Record<string, any>;
+}
+
+export interface ScreenerRecommendationGroup {
+  hypothesis: string;
+  timeframe: string;
+  template_id?: string | null;
+  label: string;
+  rationale: string;
+  recommendations: ScreenerRecommendationItem[];
+}
+
+export interface ScreenerRecommendationBatch {
+  run_id: string;
+  as_of: string;
+  source: string;
+  supported_hypotheses: string[];
+  max_per_group: number;
+  total_candidates_considered: number;
+  groups: ScreenerRecommendationGroup[];
+  annotation_meta?: {
+    applied?: boolean;
+    mode?: string;
+    model?: string;
+    error?: string;
+  } | null;
+}
+
+export interface ScreenerSessionPreflight {
+  mode: 'paper' | 'live';
+  as_of: string;
+  screener_run_id: string;
+  shortlist: ScreenerRecommendationBatch;
+  suggested_default_symbol?: string | null;
+  suggested_default_template_id?: string | null;
+  notes: string[];
+}
+
 // ============================================================================
 // API Functions
 // ============================================================================
@@ -897,6 +946,25 @@ export interface PaperTradingEquityCurve {
   total_snapshots: number;
   equity_curve: EquitySnapshot[];
 }
+
+export const screenerAPI = {
+  getRecommendations: async (maxPerGroup = 10): Promise<ScreenerRecommendationBatch> => {
+    const response = await api.get('/screener/recommendations', {
+      params: { max_per_group: maxPerGroup },
+    });
+    return response.data;
+  },
+
+  getSessionPreflight: async (
+    mode: 'paper' | 'live' = 'paper',
+    options?: { annotate?: boolean }
+  ): Promise<ScreenerSessionPreflight> => {
+    const response = await api.get('/screener/session-preflight', {
+      params: { mode, annotate: options?.annotate ?? false },
+    });
+    return response.data;
+  },
+};
 
 export const paperTradingAPI = {
   // Start a new paper trading session
