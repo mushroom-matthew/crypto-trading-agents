@@ -180,6 +180,7 @@ class StrategyPlanProvider:
         use_vector_store: bool = False,
         event_ts: datetime | None = None,
         emit_events: bool = True,
+        policy_snapshot: "PolicySnapshot | None" = None,
     ) -> StrategyPlan:
         cache_path = self._cache_path(run_id, plan_date, llm_input)
         emit_ts = event_ts or plan_date
@@ -198,11 +199,23 @@ class StrategyPlanProvider:
             }
             object.__setattr__(plan, "_llm_meta", self.last_generation_info)
             if emit_events:
-                self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
+                self._emit_plan_generated(
+                    plan, llm_input, run_id, event_ts=emit_ts,
+                    policy_snapshot=policy_snapshot,
+                )
             return plan
         date_key = (run_id, plan_date.strftime("%Y-%m-%d"))
         if self.daily_counts[date_key] >= self.llm_calls_per_day:
             raise RuntimeError(f"LLM call budget exhausted for {date_key[1]}")
+        # Auto-build policy snapshot from llm_input when not provided
+        if policy_snapshot is None:
+            try:
+                from services.market_snapshot_builder import build_policy_snapshot
+                policy_snapshot = build_policy_snapshot(
+                    llm_input, policy_event_type="plan_generation"
+                )
+            except Exception:
+                logger.debug("Failed to auto-build policy snapshot", exc_info=True)
         resolved_prompt = _resolve_prompt_template(prompt_template)
         input_hash = hashlib.sha256(llm_input.to_json().encode("utf-8")).hexdigest()
         metadata = self._llm_call_metadata(llm_input, plan_date, prompt_template=resolved_prompt)
@@ -225,7 +238,10 @@ class StrategyPlanProvider:
         self.last_generation_info = meta
         object.__setattr__(plan, "_llm_meta", meta)
         if emit_events:
-            self._emit_plan_generated(plan, llm_input, run_id, event_ts=emit_ts)
+            self._emit_plan_generated(
+                plan, llm_input, run_id, event_ts=emit_ts,
+                policy_snapshot=policy_snapshot,
+            )
         return plan
 
     def _enrich_plan(self, plan: StrategyPlan, llm_input: LLMInput) -> StrategyPlan:
@@ -384,6 +400,7 @@ class StrategyPlanProvider:
         run_id: str,
         *,
         event_ts: datetime | None = None,
+        policy_snapshot: "PolicySnapshot | None" = None,
     ) -> None:
         try:
             trigger_summary = [
@@ -415,6 +432,14 @@ class StrategyPlanProvider:
                 "source": (self.last_generation_info or {}).get("source"),
                 "retrieved_template_id": (self.last_generation_info or {}).get("retrieved_template_id"),
                 "llm_meta": self.last_generation_info,
+                # R49 snapshot provenance
+                "snapshot_id": policy_snapshot.provenance.snapshot_id if policy_snapshot else None,
+                "snapshot_hash": policy_snapshot.provenance.snapshot_hash if policy_snapshot else None,
+                "snapshot_as_of_ts": policy_snapshot.provenance.as_of_ts.isoformat() if policy_snapshot else None,
+                "snapshot_version": policy_snapshot.provenance.snapshot_version if policy_snapshot else None,
+                "snapshot_kind": policy_snapshot.provenance.snapshot_kind if policy_snapshot else None,
+                "snapshot_staleness_seconds": policy_snapshot.quality.staleness_seconds if policy_snapshot else None,
+                "snapshot_missing_sections": policy_snapshot.quality.missing_sections if policy_snapshot else [],
             }
             ts = event_ts
             if ts is None:
