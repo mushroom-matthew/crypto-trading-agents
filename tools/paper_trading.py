@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
@@ -85,6 +85,14 @@ class PaperTradingConfig(BaseModel):
     initial_allocations: Optional[Dict[str, float]] = None
     strategy_prompt: Optional[str] = None
     plan_interval_hours: float = DEFAULT_PLAN_INTERVAL_HOURS
+    indicator_timeframe: str = Field(
+        default="1h",
+        description=(
+            "OHLCV timeframe used for indicator computation and trigger generation. "
+            "Should match the screener's expected_hold_timeframe for the selected candidates. "
+            "Valid values: '1m', '5m', '15m', '1h', '4h', '1d'."
+        ),
+    )
     replan_on_day_boundary: bool = True
     enable_symbol_discovery: bool = False
     min_volume_24h: float = 1_000_000
@@ -105,6 +113,7 @@ class SessionState(BaseModel):
     symbols: List[str]
     strategy_prompt: Optional[str]
     plan_interval_hours: float
+    indicator_timeframe: str = "1h"
     replan_on_day_boundary: bool = True
     current_plan: Optional[Dict[str, Any]] = None
     last_plan_time: Optional[str] = None
@@ -138,6 +147,7 @@ async def generate_strategy_plan_activity(
     llm_model: Optional[str] = None,
     session_id: Optional[str] = None,
     repair_instructions: Optional[str] = None,
+    indicator_timeframe: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate a strategy plan using the LLM client.
 
@@ -179,17 +189,17 @@ async def generate_strategy_plan_activity(
             snap_init = {k: v for k, v in ctx.items()
                          if k not in ("trend_state", "vol_state", "price")}
             snap_init.setdefault("symbol", symbol)
-            snap_init.setdefault("timeframe", "1h")
+            snap_init.setdefault("timeframe", indicator_timeframe or "1h")
             snap_init.setdefault("as_of", now)
             try:
                 snapshot = IndicatorSnapshot.model_validate(snap_init)
             except Exception as e:
                 logger.warning(f"Full indicator snapshot validation failed for {symbol}, using minimal: {e}")
                 close = float(ctx.get("price", ctx.get("close", 0.0)) or 0.0)
-                snapshot = IndicatorSnapshot(symbol=symbol, timeframe="1h", as_of=now, close=close)
+                snapshot = IndicatorSnapshot(symbol=symbol, timeframe=indicator_timeframe or "1h", as_of=now, close=close)
         else:
             close = float(ctx.get("price", 0.0) or 0.0)
-            snapshot = IndicatorSnapshot(symbol=symbol, timeframe="1h", as_of=now, close=close)
+            snapshot = IndicatorSnapshot(symbol=symbol, timeframe=indicator_timeframe or "1h", as_of=now, close=close)
         assets.append(build_asset_state(symbol, [snapshot]))
 
     positions_raw = portfolio_state.get("positions", {})
@@ -218,6 +228,15 @@ async def generate_strategy_plan_activity(
         logger.warning(f"Generating repair plan with validation error context")
         effective_prompt = f"{repair_instructions}\n\n{strategy_prompt or ''}"
 
+    # Inject a timeframe hint so the LLM generates triggers on the correct candle period
+    tf = indicator_timeframe or "1h"
+    timeframe_hint = (
+        f"\nTIMEFRAME: Use '{tf}' as the timeframe for all triggers in this plan. "
+        f"The indicator snapshot was computed on {tf} candles. "
+        f"All entry_rule and exit_rule expressions refer to {tf}-close values.\n"
+    )
+    effective_prompt = (effective_prompt or "") + timeframe_hint
+
     llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
     try:
         plan = llm_client.generate_plan(
@@ -241,6 +260,7 @@ async def generate_strategy_plan_activity(
             llm_model=llm_model,
             session_id=session_id,
             repair_instructions=_missing_stop_repair_instructions(str(exc)),
+            indicator_timeframe=indicator_timeframe,
         )
 
     plan_dict = plan.model_dump()
@@ -665,6 +685,7 @@ class PaperTradingWorkflow:
         self.symbols: List[str] = []
         self.strategy_prompt: Optional[str] = None
         self.plan_interval_hours: float = DEFAULT_PLAN_INTERVAL_HOURS
+        self.indicator_timeframe: str = "1h"
         self.replan_on_day_boundary: bool = True
         self.current_plan: Optional[Dict[str, Any]] = None
         self.last_plan_time: Optional[datetime] = None
@@ -952,6 +973,7 @@ class PaperTradingWorkflow:
             self.symbols = list(parsed_config.symbols)
             self.strategy_prompt = parsed_config.strategy_prompt
             self.plan_interval_hours = parsed_config.plan_interval_hours
+            self.indicator_timeframe = parsed_config.indicator_timeframe
             self.replan_on_day_boundary = parsed_config.replan_on_day_boundary
             self.enable_symbol_discovery = parsed_config.enable_symbol_discovery
             self.min_volume_24h = parsed_config.min_volume_24h
@@ -1170,7 +1192,7 @@ class PaperTradingWorkflow:
         # Bollinger, candlestick morphology, HTF daily anchors, etc.).
         indicator_snapshots = await workflow.execute_activity(
             fetch_indicator_snapshots_activity,
-            args=[self.symbols, "1h", 300],
+            args=[self.symbols, self.indicator_timeframe, 300],
             schedule_to_close_timeout=timedelta(minutes=2),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
@@ -1203,6 +1225,8 @@ class PaperTradingWorkflow:
                 market_context,
                 None,  # llm_model
                 self.session_id,
+                None,  # repair_instructions
+                self.indicator_timeframe,
             ],
             schedule_to_close_timeout=timedelta(minutes=5),
             retry_policy=RetryPolicy(maximum_attempts=2),
@@ -1228,6 +1252,7 @@ class PaperTradingWorkflow:
                     None,  # llm_model
                     self.session_id,
                     _validation.repair_prompt(),  # repair_instructions
+                    self.indicator_timeframe,
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -1773,6 +1798,7 @@ class PaperTradingWorkflow:
             symbols=self.symbols,
             strategy_prompt=self.strategy_prompt,
             plan_interval_hours=self.plan_interval_hours,
+            indicator_timeframe=self.indicator_timeframe,
             replan_on_day_boundary=self.replan_on_day_boundary,
             current_plan=self.current_plan,
             last_plan_time=self.last_plan_time.isoformat() if self.last_plan_time else None,
@@ -1798,6 +1824,7 @@ class PaperTradingWorkflow:
         self.symbols = parsed.symbols
         self.strategy_prompt = parsed.strategy_prompt
         self.plan_interval_hours = parsed.plan_interval_hours
+        self.indicator_timeframe = parsed.indicator_timeframe
         self.replan_on_day_boundary = parsed.replan_on_day_boundary
         self.current_plan = parsed.current_plan
         self.last_plan_time = datetime.fromisoformat(parsed.last_plan_time) if parsed.last_plan_time else None

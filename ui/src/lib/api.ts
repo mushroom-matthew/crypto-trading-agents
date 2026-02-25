@@ -705,6 +705,7 @@ export interface PaperTradingSessionConfig {
   strategy_prompt?: string;
   strategy_id?: string;
   plan_interval_hours?: number;
+  indicator_timeframe?: string;  // OHLCV timeframe for indicator fetch and trigger generation
   replan_on_day_boundary?: boolean;
   enable_symbol_discovery?: boolean;
   min_volume_24h?: number;

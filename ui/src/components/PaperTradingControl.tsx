@@ -33,6 +33,7 @@ export function PaperTradingControl() {
   const [allocationInput, setAllocationInput] = useState('');
   const [selectedStrategyId, setSelectedStrategyId] = useState('default');
   const [planIntervalHours, setPlanIntervalHours] = useState(4);
+  const [indicatorTimeframe, setIndicatorTimeframe] = useState<string>('1h');
   const [enableDiscovery, setEnableDiscovery] = useState(false);
   const [annotateScreenerShortlist, setAnnotateScreenerShortlist] = useState(false);
 
@@ -214,6 +215,7 @@ export function PaperTradingControl() {
         strategy_id: selectedStrategyId,
         strategy_prompt: strategyPrompt,
         plan_interval_hours: planIntervalHours,
+        indicator_timeframe: indicatorTimeframe,
         enable_symbol_discovery: enableDiscovery,
         exit_binding_mode: 'category',
         // Aggressive trading settings
@@ -262,6 +264,7 @@ export function PaperTradingControl() {
     if (interval) {
       setPlanIntervalHours(interval);
     }
+    setIndicatorTimeframe(item.expected_hold_timeframe);
   };
   const selectedPositionMeta = portfolio?.position_meta?.[chartSymbol];
   const selectedPositionQty = portfolio?.positions?.[chartSymbol] ?? 0;
@@ -1544,6 +1547,7 @@ function mapScreenerHypothesisToStrategyId(
 
 function recommendedPlanIntervalHours(timeframe: string): number | null {
   const tf = timeframe.trim().toLowerCase();
+  if (tf === '1m' || tf === '5m') return 0.5;   // replan every 30 min for short-hold setups
   if (tf === '15m') return 1;
   if (tf === '1h') return 4;
   if (tf === '4h') return 8;
