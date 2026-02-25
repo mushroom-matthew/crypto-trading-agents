@@ -38,14 +38,18 @@ TARGET LOGIC:
 FALSE BREAKOUT GUARD:
 - If price returns inside the compression range, treat as failed breakout → exit immediately via risk_off.
 - IMPORTANT: Do NOT use donchian_upper_short in the false-breakout exit rule.
-  Donchian bands are rolling — after breakout, the band shifts upward, making the rule drift.
-  Instead, reference the STORED breakout_range_high/breakout_range_low set at entry (via Runbook 42
-  stop_anchor_type='donchian_lower' for longs). The stored level is static and doesn't drift.
-  Rule: "not is_flat and below_stop"  (uses Runbook 42 level-anchored stop — stop is the range low)
-  If Runbook 42 is not yet merged, use: "not is_flat and expansion_flag < 0.5 and candle_body_pct < 0.2"
-  (expansion has stopped and current bar is indecisive — conservative proxy until 42 lands)
+  Donchian bands are rolling — after breakout, the upper band shifts upward, making the rule drift.
+  Instead, use the level-anchored stop recorded at entry. The stop is set to the Donchian lower at
+  the time of entry and does not move. This is the static "range low" reference.
+  Rule: "not is_flat and below_stop"  (stop is the compression range low, anchored at entry)
 
 TRIGGER REQUIREMENTS:
+IMPORTANT: Always generate ALL of the following triggers in every plan, regardless of current
+market conditions. Triggers are standing conditional rules — they sit in the plan and evaluate
+each bar. A trigger with entry_rule "is_flat and breakout_confirmed > 0.5" does NOT fire until
+breakout_confirmed becomes true. Generate it now so the system is ready when conditions are met.
+Never return an empty triggers list.
+
 1. compression_setup (category: other) — detects and logs compression state; no trade action
 2. breakout_long (category: volatility_breakout, direction: long) — primary entry
 3. breakout_short (category: volatility_breakout, direction: short) — primary short entry

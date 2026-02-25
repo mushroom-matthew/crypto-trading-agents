@@ -244,6 +244,9 @@ async def generate_strategy_plan_activity(
         )
 
     plan_dict = plan.model_dump()
+    # Stash retrieval metadata for the workflow to include in plan_generated event.
+    # Prefixed with _ so it can be popped before any Pydantic re-validation.
+    plan_dict["_retrieved_template_id"] = (llm_client.last_generation_info or {}).get("retrieved_template_id")
 
     # Cache the plan (only when not a repair pass — repair plans are one-shot)
     if not repair_instructions:
@@ -1241,6 +1244,9 @@ class PaperTradingWorkflow:
                 )
                 # Proceed with original plan — runtime failsafe is the last line of defence
 
+        # Pop retrieval metadata before storing — StrategyPlan uses extra="forbid"
+        _retrieved_template_id = plan_dict.pop("_retrieved_template_id", None)
+
         self.current_plan = plan_dict
         self.last_plan_time = workflow.now()
 
@@ -1268,6 +1274,8 @@ class PaperTradingWorkflow:
                 "trigger_count": len(plan_dict.get("triggers", [])),
                 "plan_index": len(self.plan_history) - 1,
                 "validation_errors": validation_errors,
+                "retrieved_template_id": _retrieved_template_id,
+                "template_id": plan_dict.get("template_id"),
             }],
             schedule_to_close_timeout=timedelta(seconds=10),
         )
