@@ -236,12 +236,21 @@ class TestBuildPolicySnapshot:
         # open_positions comes from portfolio.positions, not asset list
         assert snap.open_positions == sorted(["BTC-USD"])
 
-    def test_normalized_features_empty_by_default(self):
-        """normalized_features is intentionally empty until R55."""
+    def test_normalized_features_populated_by_r55(self):
+        """R55: normalized_features is now populated from regime fingerprint components."""
+        from schemas.regime_fingerprint import (
+            FINGERPRINT_VERSION,
+            NUMERIC_VECTOR_FEATURE_NAMES_V1,
+        )
         snap = build_policy_snapshot(_llm_input())
         for db in snap.derived.values():
-            assert db.normalized_features == {}
-            assert db.normalized_features_version is None
+            # R55 populates normalized_features with 6 named components
+            assert set(db.normalized_features.keys()) == set(NUMERIC_VECTOR_FEATURE_NAMES_V1)
+            # All values are in [0, 1]
+            for v in db.normalized_features.values():
+                assert 0.0 <= v <= 1.0, f"normalized feature out of bounds: {v}"
+            # Version is linked to FINGERPRINT_VERSION
+            assert db.normalized_features_version == FINGERPRINT_VERSION
 
     def test_feature_derivation_log_present(self):
         snap = build_policy_snapshot(_llm_input())
