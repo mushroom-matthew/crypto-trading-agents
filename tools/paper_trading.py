@@ -268,6 +268,21 @@ async def generate_strategy_plan_activity(
     # Prefixed with _ so it can be popped before any Pydantic re-validation.
     plan_dict["_retrieved_template_id"] = (llm_client.last_generation_info or {}).get("retrieved_template_id")
 
+    # R49: build PolicySnapshot and thread provenance into plan dict for event telemetry.
+    # Prefixed with _ so callers can pop before Pydantic re-validation.
+    try:
+        from services.market_snapshot_builder import build_policy_snapshot
+        _ps = build_policy_snapshot(llm_input, policy_event_type="plan_generation")
+        plan_dict["_snapshot_id"] = _ps.provenance.snapshot_id
+        plan_dict["_snapshot_hash"] = _ps.provenance.snapshot_hash
+        plan_dict["_snapshot_version"] = _ps.provenance.snapshot_version
+        plan_dict["_snapshot_kind"] = _ps.provenance.snapshot_kind
+        plan_dict["_snapshot_as_of_ts"] = _ps.provenance.as_of_ts.isoformat()
+        plan_dict["_snapshot_staleness_seconds"] = _ps.quality.staleness_seconds
+        plan_dict["_snapshot_missing_sections"] = _ps.quality.missing_sections
+    except Exception:
+        logger.debug("Failed to build policy snapshot in paper trading", exc_info=True)
+
     # Cache the plan (only when not a repair pass — repair plans are one-shot)
     if not repair_instructions:
         PLAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)

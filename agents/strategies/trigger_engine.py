@@ -216,6 +216,7 @@ class TriggerEngine:
         market_structure: dict[str, float | str | None] | None = None,
         portfolio: PortfolioState | None = None,
         position_meta: Mapping[str, dict[str, Any]] | None = None,
+        tick_snapshot: "Any | None" = None,
     ) -> dict[str, float | str | None]:
         """Build evaluation context, including cross-timeframe aliases."""
 
@@ -397,6 +398,15 @@ class TriggerEngine:
         context["r1_reached"] = r_current >= 1.0
         context["r2_reached"] = r_current >= 2.0
         context["r3_reached"] = r_current >= 3.0
+
+        # R49: thread TickSnapshot provenance into evaluation context (optional; None when absent)
+        if tick_snapshot is not None:
+            prov = getattr(tick_snapshot, "provenance", None)
+            context["snapshot_id"] = getattr(prov, "snapshot_id", None) if prov else None
+            context["snapshot_hash"] = getattr(prov, "snapshot_hash", None) if prov else None
+        else:
+            context.setdefault("snapshot_id", None)
+            context.setdefault("snapshot_hash", None)
 
         return context
 
