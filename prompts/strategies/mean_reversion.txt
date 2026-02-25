@@ -12,52 +12,50 @@ Mission:
 - Prioritize mean_reversion triggers over trend_continuation
 - Set tighter profit targets at moving average levels
 
+TRIGGER REQUIREMENTS:
+IMPORTANT: Always generate ALL of the following triggers in every plan, regardless of current
+market conditions. Triggers are standing conditional rules — they sit in the plan and evaluate
+each bar. A trigger with entry_rule "is_flat and rsi_14 < 30" does NOT fire until rsi_14 drops
+below 30. Generate it now so the system is ready when conditions are met.
+Never return an empty triggers list.
+
 Trigger Composition Requirements:
 1. **Reversion Zone Focus** — identify extreme deviations from mean:
    - Use Bollinger Bands (entries near lower band, exits at middle)
    - RSI extremes (below 30 for longs, above 70 for shorts)
    - Price distance from SMA as percentage deviation
 2. **Mandatory Range Confirmation** — avoid mean reversion in trending markets:
-   - Prefer low/declining ATR environments
-   - Check that 4h trend is neutral or consolidating
-   - Bollinger bandwidth contracting (squeeze setups)
+   - Prefer low/declining ATR environments: atr_14 < atr_14_prev2
+   - Bollinger bandwidth contracting: bb_bandwidth_pct_rank < 0.5
 3. **Trigger Diversity** — emit triggers in this priority order:
-   - mean_reversion (PRIMARY - at least 3 per asset)
-   - reversal (SECONDARY - 2 per asset for trend exhaustion)
+   - mean_reversion (PRIMARY - at least 2 per asset)
+   - reversal (SECONDARY - 1-2 per asset for trend exhaustion)
+   - risk_reduce (REQUIRED - 1 per asset, partial exit at 50% reversion)
+   - risk_off (REQUIRED - 1 per asset, exit when range breaks)
    - emergency_exit (REQUIRED - 1 per asset)
-   - trend_continuation (MINIMAL - only after mean tests hold)
    - volatility_breakout (AVOID - contradicts strategy)
 4. **Sizing by Deviation Extremity**:
    - A-grade: RSI < 25 or > 75, price at Bollinger band, low volatility
    - B-grade: RSI < 35 or > 65, price near band
    - C-grade: Moderate deviation, probe position
 5. **Exit Logic**:
-   - Target the mean: exit at sma_medium or Bollinger middle band
+   - Target the mean: exit at sma_medium or bollinger_middle
    - Take partial profits at 50% reversion, full at mean
    - Tight stops: 1-1.5x ATR (mean reversion fails fast or works quickly)
-6. **Graduated De-Risk (use appropriately)**:
-   REQUIRED: Include at least 1 risk_reduce and 1 risk_off trigger.
-   - risk_reduce (partial exit): Use when reversion is working but losing momentum
-     * Price reached 50% of the way to mean - lock in partial gains
-     * Volume declining as price approaches target
-     * Higher timeframe starting to trend against position
-     * Example: trim 50% when price > bollinger_middle * 0.98 and volume declining
-   - risk_off (full defensive exit): Use when range is breaking
-     * ATR expanding significantly (regime shift to trending)
-     * Price breaking Bollinger bands in wrong direction
-     * Mean reversion thesis invalidated by structural change
-   - emergency_exit: Reserve for broken conditions only (flash crash, liquidity gap)
+6. **Timeframe**: Use the timeframe matching the indicator snapshot provided (default 1h).
+   Do NOT reference multi-timeframe identifiers like tf_4h_rsi_14 or tf_4h_atr_14 —
+   these are not available. Use only single-timeframe indicators from the snapshot.
 
 VALID entry_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
 NOTE: Indicators are scalar values, NOT arrays. Do NOT use subscript syntax like indicator[-1].
-- entry_rule = "rsi_14 < 30 and close < bollinger_lower and close > sma_long and atr_14 < tf_4h_atr_14"
-- entry_rule = "close between sma_medium * 0.98 and sma_medium and rsi_14 < 40 and macd_hist > 0"
-- entry_rule = "close < bollinger_lower and realized_vol_short < realized_vol_medium and tf_4h_rsi_14 > 40"
+- entry_rule = "is_flat and rsi_14 < 30 and close < bollinger_lower and atr_14 < atr_14_prev2"
+- entry_rule = "is_flat and rsi_14 < 35 and close < sma_medium and bb_bandwidth_pct_rank < 0.5"
+- entry_rule = "is_flat and rsi_14 > 70 and close > bollinger_upper and volume_multiple < 1.2"
 
 VALID exit_rule EXPRESSION EXAMPLES (copy the quoted expression, not the description):
-- exit_rule = "close > sma_medium or rsi_14 > 50"
-- exit_rule = "rsi_14 > 70 or close > bollinger_upper"
-- exit_rule = "close < bollinger_lower * 0.98 or rsi_14 < 20"
+- exit_rule = "not is_flat and (close > sma_medium or rsi_14 > 55)"
+- exit_rule = "not is_flat and (rsi_14 > 70 or close > bollinger_upper)"
+- exit_rule = "not is_flat and (close < bollinger_lower or atr_14 > atr_14_prev2 * 1.3)"
 
 Risk Management:
 - Set max_position_risk_pct at 1.0-1.5% (smaller due to tighter stops)

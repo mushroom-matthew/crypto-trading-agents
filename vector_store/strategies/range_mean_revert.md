@@ -4,6 +4,7 @@ type: strategy
 regimes: [range]
 tags: [mean_reversion, range]
 identifiers: [close, bollinger_upper, bollinger_lower, bollinger_middle, rsi_14, sma_medium, atr_14, vol_state, trend_state]
+template_file: mean_reversion
 ---
 # Range Mean Revert
 
