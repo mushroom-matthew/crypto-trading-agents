@@ -206,7 +206,7 @@ class BacktestConfig(BaseModel):
     """Configuration for starting a new backtest."""
 
     symbols: List[str] = Field(..., description="List of symbols to backtest (e.g., ['BTC-USD', 'ETH-USD'])")
-    timeframe: str = Field(..., description="Candle timeframe (e.g., '1m', '5m', '15m', '1h', '4h')")
+    timeframe: str = Field(..., description="Candle timeframe (e.g., '1m', '5m', '15m', '1h', '6h', '1d')")
     start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
     end_date: str = Field(..., description="End date in YYYY-MM-DD format")
     initial_cash: float = Field(default=10000, description="Starting cash balance")

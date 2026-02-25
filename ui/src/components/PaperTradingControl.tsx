@@ -87,7 +87,7 @@ export function PaperTradingControl() {
   });
   const screenerPreflight = screenerPreflightQuery.data;
   const runScreenerNow = useMutation({
-    mutationFn: () => screenerAPI.runOnce({ timeframes: ['1m', '5m', '15m', '1h', '4h'], lookback_bars: 50 }),
+    mutationFn: () => screenerAPI.runOnce({ timeframes: ['1m', '5m', '15m', '1h', '6h'], lookback_bars: 50 }),
     onSuccess: async () => {
       await screenerPreflightQuery.refetch();
     },
@@ -1085,7 +1085,7 @@ export function PaperTradingControl() {
               })()}
               {/* Timeframe selector */}
               <div className="flex gap-1 ml-2">
-                {['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M'].map((tf) => (
+                {['1m', '5m', '15m', '1h', '6h', '1d'].map((tf) => (
                   <button
                     key={tf}
                     onClick={() => setChartTimeframe(tf)}
@@ -1506,7 +1506,7 @@ function formatTimeAxis(value: number, timeframe: string): string {
   if (timeframe === '1d' || timeframe === '1w' || timeframe === '1M') {
     return dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
-  if (timeframe === '1h' || timeframe === '4h') {
+  if (timeframe === '1h' || timeframe === '6h') {
     return dt.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' });
   }
   return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1550,7 +1550,8 @@ function recommendedPlanIntervalHours(timeframe: string): number | null {
   if (tf === '1m' || tf === '5m') return 0.5;   // replan every 30 min for short-hold setups
   if (tf === '15m') return 1;
   if (tf === '1h') return 4;
-  if (tf === '4h') return 8;
+  if (tf === '6h') return 12;
+  if (tf === '1d') return 24;
   return null;
 }
 

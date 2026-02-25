@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
@@ -89,10 +89,21 @@ class PaperTradingConfig(BaseModel):
         default="1h",
         description=(
             "OHLCV timeframe used for indicator computation and trigger generation. "
-            "Should match the screener's expected_hold_timeframe for the selected candidates. "
-            "Valid values: '1m', '5m', '15m', '1h', '4h', '1d'."
+            "Must be a Coinbase-supported granularity: '1m', '5m', '15m', '1h', '6h', '1d'."
         ),
     )
+
+    @field_validator("indicator_timeframe")
+    @classmethod
+    def validate_indicator_timeframe(cls, v: str) -> str:
+        allowed = {"1m", "5m", "15m", "1h", "6h", "1d"}
+        if v not in allowed:
+            raise ValueError(
+                f"indicator_timeframe '{v}' is not supported by Coinbase. "
+                f"Allowed values: {sorted(allowed)}"
+            )
+        return v
+
     replan_on_day_boundary: bool = True
     enable_symbol_discovery: bool = False
     min_volume_24h: float = 1_000_000
@@ -601,6 +612,12 @@ async def fetch_indicator_snapshots_activity(
     'trend_state' and 'vol_state' derived from the indicators.  This gives
     the LLM strategist the same macro/micro picture it gets from the backtester.
     """
+    _COINBASE_TIMEFRAMES = {"1m", "5m", "15m", "1h", "6h", "1d"}
+    if timeframe not in _COINBASE_TIMEFRAMES:
+        raise ValueError(
+            f"Timeframe '{timeframe}' is not supported by Coinbase. "
+            f"Supported: {sorted(_COINBASE_TIMEFRAMES)}"
+        )
     import ccxt.async_support as ccxt
     import numpy as np
     import pandas as pd
@@ -1284,8 +1301,15 @@ class PaperTradingWorkflow:
                 )
                 # Proceed with original plan — runtime failsafe is the last line of defence
 
-        # Pop retrieval metadata before storing — StrategyPlan uses extra="forbid"
+        # Pop retrieval + R49 snapshot metadata before storing — StrategyPlan uses extra="forbid"
         _retrieved_template_id = plan_dict.pop("_retrieved_template_id", None)
+        _snapshot_id = plan_dict.pop("_snapshot_id", None)
+        _snapshot_hash = plan_dict.pop("_snapshot_hash", None)
+        _snapshot_version = plan_dict.pop("_snapshot_version", None)
+        _snapshot_kind = plan_dict.pop("_snapshot_kind", None)
+        _snapshot_as_of_ts = plan_dict.pop("_snapshot_as_of_ts", None)
+        _snapshot_staleness_seconds = plan_dict.pop("_snapshot_staleness_seconds", None)
+        _snapshot_missing_sections = plan_dict.pop("_snapshot_missing_sections", None)
 
         self.current_plan = plan_dict
         self.last_plan_time = workflow.now()
@@ -1316,6 +1340,14 @@ class PaperTradingWorkflow:
                 "validation_errors": validation_errors,
                 "retrieved_template_id": _retrieved_template_id,
                 "template_id": plan_dict.get("template_id"),
+                # R49 snapshot provenance
+                "snapshot_id": _snapshot_id,
+                "snapshot_hash": _snapshot_hash,
+                "snapshot_version": _snapshot_version,
+                "snapshot_kind": _snapshot_kind,
+                "snapshot_as_of_ts": _snapshot_as_of_ts,
+                "snapshot_staleness_seconds": _snapshot_staleness_seconds,
+                "snapshot_missing_sections": _snapshot_missing_sections,
             }],
             schedule_to_close_timeout=timedelta(seconds=10),
         )
@@ -1372,7 +1404,7 @@ class PaperTradingWorkflow:
         # ── Candle-clock ──────────────────────────────────────────────────────
         TF_MINUTES: Dict[str, int] = {
             "1m": 1, "5m": 5, "15m": 15, "30m": 30,
-            "1h": 60, "4h": 240, "1d": 1440,
+            "1h": 60, "6h": 360, "1d": 1440,
         }
         plan_timeframes = {
             t.get("timeframe", "1h")

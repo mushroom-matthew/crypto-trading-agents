@@ -1001,7 +1001,7 @@ class LLMStrategistBacktester:
         cache_dir: Path,
         llm_calls_per_day: int,
         risk_params: Dict[str, Any] | RiskLimitSettings | None = None,
-        timeframes: Sequence[str] = ("1h", "4h", "1d"),
+        timeframes: Sequence[str] = ("1h", "6h", "1d"),
         prompt_template_path: Path | None = None,
         strategy_prompt: str | None = None,
         plan_provider: StrategyPlanProvider | None = None,
@@ -1664,7 +1664,7 @@ class LLMStrategistBacktester:
 
         # Common timeframes used for multi-timeframe analysis
         # Only include timeframes that are cleanly divisible from base
-        candidate_timeframes = ["5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d"]
+        candidate_timeframes = ["5m", "15m", "30m", "1h", "6h", "1d"]
 
         derived = [base_timeframe]
         for tf in candidate_timeframes:
@@ -2288,7 +2288,7 @@ class LLMStrategistBacktester:
             entry_ts = self._coerce_timestamp(trade.get("entry_timestamp"))
             if not symbol or entry_ts is None:
                 continue
-            snapshot = self._indicator_snapshot(symbol, "4h", entry_ts)
+            snapshot = self._indicator_snapshot(symbol, "1h", entry_ts)
             if snapshot is None:
                 continue
             asset_state = build_asset_state(symbol, [snapshot])

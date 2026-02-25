@@ -445,7 +445,8 @@ export function BacktestControl() {
                 <option value="5m">5 minutes</option>
                 <option value="15m">15 minutes</option>
                 <option value="1h">1 hour</option>
-                <option value="4h">4 hours (swing trading)</option>
+                <option value="6h">6 hours (swing trading)</option>
+                <option value="1d">1 day</option>
               </select>
             </div>
 

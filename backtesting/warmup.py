@@ -63,7 +63,7 @@ def derive_higher_timeframes(
 ) -> List[str]:
     """Derive higher timeframes from the base, capped to minutes-to-hours ranges."""
     base_seconds = timeframe_seconds(base_timeframe)
-    candidate_timeframes = ["5m", "15m", "30m", "1h", "2h", "4h", "8h", "1d"]
+    candidate_timeframes = ["5m", "15m", "30m", "1h", "6h", "1d"]
     derived = [base_timeframe]
     for tf in candidate_timeframes:
         tf_seconds = timeframe_seconds(tf)

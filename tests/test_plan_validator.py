@@ -28,7 +28,7 @@ from agents.strategies.plan_validator import (
 
 def test_parse_tf_minutes_known():
     assert _parse_tf_minutes("1h") == 60
-    assert _parse_tf_minutes("4h") == 240
+    assert _parse_tf_minutes("6h") == 360
     assert _parse_tf_minutes("1d") == 1440
     assert _parse_tf_minutes("15m") == 15
 

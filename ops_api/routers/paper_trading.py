@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +87,22 @@ class PaperTradingSessionConfig(BaseModel):
     indicator_timeframe: str = Field(
         default="1h",
         description=(
-            "OHLCV timeframe for indicator computation — should match the screener's "
-            "expected_hold_timeframe. Valid: '1m', '5m', '15m', '1h', '4h', '1d'."
+            "OHLCV timeframe for indicator computation — must be a Coinbase-supported "
+            "granularity: '1m', '5m', '15m', '1h', '6h', '1d'."
         ),
     )
+
+    @field_validator("indicator_timeframe")
+    @classmethod
+    def validate_indicator_timeframe(cls, v: str) -> str:
+        allowed = {"1m", "5m", "15m", "1h", "6h", "1d"}
+        if v not in allowed:
+            raise ValueError(
+                f"indicator_timeframe '{v}' is not supported by Coinbase. "
+                f"Allowed values: {sorted(allowed)}"
+            )
+        return v
+
     replan_on_day_boundary: Optional[bool] = Field(
         default=True,
         description="Allow start-of-day replans in adaptive mode (default: true)"
@@ -1152,7 +1164,7 @@ async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str =
     # Map friendly pair format to ccxt symbol
     ccxt_symbol = symbol.replace("-", "/")
     # Map UI timeframe labels to ccxt timeframe strings
-    tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+    tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "6h": "6h", "1d": "1d"}
     tf = timeframe.strip()
     ccxt_tf = tf_map.get(tf, "1m")
     ohlcv: List[List[float]] = []
@@ -1254,19 +1266,6 @@ async def get_candles(session_id: str, symbol: str = "BTC-USD", timeframe: str =
             ]
             if len(ohlcv) > limit:
                 ohlcv = ohlcv[-limit:]
-        elif tf == "4h":
-            # Prefer native 4h bars, but fallback to aggregating 1h if unavailable.
-            try:
-                ohlcv = await _fetch_with_timeout("4h", fetch_limit=limit)
-            except Exception as native_err:
-                logger.info("Native 4h candles unavailable for %s: %s", symbol, native_err)
-                ohlcv = []
-            if not ohlcv:
-                lookback_hours = max(limit * 4 + 8, 240)
-                hourly = await _fetch_with_timeout("1h", fetch_limit=lookback_hours)
-                ohlcv = _aggregate_fixed_hour_bars(hourly, 4)
-                if len(ohlcv) > limit:
-                    ohlcv = ohlcv[-limit:]
         else:
             ohlcv = await _fetch_with_timeout(ccxt_tf, fetch_limit=limit)
     except asyncio.TimeoutError:

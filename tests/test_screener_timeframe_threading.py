@@ -40,8 +40,8 @@ def test_paper_trading_config_accepts_1m():
 
 
 def test_paper_trading_config_accepts_all_valid_timeframes():
-    """PaperTradingConfig.indicator_timeframe accepts all documented valid values."""
-    for tf in ("1m", "5m", "15m", "1h", "4h", "1d"):
+    """PaperTradingConfig.indicator_timeframe accepts all Coinbase-supported values."""
+    for tf in ("1m", "5m", "15m", "1h", "6h", "1d"):
         config = PaperTradingConfig(
             session_id="s1",
             symbols=["BTC-USD"],

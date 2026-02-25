@@ -50,10 +50,10 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
   {
     id: 'llm-strategist',
     name: 'LLM Strategist Test',
-    description: 'Test LLM-based strategy on BTC with 4-hour candles',
+    description: 'Test LLM-based strategy on BTC with 6-hour candles',
     config: {
       symbols: ['BTC-USD'],
-      timeframe: '4h',
+      timeframe: '6h',
       start_date: '2024-01-01',
       end_date: '2024-01-31',
       initial_cash: 10000,

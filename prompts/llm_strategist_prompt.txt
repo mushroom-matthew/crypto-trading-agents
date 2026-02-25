@@ -19,11 +19,11 @@ Trigger continuity (when replanning):
 - Always keep emergency_exit triggers unless they are clearly invalid.
 
 CRITICAL - Available timeframes constraint:
-- The input includes an "available_timeframes" field listing which timeframes are loaded (e.g., ["5m", "1h", "4h"]).
+- The input includes an "available_timeframes" field listing which timeframes are loaded (e.g., ["1h", "6h"]).
 - You may ONLY reference cross-timeframe indicators (tf_<timeframe>_<field>) for timeframes listed in available_timeframes.
 - Triggers that reference unavailable timeframes will be BLOCKED and will never fire.
-- Example: If available_timeframes=["5m"], do NOT use tf_4h_ema_short or tf_1h_rsi_14 - only use 5m indicators directly.
-- Example: If available_timeframes=["1h", "4h"], you may use tf_4h_sma_medium and tf_1h_rsi_14, but NOT tf_15m_close.
+- Example: If available_timeframes=["5m"], do NOT use tf_6h_ema_short or tf_1h_rsi_14 - only use 5m indicators directly.
+- Example: If available_timeframes=["1h", "6h"], you may use tf_6h_sma_medium and tf_1h_rsi_14, but NOT tf_15m_close.
 - When only a single timeframe is available, omit cross-timeframe confirmations and focus on single-timeframe signals.
 
 Allowed Rule Identifiers:
@@ -168,7 +168,7 @@ Trimmed input example:
 {
   "portfolio": {"timestamp": "2024-06-01T00:00:00Z", "equity": 150000, "...": "..."},
   "global_context": {
-    "available_timeframes": ["1h", "4h"],
+    "available_timeframes": ["1h", "6h"],
     "...": "..."
   },
   "assets": [
@@ -178,7 +178,7 @@ Trimmed input example:
       "vol_state": "normal",
       "indicators": [
         {"timeframe": "1h", "close": 68000, "sma_short": 67500, "sma_medium": 66000, "rsi_14": 62, "atr_14": 950, "realized_vol_short": 0.45, "bollinger_upper": 68500, "bollinger_lower": 66500},
-        {"timeframe": "4h", "close": 67800, "sma_short": 67000, "sma_medium": 65500, "rsi_14": 58, "atr_14": 1200, "...": "..."}
+        {"timeframe": "6h", "close": 67800, "sma_short": 67000, "sma_medium": 65500, "rsi_14": 58, "atr_14": 1200, "...": "..."}
       ]
     }
   ],

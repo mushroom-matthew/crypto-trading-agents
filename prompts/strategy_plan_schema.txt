@@ -1,7 +1,7 @@
 STRATEGYPLAN SCHEMA (SHARED)
 
 CRITICAL - Available Timeframes Constraint:
-- The input includes "available_timeframes" in global_context listing which timeframes are loaded (e.g., ["5m", "1h", "4h"]).
+- The input includes "available_timeframes" in global_context listing which timeframes are loaded (e.g., ["1h", "6h"]).
 - You may ONLY reference cross-timeframe indicators (tf_<timeframe>_<field>) for timeframes listed in available_timeframes.
 - Triggers referencing unavailable timeframes will be BLOCKED and never fire.
 - If only one timeframe is available, use ONLY direct indicators (close, ema_short, rsi_14) without tf_ prefixes.

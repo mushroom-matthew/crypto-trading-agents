@@ -57,7 +57,7 @@ export function LiveTradingControlPanel() {
 
   const screenerErrorStatus = (preflightQuery.error as any)?.response?.status as number | undefined;
   const runScreenerNow = useMutation({
-    mutationFn: () => screenerAPI.runOnce({ timeframes: ['1m', '5m', '15m', '1h', '4h'], lookback_bars: 50 }),
+    mutationFn: () => screenerAPI.runOnce({ timeframes: ['1m', '5m', '15m', '1h', '6h'], lookback_bars: 50 }),
     onSuccess: async () => {
       await preflightQuery.refetch();
     },

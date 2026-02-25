@@ -411,7 +411,7 @@ def main() -> None:
     parser.add_argument("--max-daily-loss-pct", type=float, default=None, help="Override daily loss cap (% drawdown from daily anchor)")
     parser.add_argument("--max-daily-risk-budget-pct", type=float, default=None, help="Optional cap on cumulative per-trade risk allocated each day")
     parser.add_argument("--risk-config", help="Optional JSON/YAML file containing risk limits (keys: max_position_risk_pct, etc.)")
-    parser.add_argument("--timeframes", nargs="+", default=["1h", "4h", "1d"], help="Timeframe list for strategist indicators")
+    parser.add_argument("--timeframes", nargs="+", default=["1h", "6h", "1d"], help="Timeframe list for strategist indicators")
     parser.add_argument("--log-level", default="INFO", help="Backtest log level (DEBUG, INFO, etc.)")
     parser.add_argument(
         "--market-structure-refresh-bars",
@@ -556,7 +556,7 @@ def main() -> None:
             llm_calls_per_day=1,
             risk_params=risk_limits.to_risk_params(),
             plan_provider=plan_provider,
-            timeframes=["1h", "4h"],
+            timeframes=["1h", "6h"],
             flatten_positions_daily=args.flatten_daily,
             force_flatten_at_end=args.force_flatten_at_end,
             flatten_notional_threshold=args.flatten_threshold,
