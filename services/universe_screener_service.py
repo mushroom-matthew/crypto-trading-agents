@@ -127,7 +127,7 @@ class UniverseScreenerService:
         "MATIC-USD": "POL-USD",
         "MATIC/USD": "POL/USD",
     }
-    DEFAULT_SWEEP_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"]
+    DEFAULT_SWEEP_TIMEFRAMES = ["1m", "5m", "15m", "1h", "6h"]
 
     def __init__(
         self,
@@ -700,7 +700,7 @@ class UniverseScreenerService:
         if hypothesis == "compression_breakout":
             if source_tf in {"1m", "5m"} and candidate.vol_state in {"high", "extreme"}:
                 return source_tf
-            return "1h" if candidate.vol_state in {"normal", "high"} else "4h"
+            return "1h" if candidate.vol_state in {"normal", "high"} else "6h"
         if hypothesis == "volatile_breakout":
             if source_tf in {"1m", "5m", "15m"} and (candidate.atr_expansion > 0.25 or candidate.vol_state in {"high", "extreme"}):
                 return source_tf
@@ -710,7 +710,7 @@ class UniverseScreenerService:
                 return source_tf
             return "15m" if abs(candidate.volume_z) < 1.5 else "1h"
         if hypothesis in {"bull_trending", "bear_defensive"}:
-            return "4h" if candidate.trend_state in {"uptrend", "downtrend"} else "1h"
+            return "6h" if candidate.trend_state in {"uptrend", "downtrend"} else "1h"
         return "1h"
 
     def _candidate_confidence(self, candidate: SymbolAnomalyScore) -> str:
@@ -777,7 +777,7 @@ class UniverseScreenerService:
 
     @staticmethod
     def _timeframe_priority(timeframe: str) -> int:
-        order = {"1m": 0, "5m": 1, "15m": 2, "1h": 3, "4h": 4}
+        order = {"1m": 0, "5m": 1, "15m": 2, "1h": 3, "6h": 4}
         return order.get(timeframe, 99)
 
     @staticmethod

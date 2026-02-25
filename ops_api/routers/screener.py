@@ -24,7 +24,7 @@ router = APIRouter(prefix="/screener", tags=["screener"])
 @router.post("/run-once")
 async def run_screener_once(
     timeframe: str | None = Query(default=None),
-    timeframes: str | None = Query(default=None, description="Comma-separated sweep timeframes, e.g. 1m,5m,15m,1h,4h"),
+    timeframes: str | None = Query(default=None, description="Comma-separated sweep timeframes, e.g. 1m,5m,15m,1h,6h"),
     lookback_bars: int = Query(default=50, ge=30, le=500),
 ) -> dict:
     """Run a single screener pass immediately and persist latest result/recommendation."""
