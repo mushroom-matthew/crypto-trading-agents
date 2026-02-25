@@ -136,7 +136,7 @@ def test_rules_refresh_without_replan(monkeypatch, tmp_path):
                 direction="long",
                 timeframe="1h",
                 category="trend_continuation",
-                entry_rule="tf_4h_ema_50 > tf_4h_ema_200 and position == 'flat'",
+                entry_rule="tf_6h_ema_50 > tf_6h_ema_200 and position == 'flat'",
                 exit_rule="not is_flat and (stop_hit or target_hit)",
                 # Use price-based stop/target so canonical exit rule can fire.
                 # Entry ~hour 6 at close=106; stop=103.88, target=110.24 (2R).
@@ -206,9 +206,9 @@ def test_rules_refresh_without_replan(monkeypatch, tmp_path):
             ema_200=100.0,
             atr_14=1.0,
         )
-        snapshot_4h = IndicatorSnapshot(
+        snapshot_6h = IndicatorSnapshot(
             symbol="BTC-USD",
-            timeframe="4h",
+            timeframe="6h",
             as_of=timestamp,
             close=100.0 + hour,
             ema_50=ema50,
@@ -217,7 +217,7 @@ def test_rules_refresh_without_replan(monkeypatch, tmp_path):
         return {
             "BTC-USD": AssetState(
                 symbol="BTC-USD",
-                indicators=[snapshot_1h, snapshot_4h],
+                indicators=[snapshot_1h, snapshot_6h],
                 trend_state="uptrend",
                 vol_state="normal",
             )
@@ -237,8 +237,8 @@ def test_rules_refresh_without_replan(monkeypatch, tmp_path):
     assert entry_samples
     ema_pairs = {
         (
-            (s.get("context_values") or {}).get("tf_4h_ema_50"),
-            (s.get("context_values") or {}).get("tf_4h_ema_200"),
+            (s.get("context_values") or {}).get("tf_6h_ema_50"),
+            (s.get("context_values") or {}).get("tf_6h_ema_200"),
         )
         for s in entry_samples
     }

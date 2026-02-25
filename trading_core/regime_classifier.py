@@ -1,4 +1,16 @@
-"""Deterministic regime classification from indicator snapshots."""
+"""Deterministic regime classification from indicator snapshots.
+
+R55 Vocabulary Mapping:
+The outputs from classify_regime() use labels from schemas/llm_strategist.py:
+  - RegimeAssessment.regime: 'bull', 'bear', 'range', 'volatile', 'uncertain'
+  - AssetState.trend_state:  'uptrend', 'downtrend', 'sideways'
+  - AssetState.vol_state:    'low', 'normal', 'high', 'extreme'
+
+These are mapped to R55 canonical labels in services/regime_transition_detector.py:
+  - trend_state:  'up', 'down', 'sideways'
+  - vol_state:    'low', 'mid', 'high', 'extreme'  (note: 'normal' → 'mid')
+  - structure_state: derived from R40 flags + regime label
+"""
 
 from __future__ import annotations
 
@@ -6,6 +18,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from schemas.llm_strategist import IndicatorSnapshot, RegimeAssessment
+
+
+# R55 vocabulary mapping re-exports (canonical entry point for callers)
+# Full implementations live in services/regime_transition_detector.py.
+def get_r55_vocabulary_mapping_version() -> str:
+    """Return the current R55 vocabulary mapping version string."""
+    from services.regime_transition_detector import _VOCAB_MAPPING_VERSION  # type: ignore[attr-defined]
+    return _VOCAB_MAPPING_VERSION
 
 
 def classify_regime(snapshot: "IndicatorSnapshot") -> "RegimeAssessment":

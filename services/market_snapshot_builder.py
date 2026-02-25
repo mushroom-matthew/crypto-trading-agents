@@ -1,6 +1,7 @@
 """Builder functions for TickSnapshot and PolicySnapshot.
 
 Runbook 49: Market Snapshot Definition.
+Runbook 55: Regime fingerprint — normalized_features now populated.
 
 Usage:
     tick = build_tick_snapshot(indicator_snapshot)
@@ -12,9 +13,12 @@ Both builders:
 - attach quality flags (staleness, missing sections)
 - return an immutable (frozen-at-construction) snapshot object
 
-The builders do NOT populate:
-- normalized_features (deferred to Runbook 55 regime fingerprint)
-- memory_bundle (deferred to Runbook 51 memory store)
+Runbook 55 integration:
+- DerivedSignalBlock.normalized_features is now populated from the R55 fingerprint
+  builder's normalized feature computation (_compute_normalized_features).
+- normalized_features_version is set to the FINGERPRINT_VERSION constant, linking
+  the PolicySnapshot to the R55 numeric vector contract.
+- memory_bundle remains deferred to Runbook 51.
 """
 from __future__ import annotations
 
@@ -38,6 +42,11 @@ from schemas.market_snapshot import (
     compute_snapshot_hash,
 )
 from schemas.llm_strategist import IndicatorSnapshot, LLMInput
+from schemas.regime_fingerprint import FINGERPRINT_VERSION as _R55_FINGERPRINT_VERSION
+from services.regime_transition_detector import (
+    _compute_normalized_features as _r55_compute_normalized_features,
+    build_normalized_features_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +252,23 @@ def build_policy_snapshot(
                 bb_bandwidth_pct_rank=ind.bb_bandwidth_pct_rank,
                 htf_daily_atr=ind.htf_daily_atr,
             )
+        # R55: build normalized_features dict from fingerprint feature components
+        norm_features: Dict[str, float] = {}
+        norm_version: Optional[str] = None
+        if asset.indicators:
+            ind = asset.indicators[-1]
+            try:
+                (
+                    vol_pct, atr_pct, volume_pct,
+                    range_exp_pct, rvol_z, htf_dist,
+                ) = _r55_compute_normalized_features(ind)
+                norm_features = build_normalized_features_dict(
+                    vol_pct, atr_pct, volume_pct, range_exp_pct, rvol_z, htf_dist,
+                )
+                norm_version = _R55_FINGERPRINT_VERSION
+            except Exception:
+                logger.debug("R55 normalized_features build failed for %s — leaving empty", sym)
+
         derived[sym] = DerivedSignalBlock(
             trend_state=asset.trend_state,
             vol_state=asset.vol_state,
@@ -256,9 +282,8 @@ def build_policy_snapshot(
             breakout_confirmed=(
                 asset.indicators[-1].breakout_confirmed if asset.indicators else None
             ),
-            # normalized_features left empty — populated by R55
-            normalized_features={},
-            normalized_features_version=None,
+            normalized_features=norm_features,
+            normalized_features_version=norm_version,
         )
 
     # Mark absent optional sections
