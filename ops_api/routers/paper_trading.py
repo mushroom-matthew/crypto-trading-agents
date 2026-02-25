@@ -84,6 +84,13 @@ class PaperTradingSessionConfig(BaseModel):
         default=4.0,
         description="How often to regenerate strategy plans (in hours)"
     )
+    indicator_timeframe: str = Field(
+        default="1h",
+        description=(
+            "OHLCV timeframe for indicator computation — should match the screener's "
+            "expected_hold_timeframe. Valid: '1m', '5m', '15m', '1h', '4h', '1d'."
+        ),
+    )
     replan_on_day_boundary: Optional[bool] = Field(
         default=True,
         description="Allow start-of-day replans in adaptive mode (default: true)"
@@ -447,6 +454,7 @@ async def start_session(config: PaperTradingSessionConfig):
             "initial_allocations": initial_allocations,
             "strategy_prompt": strategy_prompt,
             "plan_interval_hours": config.plan_interval_hours,
+            "indicator_timeframe": config.indicator_timeframe,
             "replan_on_day_boundary": (
                 config.replan_on_day_boundary if config.replan_on_day_boundary is not None else True
             ),

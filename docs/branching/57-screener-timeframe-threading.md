@@ -243,27 +243,37 @@ def test_generate_plan_activity_snap_init_uses_timeframe():
 
 ## Acceptance Criteria
 
-- [ ] `PaperTradingConfig.indicator_timeframe: str = "1h"` — backwards compatible
-- [ ] Workflow uses `self.indicator_timeframe` for `fetch_indicator_snapshots_activity` call
-- [ ] `generate_strategy_plan_activity` injects `TIMEFRAME:` hint into effective_prompt
-- [ ] `snap_init.setdefault("timeframe", ...)` uses `indicator_timeframe`, not `"1h"` literal
-- [ ] `PaperTradingSessionConfig` accepts `indicator_timeframe` and passes to workflow config
-- [ ] UI `applyScreenerCandidateToForm` sets `indicatorTimeframe` from `expected_hold_timeframe`
-- [ ] `recommendedPlanIntervalHours` handles `1m`/`5m` → 0.5h replan interval
-- [ ] Session start payload includes `indicator_timeframe`
-- [ ] All existing tests pass (no regression)
-- [ ] New unit tests pass
+- [x] `PaperTradingConfig.indicator_timeframe: str = "1h"` — backwards compatible
+- [x] Workflow uses `self.indicator_timeframe` for `fetch_indicator_snapshots_activity` call
+- [x] `generate_strategy_plan_activity` injects `TIMEFRAME:` hint into effective_prompt
+- [x] `snap_init.setdefault("timeframe", ...)` uses `indicator_timeframe`, not `"1h"` literal
+- [x] `PaperTradingSessionConfig` accepts `indicator_timeframe` and passes to workflow config
+- [x] UI `applyScreenerCandidateToForm` sets `indicatorTimeframe` from `expected_hold_timeframe`
+- [x] `recommendedPlanIntervalHours` handles `1m`/`5m` → 0.5h replan interval
+- [x] Session start payload includes `indicator_timeframe`
+- [x] All existing tests pass (no regression)
+- [x] New unit tests pass
 
 ## Human Verification Evidence
 
 ```
-TODO: Start a session using a 1m screener candidate (range_mean_revert on 1m).
-Verify in the plan_generated event payload:
-  - indicator snapshot `timeframe` field = "1m"
-  - triggers generated with timeframe="1m"
-  - triggers evaluate at 1m candle boundaries (eval_summary fires ~60x per hour)
+Code inspection verified:
+- PaperTradingConfig.indicator_timeframe defaults to "1h" (Field with default="1h")
+- SessionState.indicator_timeframe = "1h" (backwards-compatible default)
+- _generate_plan() passes self.indicator_timeframe to fetch_indicator_snapshots_activity
+  replacing the hardcoded "1h" literal
+- generate_strategy_plan_activity appends TIMEFRAME: hint block to effective_prompt
+- snap_init.setdefault("timeframe", indicator_timeframe or "1h") — all 3 IndicatorSnapshot
+  construction sites updated
+- PaperTradingSessionConfig.indicator_timeframe wired into workflow_config dict
+- UI: applyScreenerCandidateToForm calls setIndicatorTimeframe(item.expected_hold_timeframe)
+- UI: recommendedPlanIntervalHours returns 0.5 for '1m' and '5m'
+- UI: session start config includes indicator_timeframe: indicatorTimeframe
+- _snapshot_state() and _restore_state() both carry indicator_timeframe across continue-as-new
+- Repair pass also threads indicator_timeframe through (both workflow call and recursive activity call)
 
-Also verify: starting a session without using the screener still defaults to 1h.
+Paper trading verification pending: start a session using a 1m screener candidate and confirm
+plan_generated event shows timeframe="1m" in indicator snapshot and triggers.
 ```
 
 ## Change Log
@@ -271,6 +281,7 @@ Also verify: starting a session without using the screener still defaults to 1h.
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-25 | Runbook authored — screener timeframe threading from screener → indicator fetch → LLM prompt | Claude |
+| 2026-02-25 | Implemented: indicator_timeframe field on PaperTradingConfig, SessionState, PaperTradingWorkflow; wired into fetch_indicator_snapshots_activity, generate_strategy_plan_activity (hint injection + snap_init fallback); PaperTradingSessionConfig + workflow_config; UI state + applyScreenerCandidateToForm + recommendedPlanIntervalHours; 8 new tests, 934 passed no regressions | Claude |
 
 ## Worktree Setup
 
