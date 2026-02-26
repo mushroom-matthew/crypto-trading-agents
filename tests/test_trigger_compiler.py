@@ -14,6 +14,8 @@ from trading_core.trigger_compiler import (
     HoldRuleStripped,
     IdentifierCorrection,
     PlanEnforcementResult,
+    REFINEMENT_MODE_COMPILER_TABLE,
+    RefinementModeViolation,
     TriggerCompilationError,
     _is_exit_rule_normal_form,
     autocorrect_identifiers,
@@ -22,6 +24,7 @@ from trading_core.trigger_compiler import (
     detect_plan_atr_tautologies,
     enforce_exit_binding,
     enforce_plan_quality,
+    enforce_refinement_mode_mapping,
     sanitize_exit_rules,
     strip_degenerate_hold_rules,
     tighten_stop_only,
@@ -981,3 +984,143 @@ def test_tighten_stop_only_equal_is_idempotent():
     """Proposing the same stop as current is a no-op."""
     assert tighten_stop_only(150.0, 150.0, "long") == 150.0
     assert tighten_stop_only(150.0, 150.0, "short") == 150.0
+
+
+# =============================================================================
+# Runbook 56 — Refinement mode enforcement tests
+# =============================================================================
+
+
+def _plan_with_refinement_mode(mode: str, entry_rule: str = "close > 0") -> StrategyPlan:
+    """Helper: build a StrategyPlan with activation_refinement_mode set."""
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trigger = TriggerCondition(
+        id="btc_long",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule=entry_rule,
+        exit_rule="close < 0",
+        category="trend_continuation",
+        stop_loss_pct=2.0,
+    )
+    return StrategyPlan(
+        plan_id="plan_rm_test",
+        run_id="run_rm_test",
+        generated_at=now,
+        valid_until=now + timedelta(days=1),
+        regime="range",
+        triggers=[trigger],
+        activation_refinement_mode=mode,
+    )
+
+
+def test_refinement_mode_compiler_table_has_all_four_modes():
+    assert set(REFINEMENT_MODE_COMPILER_TABLE.keys()) == {
+        "price_touch", "close_confirmed", "liquidity_sweep", "next_bar_open"
+    }
+
+
+def test_refinement_mode_compiler_table_entries_have_required_identifiers():
+    for mode, entry in REFINEMENT_MODE_COMPILER_TABLE.items():
+        assert "required_identifiers" in entry, f"Missing required_identifiers for {mode}"
+        assert len(entry["required_identifiers"]) > 0, f"Empty required_identifiers for {mode}"
+
+
+def test_enforce_refinement_mode_mapping_no_mode_returns_empty():
+    """Plan with no activation_refinement_mode → no violations."""
+    plan = _strategy_plan("run_no_mode")
+    violations = enforce_refinement_mode_mapping(plan)
+    assert violations == []
+
+
+def test_enforce_refinement_mode_mapping_price_touch_passes():
+    plan = _plan_with_refinement_mode(
+        "price_touch",
+        entry_rule="break_level_touch > 0",
+    )
+    violations = enforce_refinement_mode_mapping(plan)
+    assert violations == []
+
+
+def test_enforce_refinement_mode_mapping_price_touch_violation():
+    plan = _plan_with_refinement_mode(
+        "price_touch",
+        entry_rule="close > sma_short",  # break_level_touch missing
+    )
+    violations = enforce_refinement_mode_mapping(plan)
+    assert len(violations) == 1
+    assert violations[0].mode == "price_touch"
+    assert "break_level_touch" in violations[0].missing_identifiers
+
+
+def test_enforce_refinement_mode_mapping_close_confirmed_passes():
+    plan = _plan_with_refinement_mode(
+        "close_confirmed",
+        entry_rule="break_level_close_confirmed and rsi_14 > 50",
+    )
+    violations = enforce_refinement_mode_mapping(plan)
+    assert violations == []
+
+
+def test_enforce_refinement_mode_mapping_close_confirmed_violation():
+    plan = _plan_with_refinement_mode(
+        "close_confirmed",
+        entry_rule="close > sma_medium",  # break_level_close_confirmed missing
+    )
+    violations = enforce_refinement_mode_mapping(plan)
+    assert len(violations) == 1
+    assert "break_level_close_confirmed" in violations[0].missing_identifiers
+
+
+def test_enforce_refinement_mode_mapping_next_bar_open_passes():
+    plan = _plan_with_refinement_mode(
+        "next_bar_open",
+        entry_rule="next_bar_open_entry",
+    )
+    violations = enforce_refinement_mode_mapping(plan)
+    assert violations == []
+
+
+def test_enforce_refinement_mode_mapping_unknown_mode_is_violation():
+    plan = _plan_with_refinement_mode("rogue_mode")
+    violations = enforce_refinement_mode_mapping(plan)
+    assert len(violations) == 1
+    assert violations[0].mode == "rogue_mode"
+
+
+def test_enforce_plan_quality_sets_refinement_mapping_validated_true():
+    plan = _plan_with_refinement_mode(
+        "price_touch",
+        entry_rule="break_level_touch > 0",
+    )
+    result = enforce_plan_quality(plan, available_timeframes={"1h"})
+    assert result.refinement_violations == []
+    assert plan.refinement_mapping_validated is True
+
+
+def test_enforce_plan_quality_sets_refinement_mapping_validated_false():
+    plan = _plan_with_refinement_mode(
+        "price_touch",
+        entry_rule="close > sma_short",  # missing break_level_touch
+    )
+    result = enforce_plan_quality(plan, available_timeframes={"1h"})
+    assert len(result.refinement_violations) == 1
+    assert plan.refinement_mapping_validated is False
+
+
+def test_enforce_plan_quality_no_mode_leaves_validated_none():
+    plan = _strategy_plan("run_no_mode2")
+    result = enforce_plan_quality(plan, available_timeframes={"1h"})
+    assert result.refinement_violations == []
+    assert plan.refinement_mapping_validated is None
+
+
+def test_enforce_plan_quality_refinement_counted_in_total_corrections():
+    plan = _plan_with_refinement_mode(
+        "close_confirmed",
+        entry_rule="close > sma_short",
+    )
+    result = enforce_plan_quality(plan, available_timeframes={"1h"})
+    assert result.total_corrections >= 1
+    assert len(result.refinement_violations) == 1

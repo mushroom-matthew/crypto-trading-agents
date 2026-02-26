@@ -83,9 +83,11 @@ class RiskRuleSet(BaseModel):
 
     stop_methods: List[str] = Field(default_factory=list)
     target_methods: List[str] = Field(default_factory=list)
-    minimum_structural_r_multiple: Optional[float] = None  # expectancy gate
+    minimum_structural_r_multiple: Optional[float] = None  # expectancy gate (Runbook 56)
     require_structural_target: bool = False
     structural_target_sources: List[str] = Field(default_factory=list)
+    # R56: deterministic candidate selection mode
+    target_selection_mode: Literal["priority", "ranked", "scored"] = "priority"
     fallback_behavior: Optional[str] = None  # what to do if no anchor found
 
 

@@ -232,7 +232,7 @@ def build_allowed_identifiers(available_timeframes: Iterable[str]) -> Set[str]:
         "position_fraction",
     }
 
-    allowed = set(indicator_fields) | indicator_aliases | derived_fields
+    allowed = set(indicator_fields) | indicator_aliases | derived_fields | _REFINEMENT_ACTIVATION_PRIMITIVES
 
     tf_indicator_fields = {name for name in indicator_fields if name not in {"symbol", "timeframe"}}
     tf_aliases = _alias_names(tf_indicator_fields)
@@ -749,6 +749,57 @@ class TemplateViolation:
     violations: List[str]  # identifier names not in the template's allowed set
 
 
+# ---------------------------------------------------------------------------
+# Runbook 56 — Refinement mode compiler table + activation primitives
+# ---------------------------------------------------------------------------
+
+# Activation primitives introduced by refinement modes (Runbook 56).
+# These identifiers are not IndicatorSnapshot fields — they are resolved at the
+# activation layer.  Including them in the allowed set prevents autocorrect from
+# stripping entry rules that reference them.
+_REFINEMENT_ACTIVATION_PRIMITIVES: frozenset[str] = frozenset({
+    "break_level_touch",
+    "break_level_close_confirmed",
+    "sweep_low_reclaim",
+    "sweep_high_reject",
+    "next_bar_open_entry",
+})
+
+# Maps each activation_refinement_mode to the required trigger identifiers that must
+# appear in at least one entry trigger's entry_rule.  Mirrors REFINEMENT_MODE_DEFAULTS
+# from schemas/playbook_definition.py but stored as a plain dict for compiler-internal use.
+REFINEMENT_MODE_COMPILER_TABLE: dict[str, dict] = {
+    "price_touch": {
+        "required_identifiers": {"break_level_touch"},
+        "required_timeframe_hint": "execution_tf",
+        "confirmation_rule": "touch_or_cross",
+    },
+    "close_confirmed": {
+        "required_identifiers": {"break_level_close_confirmed"},
+        "required_timeframe_hint": "micro_tf",
+        "confirmation_rule": "close_beyond_level",
+    },
+    "liquidity_sweep": {
+        "required_identifiers": {"sweep_low_reclaim", "sweep_high_reject"},
+        "required_timeframe_hint": "micro_tf",
+        "confirmation_rule": "sweep_plus_reclaim",
+    },
+    "next_bar_open": {
+        "required_identifiers": {"next_bar_open_entry"},
+        "required_timeframe_hint": "execution_tf",
+        "confirmation_rule": "none",
+    },
+}
+
+
+@dataclass
+class RefinementModeViolation:
+    """Record of a plan whose declared activation_refinement_mode is incompatible with its triggers."""
+    mode: str                       # declared activation_refinement_mode
+    missing_identifiers: List[str]  # required identifiers absent from all entry trigger rules
+    trigger_ids_checked: List[str]  # entry trigger IDs that were inspected
+
+
 @dataclass
 class PlanEnforcementResult:
     """Summary of all corrections applied by enforce_plan_quality."""
@@ -757,6 +808,7 @@ class PlanEnforcementResult:
     identifier_corrections: List[IdentifierCorrection] = field(default_factory=list)
     exit_rule_sanitizations: List[ExitRuleSanitization] = field(default_factory=list)
     template_violations: List[TemplateViolation] = field(default_factory=list)
+    refinement_violations: List[RefinementModeViolation] = field(default_factory=list)  # R56
 
     @property
     def total_corrections(self) -> int:
@@ -766,6 +818,7 @@ class PlanEnforcementResult:
             + len(self.identifier_corrections)
             + len(self.exit_rule_sanitizations)
             + len(self.template_violations)
+            + len(self.refinement_violations)
         )
 
 
@@ -1218,6 +1271,59 @@ def enforce_template_identifiers(
     return violations
 
 
+def enforce_refinement_mode_mapping(
+    plan: StrategyPlan,
+) -> List[RefinementModeViolation]:
+    """Validate that declared activation_refinement_mode is compatible with plan triggers.
+
+    Checks whether at least one required identifier from REFINEMENT_MODE_COMPILER_TABLE
+    appears in an entry trigger's entry_rule.  Returns a list of violations (empty if no
+    mode declared or all required identifiers are present).
+
+    Does NOT mutate the plan.  The caller (enforce_plan_quality) writes back
+    plan.refinement_mapping_validated based on whether violations were found.
+    Emergency-exit triggers are excluded from the check.
+    """
+    mode = plan.activation_refinement_mode
+    if not mode:
+        return []
+
+    if mode not in REFINEMENT_MODE_COMPILER_TABLE:
+        # Unknown mode — treat as violation so it surfaces in telemetry
+        return [RefinementModeViolation(
+            mode=mode,
+            missing_identifiers=[f"<mode '{mode}' not in REFINEMENT_MODE_COMPILER_TABLE>"],
+            trigger_ids_checked=[],
+        )]
+
+    table_entry = REFINEMENT_MODE_COMPILER_TABLE[mode]
+    required: set[str] = table_entry["required_identifiers"]
+
+    # Collect entry triggers (long/short) — emergency exits are exempt
+    entry_triggers = [
+        t for t in plan.triggers
+        if t.direction in ("long", "short") and t.category != "emergency_exit"
+    ]
+    trigger_ids_checked = [t.id for t in entry_triggers]
+
+    # Check whether at least one required identifier appears in any entry trigger's entry_rule
+    found: set[str] = set()
+    for trigger in entry_triggers:
+        rule_text = trigger.entry_rule or ""
+        for identifier in required:
+            if identifier in rule_text:
+                found.add(identifier)
+
+    missing = sorted(required - found)
+    if missing:
+        return [RefinementModeViolation(
+            mode=mode,
+            missing_identifiers=missing,
+            trigger_ids_checked=trigger_ids_checked,
+        )]
+    return []
+
+
 def enforce_plan_quality(
     plan: StrategyPlan,
     available_timeframes: Set[str],
@@ -1298,16 +1404,32 @@ def enforce_plan_quality(
             v.violations,
         )
 
+    # R56: Refinement mode enforcement — validates activation_refinement_mode against triggers.
+    result.refinement_violations = enforce_refinement_mode_mapping(plan)
+    for rv in result.refinement_violations:
+        logger.warning(
+            "Plan BLOCKED [refinement_mode_violation] mode='%s' missing_identifiers=%s "
+            "checked_trigger_ids=%s",
+            rv.mode,
+            rv.missing_identifiers,
+            rv.trigger_ids_checked,
+        )
+    # Write back validated flag onto the plan
+    if plan.activation_refinement_mode is not None:
+        plan.refinement_mapping_validated = len(result.refinement_violations) == 0
+
     if result.total_corrections:
         logger.info(
             "Plan enforcement: %d corrections applied "
-            "(%d exit-binding, %d hold-rule, %d identifier, %d exit-sanitized, %d template-violations)",
+            "(%d exit-binding, %d hold-rule, %d identifier, %d exit-sanitized, "
+            "%d template-violations, %d refinement-violations)",
             result.total_corrections,
             len(result.exit_binding_corrections),
             len(result.hold_rules_stripped),
             len(result.identifier_corrections),
             len(result.exit_rule_sanitizations),
             len(result.template_violations),
+            len(result.refinement_violations),
         )
 
     return result
