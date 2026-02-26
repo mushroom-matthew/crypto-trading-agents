@@ -44,6 +44,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from schemas.research_budget import ResearchBudgetState
     from schemas.experiment_spec import ExperimentSpec
+    from schemas.position_exit_contract import PositionExitContract, ExitLeg
+    from services.exit_contract_builder import build_exit_contract
     from trading_core.trigger_compiler import compile_plan
     from ops_api.event_store import EventStore
     from ops_api.schemas import Event
@@ -145,6 +147,8 @@ class SessionState(BaseModel):
     active_experiments: List[Dict[str, Any]] = []
     # Bounded indicator/structure snapshot history for UI time-travel lookups.
     structure_history: Dict[str, List[Dict[str, Any]]] = {}
+    # Active exit contracts indexed by symbol (Runbook 60 Phase M2).
+    exit_contracts: Dict[str, Dict[str, Any]] = {}
 
 
 # ============================================================================
@@ -492,6 +496,31 @@ def evaluate_triggers_activity(
                     "reason": order.reason,
                 }
                 all_orders.append(order_dict)
+
+                # M1 guardrail (Runbook 60): detect non-emergency direction="exit" triggers
+                # that fire via the entry-rule flatten path (reason ends in "_flat").
+                # These bypass normal exit-rule binding checks and should migrate to
+                # PositionExitContract stop/target legs.
+                if (
+                    getattr(order, "intent", None) == "exit"
+                    and isinstance(order.reason, str)
+                    and order.reason.endswith("_flat")
+                    and order.trigger_category != "emergency_exit"
+                ):
+                    all_events.append({
+                        "type": "entry_rule_flatten_detected",
+                        "payload": {
+                            "symbol": order.symbol,
+                            "trigger_id": order.reason,
+                            "category": order.trigger_category,
+                            "exit_class": "strategy_contract_candidate",
+                            "detail": (
+                                "Non-emergency exit trigger fired via entry-rule flatten path "
+                                "(reason ends '_flat'). Migrate to PositionExitContract leg."
+                            ),
+                        },
+                    })
+
                 all_events.append({
                     "type": "trigger_fired",
                     "payload": {
@@ -750,6 +779,8 @@ class PaperTradingWorkflow:
         # Research budget (Runbook 48)
         self.research: Optional["ResearchBudgetState"] = None
         self.active_experiments: List[Dict[str, Any]] = []
+        # Active exit contracts indexed by symbol (Runbook 60 Phase M2)
+        self.exit_contracts: Dict[str, Dict[str, Any]] = {}
 
     # -------------------------------------------------------------------------
     # Signals
@@ -1824,7 +1855,101 @@ class PaperTradingWorkflow:
                 etb = tdict.get("estimated_bars_to_resolution")
                 if etb is not None:
                     fill_payload["estimated_bars_to_resolution"] = int(etb)
+
+        # Phase M2 (Runbook 60): Materialize PositionExitContract at entry.
+        # The contract captures the precommitted exit plan (stop, targets, time expiry)
+        # before capital is committed.  Building it here ensures provenance is tied
+        # to the fill record.
+        _exit_contract: Optional["PositionExitContract"] = None
+        if order.get("intent") == "entry" and stop_price_abs is not None:
+            _sym = order["symbol"]
+            _dir: Literal["long", "short"] = (
+                "long" if order.get("side", "buy").lower() == "buy" else "short"
+            )
+            _pos_id = f"{_sym}_{self.session_id}_{int(workflow.now().timestamp() * 1000)}"
+
+            # Try primary path: build via TriggerCondition (preserves anchor/time metadata)
+            try:
+                if trigger_dict:
+                    from schemas.llm_strategist import TriggerCondition as _TC  # noqa: PLC0415
+                    _trigger_obj = _TC.model_validate(trigger_dict)
+                    _exit_contract = build_exit_contract(
+                        trigger=_trigger_obj,
+                        position_id=_pos_id,
+                        entry_price=fill_price,
+                        initial_qty=float(quantity),
+                        stop_price_abs=stop_price_abs,
+                        target_price_abs=target_price_abs,
+                        plan_id=(self.current_plan or {}).get("plan_id"),
+                        playbook_id=trigger_dict.get("playbook_id"),
+                        template_id=(self.current_plan or {}).get("_retrieved_template_id"),
+                        created_at=workflow.now(),
+                    )
+            except Exception as _exc:
+                workflow.logger.warning(
+                    "Exit contract via TriggerCondition failed for %s (%s): %s — fallback",
+                    _sym, trigger_id, _exc,
+                )
+
+            # Fallback: build directly from resolved price values
+            if _exit_contract is None:
+                try:
+                    _legs = []
+                    if target_price_abs is not None:
+                        _legs.append(ExitLeg(
+                            kind="full_exit",
+                            trigger_mode="price_level",
+                            fraction=1.0,
+                            price_abs=target_price_abs,
+                        ))
+                    _exit_contract = PositionExitContract(
+                        position_id=_pos_id,
+                        symbol=_sym,
+                        side=_dir,
+                        created_at=workflow.now(),
+                        source_trigger_id=trigger_id or f"trigger_{_pos_id}",
+                        source_category=order.get("trigger_category"),
+                        entry_price=fill_price,
+                        initial_qty=float(quantity),
+                        stop_price_abs=stop_price_abs,
+                        target_legs=_legs,
+                        remaining_qty=float(quantity),
+                    )
+                except Exception as _exc2:
+                    workflow.logger.warning(
+                        "Fallback exit contract creation failed for %s: %s — entry proceeds without contract",
+                        _sym, _exc2,
+                    )
+
+            if _exit_contract is not None:
+                self.exit_contracts[_sym] = _exit_contract.model_dump(mode="json")
+                fill_payload["exit_contract_id"] = _exit_contract.contract_id
+
         await ledger_handle.signal("record_fill", fill_payload)
+
+        # Emit position_exit_contract_created event for auditable contract provenance
+        if _exit_contract is not None:
+            await workflow.execute_activity(
+                emit_paper_trading_event_activity,
+                args=[
+                    self.session_id,
+                    "position_exit_contract_created",
+                    {
+                        "contract_id": _exit_contract.contract_id,
+                        "position_id": _exit_contract.position_id,
+                        "symbol": _exit_contract.symbol,
+                        "side": _exit_contract.side,
+                        "entry_price": _exit_contract.entry_price,
+                        "stop_price_abs": _exit_contract.stop_price_abs,
+                        "target_legs_count": len(_exit_contract.target_legs),
+                        "has_time_exit": _exit_contract.time_exit is not None,
+                        "source_trigger_id": _exit_contract.source_trigger_id,
+                        "source_category": _exit_contract.source_category,
+                        "exit_class": "strategy_contract",
+                    },
+                ],
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
 
         # Emit event with stop/target for activity feed
         event_payload = dict(order)
@@ -1915,6 +2040,7 @@ class PaperTradingWorkflow:
             research=self.research,
             active_experiments=list(self.active_experiments),
             structure_history=self._bounded_structure_history_snapshot(),
+            exit_contracts=dict(self.exit_contracts),
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -1945,6 +2071,7 @@ class PaperTradingWorkflow:
             str(sym).upper(): list(snaps or [])
             for sym, snaps in (parsed.structure_history or {}).items()
         }
+        self.exit_contracts = dict(parsed.exit_contracts or {})
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)
