@@ -373,6 +373,15 @@ class StrategyPlan(SerializableModel):
             "Value: float. Only parameter names documented in the template are valid."
         ),
     )
+    playbook_id: Optional[str] = Field(
+        default=None,
+        description="Playbook ID selected by the LLM from the eligible playbook list (Runbook 52). "
+        "Null if no playbook was selected or system is in freeform fallback mode.",
+    )
+    playbook_version: Optional[str] = Field(
+        default=None,
+        description="Version of the selected playbook definition at decision time.",
+    )
     triggers: List[TriggerCondition] = Field(default_factory=list)
     risk_constraints: RiskConstraint | None = None
     sizing_rules: List[PositionSizingRule] = Field(default_factory=list)
