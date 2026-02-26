@@ -1598,6 +1598,43 @@ class PaperTradingWorkflow:
             )
 
         for order in orders:
+            # Phase M3 (Runbook 60): block entry-rule flatten exits for symbols
+            # that have an active exit contract.  Contract stop/target/time rules
+            # govern the exit — the generic _flat path is suppressed.
+            # Emergency exits and symbols without contracts are still allowed through.
+            _sym = order.get("symbol", "")
+            _reason = order.get("reason") or order.get("trigger_id") or ""
+            if (
+                order.get("intent") == "exit"
+                and isinstance(_reason, str)
+                and _reason.endswith("_flat")
+                and order.get("trigger_category") != "emergency_exit"
+                and _sym in self.exit_contracts
+            ):
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[
+                        self.session_id,
+                        "trade_blocked",
+                        {
+                            "symbol": _sym,
+                            "trigger_id": _reason,
+                            "reason": "m3_contract_backed_exit",
+                            "exit_class": "strategy_contract",
+                            "detail": (
+                                "Entry-rule flatten suppressed (Phase M3): position has an "
+                                "active exit contract. Contract stop/target/time rules govern "
+                                "this exit path."
+                            ),
+                        },
+                    ],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                )
+                workflow.logger.debug(
+                    "M3: suppressed entry-rule flatten for %s (%s) — exit contract active",
+                    _sym, _reason,
+                )
+                continue
             await self._execute_order(order)
 
     async def _sweep_stop_target(

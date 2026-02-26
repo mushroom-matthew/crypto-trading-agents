@@ -394,13 +394,13 @@ the default for paper trading before live paths.
 
 - [x] Every new paper/backtest entry can materialize a valid `PositionExitContract` or is rejected with explicit reason
 - [x] Non-emergency `direction="exit"` triggers no longer flatten positions via permissive entry-rule path unless mapped to a contract-defined action (M1 guardrail: `entry_rule_flatten_detected` event)
-- [ ] Hold-period and exit-binding checks apply consistently to normal strategy exits (regardless of trigger path) — deferred to Phase M3
+- [x] Hold-period and exit-binding checks apply consistently to normal strategy exits — Phase M3: paper trading blocks entry-rule flatten exits for symbols with active contracts (trade_blocked event); backtest logs warning (M3 backtest parity)
 - [x] Portfolio-level risk reduction / reallocation actions are executed only via a deterministic `PortfolioMetaRiskPolicy`
 - [x] Overlay actions emit explicit audit events with triggering metrics and resulting portfolio changes
 - [x] Exit telemetry clearly distinguishes `strategy_contract`, `portfolio_overlay`, and `emergency` classes
 - [x] Existing adaptive trade-management concepts (R45) are representable as contract legs/state transitions (ExitLeg with r_multiple/price_level trigger modes)
 - [x] Templates/playbooks can declare enough structured data to form exit contracts without ad hoc runtime inference (TriggerCondition.target_anchor_type → ExitLeg derivation)
-- [x] Backtest and paper-trading paths behave consistently for contract creation and execution (Phase M2 materialization in paper trading; backtest deferred to Phase M3)
+- [x] Backtest and paper-trading paths behave consistently for contract creation and execution (Phase M2 + M3 implemented in both paths; backtesting/llm_strategist_runner.py has _materialize_backtest_contract + M3 warning + exit_contracts audit log in StrategistBacktestResult)
 - [x] Ops API/UI surfaces active contracts and portfolio overlay actions for operator inspection
 
 ## Test Plan
@@ -417,6 +417,15 @@ uv run pytest tests/test_exit_contract_execution.py -vv
 
 # Portfolio meta-risk overlay conditions and deterministic actions
 uv run pytest tests/test_portfolio_meta_risk_overlay.py -vv
+
+# Phase M3 paper trading enforcement
+uv run pytest tests/test_paper_trading_exit_contracts.py -vv
+
+# Backtest parity: _materialize_backtest_contract + StrategistBacktestResult field
+uv run pytest tests/test_backtest_exit_contract_parity.py -vv
+
+# Ops API response models and _contract_dict_to_response converter
+uv run pytest tests/test_ops_api_portfolio_overlay.py -vv
 ```
 
 ## Test Evidence
@@ -426,10 +435,13 @@ tests/test_trigger_engine_exit_contract_semantics.py   23 passed
 tests/test_position_exit_contracts.py                  46 passed
 tests/test_exit_contract_execution.py                  30 passed
 tests/test_portfolio_meta_risk_overlay.py              35 passed
-Total new tests:                                      134 passed
+tests/test_paper_trading_exit_contracts.py             15 passed  (Phase M3 enforcement)
+tests/test_backtest_exit_contract_parity.py            21 passed  (backtest parity)
+tests/test_ops_api_portfolio_overlay.py                22 passed  (ops API response models)
+Total new tests:                                      172 passed
 
 Full suite (ignoring 2 pre-existing test_factor_loader failures):
-  2 failed (pre-existing), 1611 passed, 2 skipped
+  2 failed (pre-existing), 1745+ passed, 2 skipped
   No regressions introduced.
 ```
 
@@ -455,9 +467,12 @@ git commit -m "docs(runbook): add r60 exit contracts and portfolio meta-risk ove
 - [x] Runbook enforces "know the exit before entry" as a hard invariant: `_execute_order` calls `build_exit_contract` at entry time (Phase M2); missing stop rejects the entry before contract creation.
 - [x] Portfolio reallocation / risk-reduce is modeled as a deterministic `PortfolioMetaRiskPolicy` with preapproved `PortfolioMetaAction` entries — no ad hoc runtime action fabrication allowed.
 - [x] Emergency exits remain distinct: `category="emergency_exit"` is explicitly excluded from the M1 guardrail detection; three exit classes (strategy_contract, portfolio_overlay, emergency) are consistently labeled in all emitted events.
-- [x] Migration steps (M1→M2→M3→M4→M5) allow safe incremental rollout: Phase M2 is compatibility mode (legacy exits still honored; contracts annotate but don't yet block). Phase M3 enforcement is deferred.
+- [x] Phase M3 paper trading enforcement: `_evaluate_and_execute` blocks entry-rule flatten exits (reason ends `_flat`, non-emergency) for symbols with active contracts; emits `trade_blocked` event with `reason="m3_contract_backed_exit"`.
+- [x] Backtest parity: `LLMStrategistBacktester._materialize_backtest_contract()` builds `PositionExitContract` from position_meta at entry; stores in `self.exit_contracts[symbol]` and appends to `_exit_contract_audit`; M3 warning logged when flat exit fires with active contract; `StrategistBacktestResult.exit_contracts` field returns audit list.
+- [x] Migration steps (M1→M2→M3→M4→M5) fully implemented through M3: M1 detects and warns, M2 materializes contracts at entry (both paper trading and backtest), M3 enforces blocking in paper trading and logs warnings in backtest.
 
 ## Change Log
 
 - 2026-02-26: Initial runbook drafted for precommitted position exit contracts and deterministic portfolio meta-risk overlay actions.
 - 2026-02-26: Full implementation: schemas (PositionExitContract, ExitLeg, TimeExitRule, PortfolioMetaRiskPolicy, PortfolioMetaAction), builder service (build_exit_contract, can_build_contract), portfolio overlay evaluator (services/portfolio_meta_risk_overlay.py), paper trading Phase M2 wiring (_execute_order → contract materialization + position_exit_contract_created event), M1 guardrail (entry_rule_flatten_detected event in order loop), Ops API (ops_api/routers/exit_contracts.py, two endpoints), 134 new tests across 4 test files.
+- 2026-02-26: Deferred sections completed: Phase M3 enforcement in paper trading (_evaluate_and_execute blocks entry-rule flatten exits for symbols with active contracts, emits trade_blocked event); backtest parity (_materialize_backtest_contract helper + M3 warning + StrategistBacktestResult.exit_contracts audit field in backtesting/llm_strategist_runner.py); 3 additional test files (test_paper_trading_exit_contracts.py 15 tests, test_backtest_exit_contract_parity.py 21 tests, test_ops_api_portfolio_overlay.py 22 tests); total 172 new tests, no regressions.

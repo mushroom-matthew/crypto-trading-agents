@@ -40,6 +40,7 @@ from agents.strategies.trigger_engine import Bar, ConflictResolution, ExitBindin
 from agents.strategies.policy_trigger_integration import PolicyTriggerIntegration
 from schemas.policy import PolicyConfig, PolicyDecisionRecord, get_policy_config_from_plan
 from schemas.trade_set import StopAdjustmentEvent, PartialExitEvent
+from schemas.position_exit_contract import ExitLeg, PositionExitContract
 from backtesting.dataset import load_ohlcv, load_with_htf
 from backtesting.llm_shim import build_judge_shim_feedback, make_judge_shim_transport
 from services.judge_feedback_service import JudgeFeedbackService
@@ -987,6 +988,7 @@ class StrategistBacktestResult:
     judge_triggered_replans: List[Dict[str, Any]] = field(default_factory=list)
     trade_mgmt_events: List[Dict[str, Any]] = field(default_factory=list)
     setup_events: List[Dict[str, Any]] = field(default_factory=list)
+    exit_contracts: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class LLMStrategistBacktester:
@@ -1239,6 +1241,9 @@ class LLMStrategistBacktester:
         )
         self._setup_events: List[Dict[str, Any]] = []
         self.position_risk_state: Dict[str, PositionRiskState] = {}
+        # R60 Phase M2 (backtest parity): active exit contracts per symbol + full audit list
+        self.exit_contracts: Dict[str, dict] = {}
+        self._exit_contract_audit: List[Dict[str, Any]] = []
         if self.priority_skip_confidence_threshold is None and self.is_scalp_profile:
             self.priority_skip_confidence_threshold = "B"
 
@@ -2446,6 +2451,48 @@ class LLMStrategistBacktester:
             )
         ]
 
+    def _materialize_backtest_contract(self, order: "Order") -> None:
+        """Phase M2 (backtest parity, R60): build PositionExitContract at entry fill time.
+
+        Uses resolved stop/target from position_meta (set by _update_position_risk_state).
+        Stores contract in self.exit_contracts[symbol] and appends to audit list.
+        """
+        _bt_stop = self.portfolio.position_meta.get(order.symbol, {}).get("stop_price_abs")
+        if not (_bt_stop and _bt_stop > 0):
+            return
+        try:
+            _bt_side = "long" if order.side == "buy" else "short"
+            _bt_target = self.portfolio.position_meta.get(order.symbol, {}).get("target_price_abs")
+            _bt_legs: list = []
+            if _bt_target and _bt_target > 0:
+                _bt_legs.append(ExitLeg(
+                    kind="full_exit",
+                    trigger_mode="price_level",
+                    fraction=1.0,
+                    price_abs=_bt_target,
+                ))
+            _bt_contract = PositionExitContract(
+                position_id=f"bt_{order.symbol}_{order.timestamp.strftime('%Y%m%d%H%M%S')}",
+                symbol=order.symbol,
+                side=_bt_side,
+                created_at=order.timestamp,
+                source_trigger_id=order.reason or "unknown",
+                entry_price=order.price,
+                initial_qty=order.quantity,
+                stop_price_abs=_bt_stop,
+                target_legs=_bt_legs,
+                remaining_qty=order.quantity,
+            )
+            _contract_dict = _bt_contract.model_dump(mode="json")
+            self.exit_contracts[order.symbol] = _contract_dict
+            self._exit_contract_audit.append(_contract_dict)
+            logger.debug(
+                "R60 M2 (backtest): exit contract created symbol=%s trigger=%s stop=%.4f",
+                order.symbol, order.reason, _bt_stop,
+            )
+        except Exception as _bt_exc:
+            logger.debug("R60 (backtest): contract build failed symbol=%s: %s", order.symbol, _bt_exc)
+
     def _update_position_risk_state(self, order: Order, pre_qty: float, post_qty: float) -> None:
         def _sign(qty: float) -> int:
             if qty > 1e-9:
@@ -3289,6 +3336,8 @@ class LLMStrategistBacktester:
                 self._commit_risk_budget(day_key, commit_amount, order.symbol)
                 limit_entry["trades_executed"] += 1
                 trigger_id = order.reason
+                if _is_entry:
+                    self._materialize_backtest_contract(order)
                 risk_used = commit_amount or 0.0
                 # Runbook 14: default risk_used to actual_risk when budgets are off
                 if risk_used == 0.0 and actual_risk and actual_risk > 0:
@@ -3334,6 +3383,18 @@ class LLMStrategistBacktester:
                 if self.current_trigger_engine:
                     self.current_trigger_engine.record_fill(order.symbol, is_entry, order.timestamp)
                 if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
+                    # R60 M3 (backtest): warn if entry-rule flatten fires for symbol with active contract
+                    if (
+                        order.reason
+                        and order.reason.endswith("_flat")
+                        and order.symbol in self.exit_contracts
+                    ):
+                        logger.warning(
+                            "R60 M3 (backtest): entry-rule flatten '%s' for %s with active exit "
+                            "contract (Phase M3 would suppress this in paper trading).",
+                            order.reason, order.symbol,
+                        )
+                    self.exit_contracts.pop(order.symbol, None)
                     self.last_flat_time_by_symbol[order.symbol] = order.timestamp
                     self.last_flat_trigger_by_symbol[order.symbol] = _base_trigger_id(order.reason)
                 structure_fields = _structure_fields(structure_snapshot)
@@ -3724,6 +3785,8 @@ class LLMStrategistBacktester:
                             actual_risk = _resolved_risk
                 self._commit_risk_budget(day_key, commit_amount, order.symbol)
                 limit_entry["trades_executed"] += 1
+                if _is_entry:
+                    self._materialize_backtest_contract(order)
                 risk_used = commit_amount or 0.0
                 # Runbook 14: default risk_used to actual_risk when budgets are off
                 if risk_used == 0.0 and actual_risk and actual_risk > 0:
@@ -3763,6 +3826,18 @@ class LLMStrategistBacktester:
                 if self.current_trigger_engine:
                     self.current_trigger_engine.record_fill(order.symbol, is_entry, order.timestamp)
                 if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
+                    # R60 M3 (backtest): warn if entry-rule flatten fires for symbol with active contract
+                    if (
+                        order.reason
+                        and order.reason.endswith("_flat")
+                        and order.symbol in self.exit_contracts
+                    ):
+                        logger.warning(
+                            "R60 M3 (backtest): entry-rule flatten '%s' for %s with active exit "
+                            "contract (Phase M3 would suppress this in paper trading).",
+                            order.reason, order.symbol,
+                        )
+                    self.exit_contracts.pop(order.symbol, None)
                     self.last_flat_time_by_symbol[order.symbol] = order.timestamp
                     self.last_flat_trigger_by_symbol[order.symbol] = _base_trigger_id(order.reason)
                 structure_fields = _structure_fields(structure_snapshot)
@@ -4841,6 +4916,7 @@ class LLMStrategistBacktester:
             judge_triggered_replans=list(self.judge_triggered_replans),
             trade_mgmt_events=list(self._trade_mgmt_events),
             setup_events=list(self._setup_events),
+            exit_contracts=list(self._exit_contract_audit),
         )
 
     def _indicator_briefs(self, asset_states: Dict[str, AssetState]) -> Dict[str, Dict[str, Any]]:
