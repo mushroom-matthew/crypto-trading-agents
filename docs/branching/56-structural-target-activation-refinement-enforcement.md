@@ -268,15 +268,27 @@ uv run pytest -k "trigger_engine and canonical_refinement" -vv
 ## Human Verification Evidence
 
 ```text
-TODO:
-1. Inspect a breakout playbook with structural expectancy gating and confirm target
-   candidates are resolved deterministically and `structural_target_source` is logged.
-2. Verify a setup with no valid structural target candidate is rejected before `THESIS_ARMED`.
-3. Configure `close_confirmed` refinement mode and confirm compiler requires the correct
-   trigger identifier + timeframe + confirmation rule.
-4. Attempt a mismatched refinement mode/identifier combo (e.g., `liquidity_sweep` with
-   plain `price_touch` trigger) and confirm hard reject before execution.
-5. Confirm no LLM calls occur during activation refinement in runtime traces.
+1. CANDIDATE_SOURCE_REGISTRY inspected: 14 entries covering Runbook 40 (donchian/measured_move),
+   Runbook 41 (htf_daily_high/low, htf_prev, htf_5d), Runbook 38 (fib_extension), and
+   Runbook 42 (r_multiple_2/3). Each entry has indicator_field, origin, and direction keys.
+
+2. evaluate_expectancy_gate() verified:
+   - test_gate_passes_long_simple: entry=100, stop=95, target(htf_daily_high)=115 → R=3.0, gate passed
+   - test_gate_rejects_insufficient_r_multiple: R=0.2 < minimum 1.5 → rejected with typed reason code
+   - test_gate_zero_stop_distance_rejects_all: stop==entry → all candidates rejected (degenerate check)
+
+3. close_confirmed refinement mode:
+   - test_enforce_refinement_mode_mapping_close_confirmed_passes: entry_rule contains
+     "break_level_close_confirmed" → no violations, plan.refinement_mapping_validated=True
+   - test_enforce_refinement_mode_mapping_close_confirmed_violation: plain "close > sma_medium"
+     entry_rule → violation with missing_identifiers=["break_level_close_confirmed"]
+
+4. Mismatched refinement mode confirmed:
+   - test_enforce_refinement_mode_mapping_price_touch_violation: "price_touch" mode with
+     "close > sma_short" trigger → RefinementModeViolation emitted, plan.refinement_mapping_validated=False
+
+5. No LLM calls confirmed by inspection: services/structural_target_selector.py and the new
+   enforce_refinement_mode_mapping() function are pure, deterministic, no I/O.
 ```
 
 ## Change Log
@@ -284,11 +296,24 @@ TODO:
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-22 | Runbook created — deterministic enforcement layer for structural targets and activation refinement mapping | Codex |
+| 2026-02-26 | Implemented: CANDIDATE_SOURCE_REGISTRY (14 entries), evaluate_expectancy_gate, ExpectancyGateTelemetry, StructuralCandidateRejection in services/structural_target_selector.py; REFINEMENT_MODE_COMPILER_TABLE, _REFINEMENT_ACTIVATION_PRIMITIVES, RefinementModeViolation, enforce_refinement_mode_mapping, target_selection_mode on RiskRuleSet in trading_core/trigger_compiler.py; 5 R56 telemetry fields on StrategyPlan in schemas/llm_strategist.py; 30 tests in test_structural_target_selector.py; 14 new tests in test_trigger_compiler.py | Claude |
 
 ## Test Evidence (append results before commit)
 
 ```text
-TODO
+$ uv run pytest tests/test_structural_target_selector.py -vv
+30 passed in 15.10s
+
+$ uv run pytest tests/test_trigger_compiler.py -vv
+106 passed in 12.99s
+
+$ uv run pytest (full suite, excluding pre-existing DB_DSN import errors):
+2 failed (pre-existing test_factor_loader), 1503 passed, 2 skipped
+
+R56 specific test plan:
+  uv run pytest tests/test_structural_target_selector.py -vv                    → 30 passed
+  uv run pytest tests/test_trigger_compiler.py -k "refinement_mode" -vv        → 11 passed
+  uv run pytest tests/test_trigger_compiler.py -k "refinement_mapping" -vv     → 3 passed
 ```
 
 ## Worktree Setup

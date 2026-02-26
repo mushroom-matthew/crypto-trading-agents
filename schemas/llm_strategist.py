@@ -402,6 +402,34 @@ class StrategyPlan(SerializableModel):
         "If set, enables Phase 1 policy integration (trigger-gated target weights). "
         "Expected schema: schemas.policy.PolicyConfig fields (tau, vol_target, w_min, w_max, etc).",
     )
+    # R56: Structural target telemetry (populated by evaluate_expectancy_gate)
+    structural_target_source: Optional[str] = Field(
+        default=None,
+        description="Selected structural target candidate name (from evaluate_expectancy_gate). "
+        "Null if gate was not evaluated or no valid candidate found.",
+    )
+    structural_r: Optional[float] = Field(
+        default=None,
+        description="Structural R multiple (T − E) / (E − S) for the selected target. "
+        "Populated when expectancy_gate_passed is True.",
+    )
+    expectancy_gate_passed: Optional[bool] = Field(
+        default=None,
+        description="Whether the structural expectancy gate passed at plan generation. "
+        "None = gate was not evaluated (no playbook or no structural_target_sources declared).",
+    )
+    # R56: Activation refinement mode telemetry
+    activation_refinement_mode: Optional[str] = Field(
+        default=None,
+        description="Activation refinement mode declared by the selected playbook. "
+        "One of: price_touch, close_confirmed, liquidity_sweep, next_bar_open. "
+        "Null if no playbook selected or no mode declared.",
+    )
+    refinement_mapping_validated: Optional[bool] = Field(
+        default=None,
+        description="Whether the compiler validated the activation_refinement_mode mapping. "
+        "True = compatible triggers found. False = violations detected. None = not evaluated.",
+    )
 
 
 # Rebuild model for forward references
