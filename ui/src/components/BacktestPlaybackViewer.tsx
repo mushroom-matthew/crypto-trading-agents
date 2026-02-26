@@ -15,7 +15,8 @@ export function BacktestPlaybackViewer({
   runId,
   symbol,
 }: BacktestPlaybackViewerProps) {
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentCandleIndex, setCurrentCandleIndex] = useState(0);
+  const [currentEventIndex, setCurrentEventIndex] = useState(0);
   const [mode, setMode] = useState<'candle' | 'event'>('candle');
 
   // Load candles with indicators (progressive loading)
@@ -40,8 +41,23 @@ export function BacktestPlaybackViewer({
   });
 
   useEffect(() => {
-    setCurrentIndex(0);
+    setCurrentCandleIndex(0);
+    setCurrentEventIndex(0);
   }, [symbol]);
+
+  useEffect(() => {
+    setCurrentCandleIndex((idx) => {
+      if (candles.length === 0) return 0;
+      return Math.min(Math.max(idx, 0), candles.length - 1);
+    });
+  }, [candles.length]);
+
+  useEffect(() => {
+    setCurrentEventIndex((idx) => {
+      if (events.length === 0) return 0;
+      return Math.min(Math.max(idx, 0), events.length - 1);
+    });
+  }, [events.length]);
 
   const filteredTrades = useMemo(() => {
     if (!symbol) {
@@ -53,15 +69,26 @@ export function BacktestPlaybackViewer({
   // Get current timestamp based on mode and index
   const currentTimestamp = useMemo(() => {
     if (mode === 'candle') {
-      return candles[currentIndex]?.timestamp || '';
+      return candles[currentCandleIndex]?.timestamp || '';
     } else {
-      return events[currentIndex]?.timestamp || '';
+      return events[currentEventIndex]?.timestamp || '';
     }
-  }, [mode, currentIndex, candles, events]);
+  }, [mode, currentCandleIndex, currentEventIndex, candles, events]);
 
   const handleTimestampChange = (newIndex: number, _timestamp?: string) => {
-    setCurrentIndex(newIndex);
+    if (mode === 'candle') {
+      setCurrentCandleIndex(newIndex);
+      return;
+    }
+
+    setCurrentEventIndex(newIndex);
+    const eventTs = events[newIndex]?.timestamp;
+    if (eventTs) {
+      setCurrentCandleIndex(findCandleIndexAtOrBefore(candles, eventTs));
+    }
   };
+
+  const timelineIndex = mode === 'candle' ? currentCandleIndex : currentEventIndex;
 
   const isLoading = loadingCandles || loadingEvents;
 
@@ -91,7 +118,7 @@ export function BacktestPlaybackViewer({
         totalCandles={candles.length}
         events={events}
         onTimestampChange={handleTimestampChange}
-        currentIndex={currentIndex}
+        currentIndex={timelineIndex}
         mode={mode}
         onModeChange={setMode}
       />
@@ -108,12 +135,12 @@ export function BacktestPlaybackViewer({
             <CandlestickChart
               candles={candles}
               trades={filteredTrades}
-              currentIndex={currentIndex}
+              currentIndex={currentCandleIndex}
             />
           </div>
 
           {/* Indicator Panels */}
-          <IndicatorPanels candles={candles} currentIndex={currentIndex} />
+          <IndicatorPanels candles={candles} currentIndex={currentCandleIndex} />
         </div>
 
         {/* State Inspector (1/3 width, sticky on large screens) */}
@@ -142,4 +169,37 @@ export function BacktestPlaybackViewer({
       </div>
     </div>
   );
+}
+
+function findCandleIndexAtOrBefore(
+  candles: Array<{ timestamp: string }>,
+  timestamp: string
+): number {
+  if (candles.length === 0) return 0;
+
+  const target = new Date(timestamp).getTime();
+  if (!Number.isFinite(target)) return 0;
+
+  let lo = 0;
+  let hi = candles.length - 1;
+  let best = 0;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const midTs = new Date(candles[mid].timestamp).getTime();
+
+    if (!Number.isFinite(midTs)) {
+      lo = mid + 1;
+      continue;
+    }
+
+    if (midTs <= target) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return best;
 }

@@ -698,7 +698,9 @@ class UniverseScreenerService:
     def _candidate_hold_timeframe(self, candidate: SymbolAnomalyScore, hypothesis: str) -> str:
         source_tf = str(candidate.source_timeframe or candidate.score_components.get("source_timeframe") or "").lower()
         if hypothesis == "compression_breakout":
-            if source_tf in {"1m", "5m"} and candidate.vol_state in {"high", "extreme"}:
+            # Compression implies low/normal vol by definition, so don't gate on vol_state.
+            # A 5m compression breakout resolves on 5m candles, not 1h.
+            if source_tf in {"1m", "5m", "15m"}:
                 return source_tf
             return "1h" if candidate.vol_state in {"normal", "high"} else "6h"
         if hypothesis == "volatile_breakout":

@@ -143,6 +143,8 @@ class SessionState(BaseModel):
     # Research budget: isolated capital pool for hypothesis testing (Runbook 48)
     research: Optional["ResearchBudgetState"] = None
     active_experiments: List[Dict[str, Any]] = []
+    # Bounded indicator/structure snapshot history for UI time-travel lookups.
+    structure_history: Dict[str, List[Dict[str, Any]]] = {}
 
 
 # ============================================================================
@@ -739,6 +741,8 @@ class PaperTradingWorkflow:
         # This does not affect trigger evaluation; it is visibility-only.
         self.last_indicators_live: Dict[str, Any] = {}
         self.last_live_indicators_refresh: Optional[datetime] = None
+        # Bounded per-symbol snapshot history to support UI "selected candle" lookups.
+        self.structure_history: Dict[str, List[Dict[str, Any]]] = {}
         # Candle-clock: tracks the last candle floor we ran trigger evaluation on,
         # keyed by timeframe string (e.g. "1h").  Prevents re-evaluating within the
         # same candle and enforces at least one-candle separation between entry and exit.
@@ -975,6 +979,53 @@ class PaperTradingWorkflow:
             snap = source.get(sym)
             return {sym: snap} if snap is not None else {}
         return dict(source)
+
+    @workflow.query
+    def get_structure_snapshots(
+        self,
+        symbol: Optional[str] = None,
+        as_of: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get structure snapshots for the UI, optionally resolved at-or-before ``as_of``.
+
+        Returns a payload with:
+          - indicators: {symbol: snapshot}
+          - lookup_mode: "latest" | "at_or_before"
+          - requested_as_of: echo of input (when provided)
+          - resolved_as_of / resolved_as_of_by_symbol
+        """
+        sym_filter = str(symbol).upper() if symbol else None
+        latest_source = self.last_indicators_live or self.last_indicators
+
+        if not as_of:
+            indicators = self._filter_indicator_dict(latest_source, sym_filter)
+            payload: Dict[str, Any] = {
+                "indicators": indicators,
+                "lookup_mode": "latest",
+            }
+            if sym_filter:
+                resolved = self._snapshot_as_of_str(indicators.get(sym_filter))
+                if resolved:
+                    payload["resolved_as_of"] = resolved
+            else:
+                payload["resolved_as_of_by_symbol"] = {
+                    k: ts for k, ts in (
+                        (k, self._snapshot_as_of_str(v)) for k, v in indicators.items()
+                    ) if ts
+                }
+            return payload
+
+        indicators, resolved_map = self._lookup_structure_at_or_before(as_of, sym_filter)
+        payload = {
+            "indicators": indicators,
+            "lookup_mode": "at_or_before",
+            "requested_as_of": as_of,
+        }
+        if sym_filter:
+            payload["resolved_as_of"] = resolved_map.get(sym_filter)
+        else:
+            payload["resolved_as_of_by_symbol"] = resolved_map
+        return payload
 
     # -------------------------------------------------------------------------
     # Main Workflow
@@ -1231,6 +1282,7 @@ class PaperTradingWorkflow:
 
         # Store snapshots for use in trigger evaluation between plan cycles
         self.last_indicators = indicator_snapshots
+        self._append_structure_history(indicator_snapshots, origin="plan")
 
         # Build market context from full snapshots; fall back to ledger price
         # for any symbol that failed indicator computation.
@@ -1365,6 +1417,7 @@ class PaperTradingWorkflow:
             )
             if isinstance(live_snapshots, dict) and live_snapshots:
                 self.last_indicators_live = live_snapshots
+                self._append_structure_history(live_snapshots, origin="live")
         except Exception as exc:
             workflow.logger.warning(f"Failed to refresh live indicators: {exc}")
 
@@ -1861,6 +1914,7 @@ class PaperTradingWorkflow:
             last_eval_candle_by_tf=dict(self.last_eval_candle_by_tf),
             research=self.research,
             active_experiments=list(self.active_experiments),
+            structure_history=self._bounded_structure_history_snapshot(),
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -1887,3 +1941,140 @@ class PaperTradingWorkflow:
         self.last_eval_candle_by_tf = dict(parsed.last_eval_candle_by_tf)
         self.research = parsed.research
         self.active_experiments = list(parsed.active_experiments)
+        self.structure_history = {
+            str(sym).upper(): list(snaps or [])
+            for sym, snaps in (parsed.structure_history or {}).items()
+        }
+
+    # -------------------------------------------------------------------------
+    # Structure snapshot history helpers (UI time-travel)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _filter_indicator_dict(source: Dict[str, Any], symbol: Optional[str]) -> Dict[str, Any]:
+        if symbol:
+            snap = source.get(symbol)
+            return {symbol: snap} if snap is not None else {}
+        return dict(source)
+
+    @staticmethod
+    def _snapshot_as_of_str(snapshot: Any) -> Optional[str]:
+        if not isinstance(snapshot, dict):
+            return None
+        as_of = snapshot.get("as_of")
+        if as_of is None:
+            return None
+        if isinstance(as_of, datetime):
+            return as_of.isoformat()
+        return str(as_of)
+
+    @staticmethod
+    def _parse_ts_like(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        raw = str(value).strip()
+        if not raw:
+            return None
+        # Support common ISO 'Z' suffix in API timestamps.
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _append_structure_history(self, snapshots: Dict[str, Any], *, origin: str) -> None:
+        """Store a bounded, per-symbol history of indicator snapshots for UI lookup."""
+        if not isinstance(snapshots, dict):
+            return
+
+        per_symbol_limit = 720
+        for sym_raw, snap_raw in snapshots.items():
+            sym = str(sym_raw).upper()
+            if not isinstance(snap_raw, dict):
+                continue
+            snap = dict(snap_raw)
+            snap["_snapshot_origin"] = origin
+
+            history = self.structure_history.setdefault(sym, [])
+            current_as_of = self._snapshot_as_of_str(snap)
+            current_tf = str(snap.get("timeframe") or "")
+            current_origin = str(snap.get("_snapshot_origin") or "")
+
+            if history:
+                last = history[-1]
+                if (
+                    self._snapshot_as_of_str(last) == current_as_of
+                    and str(last.get("timeframe") or "") == current_tf
+                    and str(last.get("_snapshot_origin") or "") == current_origin
+                ):
+                    history[-1] = snap
+                else:
+                    history.append(snap)
+            else:
+                history.append(snap)
+
+            if len(history) > per_symbol_limit:
+                self.structure_history[sym] = history[-per_symbol_limit:]
+
+    def _bounded_structure_history_snapshot(self) -> Dict[str, List[Dict[str, Any]]]:
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for sym, history in self.structure_history.items():
+            if not history:
+                continue
+            out[str(sym).upper()] = list(history[-720:])
+        return out
+
+    def _lookup_structure_at_or_before(
+        self,
+        requested_as_of: str,
+        symbol: Optional[str] = None,
+    ) -> tuple[Dict[str, Any], Dict[str, str]]:
+        """Resolve snapshots at-or-before ``requested_as_of`` using bounded history."""
+        target_ts = self._parse_ts_like(requested_as_of)
+        if target_ts is None:
+            latest_source = self.last_indicators_live or self.last_indicators
+            indicators = self._filter_indicator_dict(latest_source, symbol)
+            resolved = {
+                k: ts for k, ts in (
+                    (k, self._snapshot_as_of_str(v)) for k, v in indicators.items()
+                ) if ts
+            }
+            return indicators, resolved
+
+        latest_source = self.last_indicators_live or self.last_indicators
+        symbols = [symbol] if symbol else sorted(set(self.structure_history.keys()) | set(latest_source.keys()))
+        indicators: Dict[str, Any] = {}
+        resolved: Dict[str, str] = {}
+
+        for sym in symbols:
+            if not sym:
+                continue
+            history = self.structure_history.get(sym, [])
+            best_snapshot: Optional[Dict[str, Any]] = None
+            best_ts: Optional[datetime] = None
+
+            for snap in history:
+                snap_ts = self._parse_ts_like(self._snapshot_as_of_str(snap))
+                if snap_ts is None or snap_ts > target_ts:
+                    continue
+                if best_ts is None or snap_ts > best_ts:
+                    best_snapshot = snap
+                    best_ts = snap_ts
+
+            # Fallback to latest snapshot only when there is no recorded history yet
+            # (e.g., older sessions or immediately after startup).
+            if best_snapshot is None and not history:
+                latest = latest_source.get(sym)
+                if isinstance(latest, dict):
+                    best_snapshot = dict(latest)
+
+            if best_snapshot is not None:
+                indicators[sym] = best_snapshot
+                ts_str = self._snapshot_as_of_str(best_snapshot)
+                if ts_str:
+                    resolved[sym] = ts_str
+
+        return indicators, resolved

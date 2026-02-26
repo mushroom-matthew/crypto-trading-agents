@@ -871,6 +871,10 @@ export interface PaperTradingStructureSnapshot {
   session_id: string;
   count: number;
   indicators: Record<string, Record<string, any>>;
+  lookup_mode?: string;
+  requested_as_of?: string | null;
+  resolved_as_of?: string | null;
+  resolved_as_of_by_symbol?: Record<string, string>;
 }
 
 export interface PaperTradingTrade {
@@ -1113,10 +1117,17 @@ export const paperTradingAPI = {
     return response.data;
   },
 
-  // Get latest indicator snapshots (HTF structure + indicator context)
-  getStructure: async (sessionId: string, symbol?: string): Promise<PaperTradingStructureSnapshot> => {
+  // Get indicator snapshots (latest or resolved at-or-before a selected candle timestamp)
+  getStructure: async (
+    sessionId: string,
+    symbol?: string,
+    asOf?: string
+  ): Promise<PaperTradingStructureSnapshot> => {
     const response = await api.get(`/paper-trading/sessions/${sessionId}/structure`, {
-      params: symbol ? { symbol } : undefined,
+      params: {
+        symbol: symbol || undefined,
+        as_of: asOf || undefined,
+      },
     });
     return response.data;
   },

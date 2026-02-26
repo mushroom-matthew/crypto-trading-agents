@@ -1095,7 +1095,11 @@ async def get_session_activity(session_id: str, limit: int = 40):
 
 
 @router.get("/sessions/{session_id}/structure")
-async def get_structure_snapshot(session_id: str, symbol: Optional[str] = None):
+async def get_structure_snapshot(
+    session_id: str,
+    symbol: Optional[str] = None,
+    as_of: Optional[str] = None,
+):
     """Get latest indicator snapshot(s) used for structure-aware planning."""
     from ops_api.temporal_client import get_temporal_client
     from temporalio.service import RPCError
@@ -1106,8 +1110,29 @@ async def get_structure_snapshot(session_id: str, symbol: Optional[str] = None):
         client = await get_temporal_client()
         handle = client.get_workflow_handle(session_id)
 
-        # Prefer live-ish 1m snapshots when available; fall back to plan-time
-        # snapshots for backward compatibility with older workflow runs.
+        # Prefer the richer time-aware query when available (selected-candle UI
+        # lookup). Fall back to legacy latest-only queries for older sessions.
+        try:
+            structure_payload = await handle.query("get_structure_snapshots", symbol_norm, as_of)
+        except RPCError:
+            structure_payload = None
+
+        if isinstance(structure_payload, dict) and "indicators" in structure_payload:
+            indicators = structure_payload.get("indicators")
+            if not isinstance(indicators, dict):
+                indicators = {}
+            response: Dict[str, Any] = {
+                "session_id": session_id,
+                "count": len(indicators),
+                "indicators": indicators,
+            }
+            # Optional metadata for selected-candle UI binding.
+            for key in ("lookup_mode", "requested_as_of", "resolved_as_of", "resolved_as_of_by_symbol"):
+                if key in structure_payload:
+                    response[key] = structure_payload.get(key)
+            return response
+
+        # Legacy fallback path (latest-only).
         try:
             if symbol_norm:
                 indicators = await handle.query("get_live_indicators", symbol_norm)
@@ -1122,11 +1147,15 @@ async def get_structure_snapshot(session_id: str, symbol: Optional[str] = None):
         if not isinstance(indicators, dict):
             indicators = {}
 
-        return {
+        response = {
             "session_id": session_id,
             "count": len(indicators),
             "indicators": indicators,
         }
+        if as_of:
+            response["lookup_mode"] = "latest_fallback"
+            response["requested_as_of"] = as_of
+        return response
     except RPCError as e:
         msg = str(e).lower()
         if _is_not_found(e):

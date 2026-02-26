@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -159,6 +159,7 @@ export function PaperTradingControl() {
   // Chart state
   const [chartSymbol, setChartSymbol] = useState('BTC-USD');
   const [chartTimeframe, setChartTimeframe] = useState('1m');
+  const [selectedChartCandleTime, setSelectedChartCandleTime] = useState<number | null>(null);
   const { data: candlesData } = useQuery({
     queryKey: ['paper-trading-candles', selectedSessionId, chartSymbol, chartTimeframe],
     queryFn: () => paperTradingAPI.getCandles(selectedSessionId!, chartSymbol, chartTimeframe, 120),
@@ -166,9 +167,32 @@ export function PaperTradingControl() {
     refetchInterval: session?.status === 'running' ? 30000 : false,
     staleTime: 25000,
   });
+
+  useEffect(() => {
+    setSelectedChartCandleTime(null);
+  }, [selectedSessionId, chartSymbol, chartTimeframe]);
+
+  useEffect(() => {
+    const candles = candlesData?.candles ?? [];
+    if (candles.length === 0) {
+      setSelectedChartCandleTime(null);
+      return;
+    }
+    setSelectedChartCandleTime((prev) => {
+      if (prev != null && candles.some((c) => c.time === prev)) {
+        return prev;
+      }
+      return candles[candles.length - 1].time;
+    });
+  }, [candlesData]);
+
+  const selectedStructureAsOf = selectedChartCandleTime != null
+    ? new Date(selectedChartCandleTime).toISOString()
+    : undefined;
+
   const { data: structureData } = useQuery({
-    queryKey: ['paper-trading-structure', selectedSessionId],
-    queryFn: () => paperTradingAPI.getStructure(selectedSessionId!),
+    queryKey: ['paper-trading-structure', selectedSessionId, chartSymbol, selectedStructureAsOf],
+    queryFn: () => paperTradingAPI.getStructure(selectedSessionId!, chartSymbol, selectedStructureAsOf),
     enabled: !!selectedSessionId,
     refetchInterval: session?.status === 'running' ? 30000 : false,
     staleTime: 25000,
@@ -270,7 +294,11 @@ export function PaperTradingControl() {
   const selectedPositionQty = portfolio?.positions?.[chartSymbol] ?? 0;
   const selectedEntryPrice = portfolio?.entry_prices?.[chartSymbol] ?? null;
   const selectedStructure = structureData?.indicators?.[chartSymbol] ?? null;
-  const selectedStructureRows = buildStructureRows(selectedStructure);
+  const selectedStructureRows = buildStructureRows(selectedStructure, {
+    requestedAsOf: structureData?.requested_as_of ?? selectedStructureAsOf ?? null,
+    resolvedAsOf: structureData?.resolved_as_of ?? null,
+    lookupMode: structureData?.lookup_mode ?? null,
+  });
   const chartExecutions = activityEvents
     .filter((ev) => ev.type === 'order_executed' && ev.payload?.symbol === chartSymbol)
     .map((ev) => ({
@@ -1109,6 +1137,8 @@ export function PaperTradingControl() {
                 trades={trades.filter((t) => t.symbol === chartSymbol)}
                 executions={chartExecutions}
                 timeframe={chartTimeframe}
+                selectedCandleTime={selectedChartCandleTime}
+                onSelectCandle={setSelectedChartCandleTime}
                 stopPrice={selectedPositionMeta?.stop_price_abs ?? null}
                 targetPrice={selectedPositionMeta?.target_price_abs ?? null}
                 openPosition={selectedPositionQty !== 0 ? {
@@ -1176,6 +1206,11 @@ export function PaperTradingControl() {
                 <p className="text-xs uppercase tracking-wide font-semibold text-gray-500 mb-2">
                   Structure Snapshot (HTF)
                 </p>
+                {selectedChartCandleTime != null && (
+                  <p className="text-[11px] text-gray-500 mb-2">
+                    Bound to selected candle: {formatDateTime(new Date(selectedChartCandleTime).toISOString())}
+                  </p>
+                )}
                 {selectedStructureRows.length === 0 ? (
                   <p className="text-xs text-gray-500">
                     No structure snapshot yet. It appears after the first plan cycle.
@@ -1386,7 +1421,16 @@ type StructureRow = {
   valueClassName?: string;
 };
 
-function buildStructureRows(snapshot: Record<string, any> | null): StructureRow[] {
+type StructureRowMeta = {
+  requestedAsOf?: string | null;
+  resolvedAsOf?: string | null;
+  lookupMode?: string | null;
+};
+
+function buildStructureRows(
+  snapshot: Record<string, any> | null,
+  meta: StructureRowMeta = {}
+): StructureRow[] {
   if (!snapshot) return [];
 
   const timeframe = typeof snapshot.timeframe === 'string' ? snapshot.timeframe : null;
@@ -1401,16 +1445,38 @@ function buildStructureRows(snapshot: Record<string, any> | null): StructureRow[
   const rsi = toNumber(snapshot.rsi_14);
   const trend = deriveTrendLabel(snapshot);
   const daysRangePct = toNumber(snapshot.htf_daily_range_pct);
+  const prevDailyHigh = toNumber(snapshot.htf_prev_daily_high);
+  const prevDailyLow = toNumber(snapshot.htf_prev_daily_low);
+  const prevDailyMid = toNumber(snapshot.htf_prev_daily_mid);
+  const requestedAsOf = meta.requestedAsOf ?? null;
+  const resolvedAsOf = meta.resolvedAsOf ?? null;
+  const lookupMode = meta.lookupMode ?? null;
+  const requestedAsOfMs = requestedAsOf ? Date.parse(requestedAsOf) : NaN;
+  const resolvedAsOfMs = resolvedAsOf ? Date.parse(resolvedAsOf) : NaN;
+  const hasRequestedResolvedGap =
+    Number.isFinite(requestedAsOfMs) &&
+    Number.isFinite(resolvedAsOfMs) &&
+    requestedAsOfMs !== resolvedAsOfMs;
 
   const rows: StructureRow[] = [
-    { key: 'tf', label: 'Snapshot TF', value: timeframe ?? 'N/A' },
-    { key: 'as_of', label: 'As Of', value: asOf ? formatDateTime(asOf) : 'N/A' },
+    { key: 'tf', label: 'Structure Source TF', value: timeframe ?? 'N/A' },
+    { key: 'as_of', label: 'Snapshot As Of', value: asOf ? formatDateTime(asOf) : 'N/A' },
+    ...(requestedAsOf && hasRequestedResolvedGap
+      ? [{ key: 'requested_as_of', label: 'Requested As Of', value: formatDateTime(requestedAsOf) }]
+      : []),
+    ...(resolvedAsOf && hasRequestedResolvedGap
+      ? [{ key: 'resolved_as_of', label: 'Matched Snapshot As Of', value: formatDateTime(resolvedAsOf) }]
+      : []),
+    ...(lookupMode ? [{ key: 'lookup_mode', label: 'Lookup Mode', value: lookupMode }] : []),
     { key: 'trend', label: 'Trend State', value: trend.label, valueClassName: trend.className },
     { key: 'close', label: 'Close', value: close != null ? formatCurrency(close) : 'N/A' },
-    { key: 'daily_low', label: 'Daily Low', value: htfDailyLow != null ? formatCurrency(htfDailyLow) : 'N/A' },
-    { key: 'daily_high', label: 'Daily High', value: htfDailyHigh != null ? formatCurrency(htfDailyHigh) : 'N/A' },
-    { key: 'week_low', label: '5D Low', value: htf5dLow != null ? formatCurrency(htf5dLow) : 'N/A' },
-    { key: 'week_high', label: '5D High', value: htf5dHigh != null ? formatCurrency(htf5dHigh) : 'N/A' },
+    { key: 'daily_low', label: 'D-1 Low (prev session)', value: htfDailyLow != null ? formatCurrency(htfDailyLow) : 'N/A' },
+    { key: 'daily_high', label: 'D-1 High (prev session)', value: htfDailyHigh != null ? formatCurrency(htfDailyHigh) : 'N/A' },
+    { key: 'prev_daily_low', label: 'D-2 Low', value: prevDailyLow != null ? formatCurrency(prevDailyLow) : 'N/A' },
+    { key: 'prev_daily_high', label: 'D-2 High', value: prevDailyHigh != null ? formatCurrency(prevDailyHigh) : 'N/A' },
+    { key: 'prev_daily_mid', label: 'D-2 Mid', value: prevDailyMid != null ? formatCurrency(prevDailyMid) : 'N/A' },
+    { key: 'week_low', label: '5D High/Low Window Low', value: htf5dLow != null ? formatCurrency(htf5dLow) : 'N/A' },
+    { key: 'week_high', label: '5D High/Low Window High', value: htf5dHigh != null ? formatCurrency(htf5dHigh) : 'N/A' },
     { key: 'daily_atr', label: 'Daily ATR', value: dailyAtr != null ? formatNumber(dailyAtr, 2) : 'N/A' },
     { key: 'daily_range', label: 'Daily Range %', value: daysRangePct != null ? `${daysRangePct.toFixed(2)}%` : 'N/A' },
     {
@@ -1426,6 +1492,70 @@ function buildStructureRows(snapshot: Record<string, any> | null): StructureRow[
       valueClassName: rsi == null ? '' : (rsi >= 70 ? 'text-red-600' : (rsi <= 30 ? 'text-green-600' : '')),
     },
   ];
+
+  if (close != null) {
+    type LevelCandidate = {
+      key: string;
+      label: string;
+      price: number;
+      source: string;
+    };
+    const levelCandidates: LevelCandidate[] = [
+      { key: 'lvl_daily_low', label: 'D-1 Low', price: htfDailyLow ?? NaN, source: 'htf_daily_low' },
+      { key: 'lvl_prev_daily_low', label: 'D-2 Low', price: prevDailyLow ?? NaN, source: 'htf_prev_daily_low' },
+      { key: 'lvl_5d_low', label: '5D Window Low', price: htf5dLow ?? NaN, source: 'htf_5d_low' },
+      { key: 'lvl_prev_daily_mid', label: 'D-2 Mid', price: prevDailyMid ?? NaN, source: 'htf_prev_daily_mid' },
+      { key: 'lvl_daily_high', label: 'D-1 High', price: htfDailyHigh ?? NaN, source: 'htf_daily_high' },
+      { key: 'lvl_prev_daily_high', label: 'D-2 High', price: prevDailyHigh ?? NaN, source: 'htf_prev_daily_high' },
+      { key: 'lvl_5d_high', label: '5D Window High', price: htf5dHigh ?? NaN, source: 'htf_5d_high' },
+    ].filter((lvl) => Number.isFinite(lvl.price));
+
+    const supports = levelCandidates
+      .filter((lvl) => lvl.price <= close)
+      .sort((a, b) => b.price - a.price)
+      .slice(0, 3);
+    const resistances = levelCandidates
+      .filter((lvl) => lvl.price >= close)
+      .sort((a, b) => a.price - b.price)
+      .slice(0, 3);
+
+    const ladderRows = (items: LevelCandidate[], side: 'support' | 'resistance'): StructureRow[] => {
+      return items.map((lvl, idx) => {
+        const delta = lvl.price - close;
+        const deltaPct = close !== 0 ? (delta / close) * 100 : 0;
+        const deltaAtr = dailyAtr && dailyAtr > 0 ? delta / dailyAtr : null;
+        const distText = [
+          formatCurrency(lvl.price),
+          `${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%`,
+          deltaAtr != null ? `${deltaAtr >= 0 ? '+' : ''}${deltaAtr.toFixed(2)} ATR` : null,
+        ].filter(Boolean).join(' · ');
+
+        const className =
+          side === 'support'
+            ? 'text-green-700 dark:text-green-400'
+            : 'text-red-700 dark:text-red-400';
+
+        return {
+          key: `${side}_${idx + 1}_${lvl.key}`,
+          label: `${side === 'support' ? 'Support' : 'Resistance'} ${idx + 1} (${lvl.label})`,
+          value: distText,
+          valueClassName: className,
+        };
+      });
+    };
+
+    rows.push(...ladderRows(supports, 'support'));
+    if (resistances.length > 0) {
+      rows.push(...ladderRows(resistances, 'resistance'));
+    } else {
+      rows.push({
+        key: 'no_resistance',
+        label: 'Resistance (current anchor set)',
+        value: 'None above current price',
+        valueClassName: 'text-gray-500',
+      });
+    }
+  }
 
   return rows;
 }
@@ -1472,6 +1602,8 @@ interface CandlestickChartProps {
   trades: { timestamp: string; side: string; price: number }[];
   executions?: { ts: string; side: string; intent?: string; price: number; triggerId?: string }[];
   timeframe: string;
+  selectedCandleTime?: number | null;
+  onSelectCandle?: (time: number) => void;
   stopPrice: number | null;
   targetPrice: number | null;
   openPosition?: {
@@ -1555,7 +1687,17 @@ function recommendedPlanIntervalHours(timeframe: string): number | null {
   return null;
 }
 
-function CandlestickChart({ candles, trades, executions = [], timeframe, stopPrice, targetPrice, openPosition }: CandlestickChartProps) {
+function CandlestickChart({
+  candles,
+  trades,
+  executions = [],
+  timeframe,
+  selectedCandleTime = null,
+  onSelectCandle,
+  stopPrice,
+  targetPrice,
+  openPosition,
+}: CandlestickChartProps) {
   if (candles.length === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
@@ -1655,6 +1797,10 @@ function CandlestickChart({ candles, trades, executions = [], timeframe, stopPri
     <div className="space-y-2">
       <div className="flex items-center gap-4 text-[11px] text-gray-500">
         <span className="inline-flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full bg-indigo-500 inline-block" />
+          Click candle to bind structure snapshot
+        </span>
+        <span className="inline-flex items-center gap-1">
           <span className="w-3 h-0.5 bg-cyan-500 inline-block" />
           Entry marker
         </span>
@@ -1668,7 +1814,16 @@ function CandlestickChart({ candles, trades, executions = [], timeframe, stopPri
         </span>
       </div>
       <ResponsiveContainer width="100%" height={280}>
-        <ComposedChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ComposedChart
+          data={data}
+          margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
+          onClick={(state: any) => {
+            const clickedTime = state?.activePayload?.[0]?.payload?.time;
+            if (typeof clickedTime === 'number' && Number.isFinite(clickedTime)) {
+              onSelectCandle?.(clickedTime);
+            }
+          }}
+        >
         <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" strokeOpacity={0.4} />
         <XAxis
           dataKey="time"
@@ -1687,6 +1842,16 @@ function CandlestickChart({ candles, trades, executions = [], timeframe, stopPri
           tickLine={false}
         />
         <Tooltip content={<CustomTooltip />} />
+
+        {selectedCandleTime != null && (
+          <ReferenceLine
+            x={selectedCandleTime}
+            stroke="#6366f1"
+            strokeWidth={1.5}
+            strokeDasharray="3 2"
+            label={{ value: 'selected', fill: '#6366f1', fontSize: 10 }}
+          />
+        )}
 
         {/* Wick line (high-low) */}
         <Bar dataKey="wickRange" fill="transparent" stroke="transparent" barSize={1}>
