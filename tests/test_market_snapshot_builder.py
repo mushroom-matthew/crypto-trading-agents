@@ -12,6 +12,7 @@ from schemas.llm_strategist import (
     PortfolioState,
 )
 from schemas.market_snapshot import PolicySnapshot, TickSnapshot
+from schemas.structure_engine import LevelLadder, StructureLevel, StructureSnapshot
 from services.market_snapshot_builder import (
     build_policy_snapshot,
     build_tick_snapshot,
@@ -274,3 +275,196 @@ class TestBuildPolicySnapshot:
         llm_in = LLMInput(portfolio=_portfolio(), assets=[asset], risk_params={})
         snap = build_policy_snapshot(llm_in)
         assert snap.provenance.as_of_ts.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# R58 Structure Engine integration
+# ---------------------------------------------------------------------------
+
+def _make_structure_snapshot(
+    symbol: str = "BTC-USD",
+    snapshot_id: str = "struct-snap-001",
+    snapshot_hash: str = "a" * 64,
+    policy_priority: str | None = "high",
+) -> StructureSnapshot:
+    """Build a minimal StructureSnapshot for testing the builder integration."""
+    level = StructureLevel(
+        level_id=f"{symbol}|prior_session_high|1d|51000.0000",
+        snapshot_id=snapshot_id,
+        symbol=symbol,
+        as_of_ts=NOW,
+        price=51000.0,
+        source_timeframe="1d",
+        kind="prior_session_high",
+        source_label="D-1 High",
+        role_now="resistance",
+        distance_abs=1000.0,
+        distance_pct=2.0,
+        distance_atr=1.33,
+    )
+    ladder = LevelLadder(
+        source_timeframe="1d",
+        near_resistances=[level],
+    )
+    support_level = StructureLevel(
+        level_id=f"{symbol}|prior_session_low|1d|49000.0000",
+        snapshot_id=snapshot_id,
+        symbol=symbol,
+        as_of_ts=NOW,
+        price=49000.0,
+        source_timeframe="1d",
+        kind="prior_session_low",
+        source_label="D-1 Low",
+        role_now="support",
+        distance_abs=1000.0,
+        distance_pct=2.0,
+        distance_atr=1.33,
+    )
+    ladder_with_both = LevelLadder(
+        source_timeframe="1d",
+        near_supports=[support_level],
+        near_resistances=[level],
+    )
+    return StructureSnapshot(
+        snapshot_id=snapshot_id,
+        snapshot_hash=snapshot_hash,
+        symbol=symbol,
+        as_of_ts=NOW,
+        generated_at_ts=NOW,
+        source_timeframe="1h",
+        reference_price=50000.0,
+        levels=[level, support_level],
+        ladders={"1d": ladder_with_both},
+        policy_event_priority=policy_priority,
+    )
+
+
+class TestBuildTickSnapshotStructureIntegration:
+    """R58: build_tick_snapshot threads structure snapshot refs into TickSnapshot."""
+
+    def test_no_structure_snapshot_fields_are_none(self):
+        snap = build_tick_snapshot(_indicator())
+        assert snap.structure_snapshot_id is None
+        assert snap.structure_snapshot_hash is None
+
+    def test_structure_id_threaded(self):
+        struct = _make_structure_snapshot()
+        snap = build_tick_snapshot(_indicator(), structure_snapshot=struct)
+        assert snap.structure_snapshot_id == "struct-snap-001"
+
+    def test_structure_hash_threaded(self):
+        struct = _make_structure_snapshot(snapshot_hash="b" * 64)
+        snap = build_tick_snapshot(_indicator(), structure_snapshot=struct)
+        assert snap.structure_snapshot_hash == "b" * 64
+
+    def test_tick_snapshot_still_valid_without_structure(self):
+        snap = build_tick_snapshot(_indicator())
+        assert snap.close == 50000.0
+        assert snap.provenance.snapshot_kind == "tick"
+
+    def test_structure_snapshot_does_not_affect_hash(self):
+        """Structure refs are NOT included in the tick snapshot hash (provenance only)."""
+        ind = _indicator()
+        s1 = build_tick_snapshot(ind, bar_id="bar-001")
+        struct = _make_structure_snapshot()
+        s2 = build_tick_snapshot(ind, bar_id="bar-001", structure_snapshot=struct)
+        # Hash is computed from indicator data only — structure reference is additive
+        assert s1.provenance.snapshot_hash == s2.provenance.snapshot_hash
+
+
+class TestBuildPolicySnapshotStructureIntegration:
+    """R58: build_policy_snapshot threads structure refs into PolicySnapshot and DerivedSignalBlock."""
+
+    def test_no_structure_adds_structure_engine_to_missing_sections(self):
+        snap = build_policy_snapshot(_llm_input())
+        assert "structure_engine" in snap.quality.missing_sections
+
+    def test_with_structure_no_missing_section(self):
+        struct = _make_structure_snapshot()
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        assert "structure_engine" not in snap.quality.missing_sections
+
+    def test_structure_snapshot_id_on_policy_snapshot(self):
+        struct = _make_structure_snapshot(snapshot_id="struct-abc")
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        assert snap.structure_snapshot_id == "struct-abc"
+
+    def test_structure_snapshot_hash_on_policy_snapshot(self):
+        struct = _make_structure_snapshot(snapshot_hash="c" * 64)
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        assert snap.structure_snapshot_hash == "c" * 64
+
+    def test_structure_events_count_is_zero_when_no_events(self):
+        struct = _make_structure_snapshot()
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        assert snap.structure_events_count == 0
+
+    def test_structure_policy_priority_threaded(self):
+        struct = _make_structure_snapshot(policy_priority="high")
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        assert snap.structure_policy_priority == "high"
+
+    def test_structure_policy_priority_none_when_no_events(self):
+        struct = _make_structure_snapshot(policy_priority=None)
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        assert snap.structure_policy_priority is None
+
+    def test_derived_block_structure_snapshot_id(self):
+        struct = _make_structure_snapshot(snapshot_id="struct-xyz")
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        db = snap.derived["BTC-USD"]
+        assert db.structure_snapshot_id == "struct-xyz"
+
+    def test_derived_block_nearest_support_pct(self):
+        struct = _make_structure_snapshot()
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        db = snap.derived["BTC-USD"]
+        # support level is at 49000, ref is 50000 → distance_pct = 2.0
+        assert db.nearest_support_pct == pytest.approx(2.0)
+
+    def test_derived_block_nearest_resistance_pct(self):
+        struct = _make_structure_snapshot()
+        snap = build_policy_snapshot(
+            _llm_input(),
+            structure_snapshots={"BTC-USD": struct},
+        )
+        db = snap.derived["BTC-USD"]
+        # resistance level is at 51000, ref is 50000 → distance_pct = 2.0
+        assert db.nearest_resistance_pct == pytest.approx(2.0)
+
+    def test_derived_block_no_structure_gives_none_distances(self):
+        snap = build_policy_snapshot(_llm_input())
+        db = snap.derived["BTC-USD"]
+        assert db.nearest_support_pct is None
+        assert db.nearest_resistance_pct is None
+
+    def test_no_structure_policy_snapshot_refs_are_none(self):
+        snap = build_policy_snapshot(_llm_input())
+        assert snap.structure_snapshot_id is None
+        assert snap.structure_snapshot_hash is None
+        assert snap.structure_events_count is None
+        assert snap.structure_policy_priority is None

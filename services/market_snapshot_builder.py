@@ -2,6 +2,7 @@
 
 Runbook 49: Market Snapshot Definition.
 Runbook 55: Regime fingerprint — normalized_features now populated.
+Runbook 58: Structure engine — structure_snapshot_id/hash threaded into snapshots.
 
 Usage:
     tick = build_tick_snapshot(indicator_snapshot)
@@ -19,6 +20,13 @@ Runbook 55 integration:
 - normalized_features_version is set to the FINGERPRINT_VERSION constant, linking
   the PolicySnapshot to the R55 numeric vector contract.
 - memory_bundle remains deferred to Runbook 51.
+
+Runbook 58 integration:
+- build_tick_snapshot and build_policy_snapshot both accept an optional
+  structure_snapshot parameter.  When provided, snapshot_id and snapshot_hash
+  are threaded into the returned snapshot for R49 provenance linkage.
+- DerivedSignalBlock gains nearest_support_pct and nearest_resistance_pct
+  from the structure snapshot's level ladder.
 """
 from __future__ import annotations
 
@@ -43,6 +51,7 @@ from schemas.market_snapshot import (
 )
 from schemas.llm_strategist import IndicatorSnapshot, LLMInput
 from schemas.regime_fingerprint import FINGERPRINT_VERSION as _R55_FINGERPRINT_VERSION
+from schemas.structure_engine import StructureSnapshot
 from services.regime_transition_detector import (
     _compute_normalized_features as _r55_compute_normalized_features,
     build_normalized_features_dict,
@@ -103,6 +112,7 @@ def build_tick_snapshot(
     bar_id: Optional[str] = None,
     max_staleness_seconds: float = 300.0,
     parent_tick_snapshot_id: Optional[str] = None,
+    structure_snapshot: Optional[StructureSnapshot] = None,
 ) -> TickSnapshot:
     """Build a lightweight TickSnapshot from an IndicatorSnapshot.
 
@@ -111,6 +121,7 @@ def build_tick_snapshot(
         bar_id: Explicit bar key; auto-computed from symbol/timeframe/as_of when absent.
         max_staleness_seconds: Age threshold for the is_stale flag (default 5 min).
         parent_tick_snapshot_id: Optional link to a prior snapshot in a chain.
+        structure_snapshot: Optional R58 StructureSnapshot to embed as a reference.
     """
     now = _now_utc()
     as_of = indicator.as_of
@@ -170,6 +181,10 @@ def build_tick_snapshot(
     # Pull AssetState-derived fields from the indicator where available
     # trend_state / vol_state are on AssetState, not IndicatorSnapshot — skip here
 
+    # R58: embed structure snapshot reference
+    struct_id = structure_snapshot.snapshot_id if structure_snapshot else None
+    struct_hash = structure_snapshot.snapshot_hash if structure_snapshot else None
+
     return TickSnapshot(
         provenance=provenance,
         quality=quality,
@@ -181,6 +196,8 @@ def build_tick_snapshot(
         compression_flag=indicator.compression_flag,
         expansion_flag=indicator.expansion_flag,
         breakout_confirmed=indicator.breakout_confirmed,
+        structure_snapshot_id=struct_id,
+        structure_snapshot_hash=struct_hash,
     )
 
 
@@ -198,6 +215,7 @@ def build_policy_snapshot(
     max_staleness_seconds: float = 3600.0,
     memory_bundle_id: Optional[str] = None,
     memory_bundle_summary: Optional[str] = None,
+    structure_snapshots: Optional[Dict[str, StructureSnapshot]] = None,
 ) -> PolicySnapshot:
     """Build a PolicySnapshot from an LLMInput bundle.
 
@@ -216,6 +234,7 @@ def build_policy_snapshot(
         max_staleness_seconds: Staleness threshold (default 60 min).
         memory_bundle_id: Optional reference to a memory bundle (Runbook 51).
         memory_bundle_summary: Optional text summary of retrieved memory context.
+        structure_snapshots: Optional dict of {symbol: StructureSnapshot} for R58 integration.
     """
     now = _now_utc()
 
@@ -269,6 +288,24 @@ def build_policy_snapshot(
             except Exception:
                 logger.debug("R55 normalized_features build failed for %s — leaving empty", sym)
 
+        # R58: extract nearest support/resistance from structure snapshot for this symbol
+        struct_snap = (structure_snapshots or {}).get(sym)
+        struct_id: Optional[str] = struct_snap.snapshot_id if struct_snap else None
+        nearest_support_pct: Optional[float] = None
+        nearest_resistance_pct: Optional[float] = None
+        if struct_snap:
+            for tf in struct_snap.ladders.values():
+                all_sup = tf.near_supports + tf.mid_supports
+                all_res = tf.near_resistances + tf.mid_resistances
+                if all_sup:
+                    cand = min(all_sup, key=lambda l: l.distance_abs)
+                    if nearest_support_pct is None or cand.distance_pct < nearest_support_pct:
+                        nearest_support_pct = cand.distance_pct
+                if all_res:
+                    cand = min(all_res, key=lambda l: l.distance_abs)
+                    if nearest_resistance_pct is None or cand.distance_pct < nearest_resistance_pct:
+                        nearest_resistance_pct = cand.distance_pct
+
         derived[sym] = DerivedSignalBlock(
             trend_state=asset.trend_state,
             vol_state=asset.vol_state,
@@ -284,6 +321,9 @@ def build_policy_snapshot(
             ),
             normalized_features=norm_features,
             normalized_features_version=norm_version,
+            structure_snapshot_id=struct_id,
+            nearest_support_pct=nearest_support_pct,
+            nearest_resistance_pct=nearest_resistance_pct,
         )
 
     # Mark absent optional sections
@@ -296,6 +336,8 @@ def build_policy_snapshot(
         missing_sections.append("memory_bundle")
     if not any(d.normalized_features for d in derived.values()):
         missing_sections.append("normalized_features")  # populated by R55
+    if not structure_snapshots:
+        missing_sections.append("structure_engine")  # populated by R58 when active
 
     # Derivation log
     deriv_entries = [
@@ -347,6 +389,12 @@ def build_policy_snapshot(
         quality_warnings=quality.quality_warnings,
     )
 
+    # R58: derive aggregate structure metadata from all symbol structure snapshots
+    all_struct_snaps = list((structure_snapshots or {}).values())
+    primary_struct = all_struct_snaps[0] if all_struct_snaps else None
+    struct_events_count = sum(len(s.events) for s in all_struct_snaps) if all_struct_snaps else None
+    struct_policy_priority = primary_struct.policy_event_priority if primary_struct else None
+
     return PolicySnapshot(
         provenance=provenance,
         quality=quality,
@@ -363,4 +411,8 @@ def build_policy_snapshot(
         equity=llm_input.portfolio.equity,
         cash=llm_input.portfolio.cash,
         open_positions=sorted(llm_input.portfolio.positions.keys()),
+        structure_snapshot_id=primary_struct.snapshot_id if primary_struct else None,
+        structure_snapshot_hash=primary_struct.snapshot_hash if primary_struct else None,
+        structure_events_count=struct_events_count,
+        structure_policy_priority=struct_policy_priority,
     )
