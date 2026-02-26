@@ -37,13 +37,13 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - **Phase 5:** `[pending]` (`07`, `08` infra expansion not marked complete).
 - **Phase 6:** `[complete]` (`37`, `38`, `39`, `40`, `41`, `42`, `43`, `44`, `45` all implemented; R39 universe screener merged `b7c5d5f`, now in paper trading validation gate).
 - **Phase 7:** `[complete]` (`48` research budget runtime implemented `aa90202`; `46` template routing implemented `dc5bb98`; `47` hard template binding implemented `7f24256`; R46/R47 accuracy gates tracked via `GET /analytics/template-routing` during paper trading).
-- **Phase 8:** `[planning/docs]` (runbooks `49–56` and `58` are authored design contracts; code implementation not yet landed).
+- **Phase 8:** `[planning/docs]` (runbooks `49–56` and `58–60` are authored design contracts; code implementation not yet landed).
 
 ## Current Active Priorities (Git-Derived)
 - **Primary execution frontier:** **Start paper trading session** to validate Phase 6 (R39 screener + R40/42 templates). This is the gate for R46 and R47.
 - **Running in parallel:** **R48 research budget** is live — paper trading session should set `RESEARCH_BUDGET_FRACTION=0.10` and create an ExperimentSpec for at least one playbook (e.g. `bollinger_squeeze`) to begin accumulating validation evidence.
 - **Next implementation frontier:** **R46** (template routing, gated on R39 running in paper trading) → **R47** (hard binding, gated on R46 ≥ 80% accuracy).
-- **Then:** **Phase 8 (`49–56`, `58`)** reasoning-agent operating system contracts (currently docs-only).
+- **Then:** **Phase 8 (`49–56`, `58–60`)** reasoning-agent operating system contracts (currently docs-only).
 - **Parallel / optional tracks:** **Phase 5 (`07`, `08`)** infra expansion and **Runbook `19`** (`p_hat` integration, optional/reversible).
 
 ## Priority Runbooks (Numbered)
@@ -71,6 +71,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [56-structural-target-activation-refinement-enforcement.md](56-structural-target-activation-refinement-enforcement.md): Deterministic enforcement layer between playbook schema and trigger engine — compiler validation for structural target candidate selection (expectancy gate telemetry) and activation refinement mode -> trigger identifier/timeframe/confirmation mapping. `[docs-only runbook]`
 - [58-deterministic-structure-engine-and-context-exposure.md](58-deterministic-structure-engine-and-context-exposure.md): Deterministic structure engine (`StructureSnapshot`, levels, ladders, structural events) as reusable context for policy reassessment triggers and deterministic entry/stop/target selection, with user-visible ops/UI exposure. `[docs-only runbook]`
 - [59-directional-bias-templates.md](59-directional-bias-templates.md): Explicit long/short directional bias across all strategy hypotheses — deterministic `price_position_in_range` metric drives direction routing in the screener; 6 new directional vector store docs and prompt templates (`compression_breakout_long/short`, `volatile_breakout_long/short`, `range_long/short`); trigger compiler enforces mandatory target for directional templates and rejects cross-direction identifiers; direction badge surfaced in screener UI groups. Closes "Not Set" target gap structurally. `[docs-only runbook]`
+- [60-precommitted-exit-contracts-and-portfolio-meta-risk-overlay.md](60-precommitted-exit-contracts-and-portfolio-meta-risk-overlay.md): Precommitted `PositionExitContract` at entry (stop/targets/time exit/allowed amendments) plus deterministic `PortfolioMetaRiskPolicy` for portfolio-level risk reduction and reallocation. Separates normal strategy exits from portfolio overlay actions and emergency exits; removes weak non-emergency `direction="exit"` flatten semantics. `[docs-only runbook]`
 - ~~04-emergency-exit-runbook-hold-cooldown.md~~: Min-hold and cooldown enforcement. → Completed, see [X-emergency-exit-runbook-hold-cooldown.md](X-emergency-exit-runbook-hold-cooldown.md).
 - ~~05-emergency-exit-runbook-bypass-override.md~~: Bypass and override behavior. → Completed, see [X-emergency-exit-runbook-bypass-override.md](X-emergency-exit-runbook-bypass-override.md).
 - ~~06-emergency-exit-runbook-edge-cases.md~~: Emergency-exit edge cases. → Completed, see [X-emergency-exit-runbook-edge-cases.md](X-emergency-exit-runbook-edge-cases.md).
@@ -251,7 +252,7 @@ codebase's existing strategist/judge architecture. The key framing is architectu
 we are not adding a new pretrained "foundation model"; we are upgrading the agent
 system around multimodal inputs, reflection, memory, and evidence gating.
 
-**Phase 8 status (2026-02-22):** Runbooks **49–56 and 58 are authored design contracts (`docs/branching/*.md`) but are not yet implemented in code** unless/until explicitly marked `✅ implemented` in this README or moved to `X-*`. This note applies to **Phase 8 runbooks only** (see the git-derived snapshot above for overall project progress).
+**Phase 8 status (2026-02-22):** Runbooks **49–56 and 58–60 are authored design contracts (`docs/branching/*.md`) but are not yet implemented in code** unless/until explicitly marked `✅ implemented` in this README or moved to `X-*`. This note applies to **Phase 8 runbooks only** (see the git-derived snapshot above for overall project progress).
 
 **Stratum G — Inputs + memory substrate (ship first):**
 31. **49**: `MarketSnapshot` definition (single source of truth for every reasoning tick) `[docs-only]`
@@ -262,11 +263,12 @@ system around multimodal inputs, reflection, memory, and evidence gating.
 **Stratum H — Decision structure + reflection (after Stratum G):**
 35. **52**: Typed playbook definition with regime tags + expectation distributions `[docs-only]`
 36. **56**: Structural target + activation refinement enforcement (compiler + deterministic mapping layer) `[docs-only]`
-37. **50**: Dual reflection templates (policy-level fast reflection, high-level batch review) `[docs-only]`
-38. **53**: Judge validation rules with memory-backed rejection criteria `[docs-only]`
+37. **60**: Precommitted exit contracts + portfolio meta-risk overlay (position-level exit contract at entry; deterministic portfolio-level trims/reallocation separate from strategy exits) `[docs-only]`
+38. **50**: Dual reflection templates (policy-level fast reflection, high-level batch review) `[docs-only]`
+39. **53**: Judge validation rules with memory-backed rejection criteria `[docs-only]`
 
 **Stratum I — Operations control plane (after Stratum H starts landing):**
-39. **54**: Reasoning-agent cadence rules (three-tier scheduling, policy triggers/heartbeats, slow-loop thresholds) `[docs-only]`
+40. **54**: Reasoning-agent cadence rules (three-tier scheduling, policy triggers/heartbeats, slow-loop thresholds) `[docs-only]`
 
 > **Why this order:** `MarketSnapshot` (49) establishes normalized inputs, but policy-loop
 > cadence is only trustworthy once the deterministic regime transition detector (55)
@@ -276,8 +278,10 @@ system around multimodal inputs, reflection, memory, and evidence gating.
 > then uses that normalized regime/structure context for contrastive evidence. Typed
 > playbooks (52) provide the constrained proposal surface and expectation distributions
 > (holding time, MAE/MFE). Runbook 56 hardens the deterministic enforcement layer between
-> playbook schema and trigger engine (structural target selection + refinement mode mapping)
-> before reflection/judge layers rely on it. Dual reflection (50) and judge validation (53)
+> playbook schema and trigger engine (structural target selection + refinement mode mapping).
+> Runbook 60 then converts those predeclared exits into a persisted position-level execution
+> contract and cleanly separates portfolio-level de-risking/reallocation into deterministic
+> overlay policy actions before reflection/judge layers rely on the behavior. Dual reflection (50) and judge validation (53)
 > come after those inputs and enforcement contracts exist, otherwise they degrade into
 > prompt-only rituals. Cadence rules (54) are codified after the transition detector and
 > policy-loop triggers are concretely defined.
