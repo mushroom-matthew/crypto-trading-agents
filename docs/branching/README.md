@@ -37,7 +37,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - **Phase 5:** `[pending]` (`07`, `08` infra expansion not marked complete).
 - **Phase 6:** `[complete]` (`37`, `38`, `39`, `40`, `41`, `42`, `43`, `44`, `45` all implemented; R39 universe screener merged `b7c5d5f`, now in paper trading validation gate).
 - **Phase 7:** `[complete]` (`48` research budget runtime implemented `aa90202`; `46` template routing implemented `dc5bb98`; `47` hard template binding implemented `7f24256`; R46/R47 accuracy gates tracked via `GET /analytics/template-routing` during paper trading).
-- **Phase 8:** `[partial]` (R49 ✅, R51 ✅, R55 ✅, R58 ✅ implemented; R50, R52–54, R56, R59, R60 are authored design contracts not yet implemented).
+- **Phase 8:** `[partial]` (R49 ✅, R51 ✅, R52 ✅, R55 ✅, R58 ✅ implemented; R50, R53, R54, R56, R59, R60 are authored design contracts not yet implemented).
 
 ## Current Active Priorities (Git-Derived)
 - **Primary execution frontier:** **Start paper trading session** to validate Phase 6 (R39 screener + R40/42 templates). This is the gate for R46 and R47.
@@ -64,7 +64,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [49-market-snapshot-definition.md](49-market-snapshot-definition.md): Multimodal `MarketSnapshot` contract (numerical + derived + text + visual encodings) as the single source of truth for strategist/judge invocations. Enforces timestamped provenance, normalization, staleness checks, and snapshot hashing. `✅ implemented`
 - [50-dual-reflection-templates.md](50-dual-reflection-templates.md): Dual-level reflection framework — fast policy-loop reflection (event-driven coherence/invariants/memory-check) plus scheduled high-level reflection (batch outcomes, regime drift, playbook updates), with deterministic tick-level validation kept separate from LLM reflection. `[docs-only runbook]`
 - [51-memory-store-diversified-retrieval.md](51-memory-store-diversified-retrieval.md): Diversified episode memory store and contrastive retrieval (`wins`, `losses`, `failure_modes`) for strategist and judge grounding. Builds on Signal Ledger outcome data and adds regime fingerprints + playbook metadata. `✅ implemented`
-- [52-playbook-definition-regime-tags.md](52-playbook-definition-regime-tags.md): Typed playbook schema with regime eligibility, entry/invalidation rules, stop/target logic, time-horizon expectations, and historical stats (including holding-time/MAE/MFE distributions). Strategist selects playbook first, then instantiates a plan. `[docs-only runbook]`
+- [52-playbook-definition-regime-tags.md](52-playbook-definition-regime-tags.md): Typed playbook schema with regime eligibility, entry/invalidation rules, stop/target logic, time-horizon expectations, and historical stats (including holding-time/MAE/MFE distributions). Strategist selects playbook first, then instantiates a plan. `✅ implemented`
 - [53-judge-validation-rules-memory-evidence.md](53-judge-validation-rules-memory-evidence.md): Judge loop upgrade from risk-only checks to evidence-based validation using memory failure patterns and cluster evidence; explicit revise/reject criteria for unsupported or overconfident strategist proposals. `[docs-only runbook]`
 - [54-reasoning-agent-cadence-rules.md](54-reasoning-agent-cadence-rules.md): Central cadence runbook for a three-tier model (deterministic tick engine, event-driven policy loop, slow structural learning loop), including policy heartbeats/triggers, reflection cadence, and slow-loop scheduling. `[docs-only runbook]`
 - [55-regime-fingerprint-transition-detector.md](55-regime-fingerprint-transition-detector.md): Deterministic regime fingerprint + transition detector (bounded, decomposable distance + asymmetric hysteresis + HTF-close gating) that emits `regime_state_changed` policy events and drives policy-loop cadence without per-tick LLM calls. `✅ implemented`
@@ -261,7 +261,7 @@ system around multimodal inputs, reflection, memory, and evidence gating.
 34. **51**: Diversified memory store + retrieval (wins/losses/failure-modes) `✅ implemented`
 
 **Stratum H — Decision structure + reflection (after Stratum G):**
-35. **52**: Typed playbook definition with regime tags + expectation distributions `[docs-only]`
+35. **52**: Typed playbook definition with regime tags + expectation distributions `✅ implemented`
 36. **56**: Structural target + activation refinement enforcement (compiler + deterministic mapping layer) `[docs-only]`
 37. **60**: Precommitted exit contracts + portfolio meta-risk overlay (position-level exit contract at entry; deterministic portfolio-level trims/reallocation separate from strategy exits) `[docs-only]`
 38. **50**: Dual reflection templates (policy-level fast reflection, high-level batch review) `[docs-only]`
