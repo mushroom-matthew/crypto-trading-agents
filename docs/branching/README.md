@@ -37,7 +37,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - **Phase 5:** `[pending]` (`07`, `08` infra expansion not marked complete).
 - **Phase 6:** `[complete]` (`37`, `38`, `39`, `40`, `41`, `42`, `43`, `44`, `45` all implemented; R39 universe screener merged `b7c5d5f`, now in paper trading validation gate).
 - **Phase 7:** `[complete]` (`48` research budget runtime implemented `aa90202`; `46` template routing implemented `dc5bb98`; `47` hard template binding implemented `7f24256`; R46/R47 accuracy gates tracked via `GET /analytics/template-routing` during paper trading).
-- **Phase 8:** `[partial]` (R49 ✅, R55 ✅, R58 ✅ implemented; R50–54, R56, R59, R60 are authored design contracts not yet implemented).
+- **Phase 8:** `[partial]` (R49 ✅, R51 ✅, R55 ✅, R58 ✅ implemented; R50, R52–54, R56, R59, R60 are authored design contracts not yet implemented).
 
 ## Current Active Priorities (Git-Derived)
 - **Primary execution frontier:** **Start paper trading session** to validate Phase 6 (R39 screener + R40/42 templates). This is the gate for R46 and R47.
@@ -63,7 +63,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [57-screener-timeframe-threading.md](57-screener-timeframe-threading.md): Thread screener `expected_hold_timeframe` from "Use" button through session config → `fetch_indicator_snapshots_activity` → LLM prompt. Fixes mismatch where 1m screener candidates produce 1h triggers. Adds `indicator_timeframe` field to session config; extends `recommendedPlanIntervalHours` for 1m/5m. `✅ implemented`
 - [49-market-snapshot-definition.md](49-market-snapshot-definition.md): Multimodal `MarketSnapshot` contract (numerical + derived + text + visual encodings) as the single source of truth for strategist/judge invocations. Enforces timestamped provenance, normalization, staleness checks, and snapshot hashing. `✅ implemented`
 - [50-dual-reflection-templates.md](50-dual-reflection-templates.md): Dual-level reflection framework — fast policy-loop reflection (event-driven coherence/invariants/memory-check) plus scheduled high-level reflection (batch outcomes, regime drift, playbook updates), with deterministic tick-level validation kept separate from LLM reflection. `[docs-only runbook]`
-- [51-memory-store-diversified-retrieval.md](51-memory-store-diversified-retrieval.md): Diversified episode memory store and contrastive retrieval (`wins`, `losses`, `failure_modes`) for strategist and judge grounding. Builds on Signal Ledger outcome data and adds regime fingerprints + playbook metadata. `[docs-only runbook]`
+- [51-memory-store-diversified-retrieval.md](51-memory-store-diversified-retrieval.md): Diversified episode memory store and contrastive retrieval (`wins`, `losses`, `failure_modes`) for strategist and judge grounding. Builds on Signal Ledger outcome data and adds regime fingerprints + playbook metadata. `✅ implemented`
 - [52-playbook-definition-regime-tags.md](52-playbook-definition-regime-tags.md): Typed playbook schema with regime eligibility, entry/invalidation rules, stop/target logic, time-horizon expectations, and historical stats (including holding-time/MAE/MFE distributions). Strategist selects playbook first, then instantiates a plan. `[docs-only runbook]`
 - [53-judge-validation-rules-memory-evidence.md](53-judge-validation-rules-memory-evidence.md): Judge loop upgrade from risk-only checks to evidence-based validation using memory failure patterns and cluster evidence; explicit revise/reject criteria for unsupported or overconfident strategist proposals. `[docs-only runbook]`
 - [54-reasoning-agent-cadence-rules.md](54-reasoning-agent-cadence-rules.md): Central cadence runbook for a three-tier model (deterministic tick engine, event-driven policy loop, slow structural learning loop), including policy heartbeats/triggers, reflection cadence, and slow-loop scheduling. `[docs-only runbook]`
@@ -258,7 +258,7 @@ system around multimodal inputs, reflection, memory, and evidence gating.
 31. **49**: `MarketSnapshot` definition (single source of truth for every reasoning tick) `[docs-only]`
 32. **55**: Deterministic regime fingerprint + transition detector (policy-loop trigger keystone) `[docs-only]`
 33. **58**: Deterministic structure engine + context exposure (levels/ladders/events for reassessment + entry/stop/target integration) `✅ implemented`
-34. **51**: Diversified memory store + retrieval (wins/losses/failure-modes) `[docs-only]`
+34. **51**: Diversified memory store + retrieval (wins/losses/failure-modes) `✅ implemented`
 
 **Stratum H — Decision structure + reflection (after Stratum G):**
 35. **52**: Typed playbook definition with regime tags + expectation distributions `[docs-only]`
