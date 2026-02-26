@@ -138,6 +138,11 @@ class DerivedSignalBlock(BaseModel):
     normalized_features: Dict[str, float] = Field(default_factory=dict)
     normalized_features_version: Optional[str] = None  # links to R55 fingerprint contract
 
+    # Structure engine reference (R58)
+    structure_snapshot_id: Optional[str] = None      # links to StructureSnapshot
+    nearest_support_pct: Optional[float] = None       # distance_pct of nearest support
+    nearest_resistance_pct: Optional[float] = None    # distance_pct of nearest resistance
+
 
 class TextSignalDigest(BaseModel):
     """Summarized, timestamped text context.  Raw news is NOT stored here."""
@@ -196,6 +201,10 @@ class TickSnapshot(BaseModel):
     trend_state: Optional[Literal["uptrend", "downtrend", "sideways"]] = None
     vol_state: Optional[Literal["low", "normal", "high", "extreme"]] = None
 
+    # Structure engine reference (R58)
+    structure_snapshot_id: Optional[str] = None      # links to StructureSnapshot
+    structure_snapshot_hash: Optional[str] = None    # audit — should match StructureSnapshot.snapshot_hash
+
 
 # ---------------------------------------------------------------------------
 # PolicySnapshot — event-driven policy loop
@@ -238,6 +247,12 @@ class PolicySnapshot(BaseModel):
     equity: Optional[float] = None
     cash: Optional[float] = None
     open_positions: List[str] = Field(default_factory=list)
+
+    # Structure engine reference (R58)
+    structure_snapshot_id: Optional[str] = None      # links to StructureSnapshot
+    structure_snapshot_hash: Optional[str] = None    # audit
+    structure_events_count: Optional[int] = None     # number of structural events detected
+    structure_policy_priority: Optional[str] = None  # "low"|"medium"|"high" from structure engine
 
 
 # ---------------------------------------------------------------------------

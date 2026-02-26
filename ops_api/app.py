@@ -31,6 +31,7 @@ from ops_api.schemas import (
 from ops_api.materializer import Materializer
 from ops_api.routers import agents, backtests, live, market, wallets, prompts, paper_trading, regimes, signals as signals_router, screener, research as research_router
 from ops_api.routers import analytics as analytics_router
+from ops_api.routers import structure as structure_router
 from ops_api.websocket_manager import manager as ws_manager
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
@@ -121,6 +122,7 @@ app.include_router(signals_router.router)
 app.include_router(screener.router)
 app.include_router(research_router.router)
 app.include_router(analytics_router.router)
+app.include_router(structure_router.router)
 
 
 # Legacy endpoints (for backward compatibility)
