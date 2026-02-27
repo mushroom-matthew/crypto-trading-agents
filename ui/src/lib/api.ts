@@ -323,6 +323,7 @@ export interface ScreenerRecommendationItem {
   rank_global: number;
   rank_in_group: number;
   score_components?: Record<string, any>;
+  direction_bias?: 'long' | 'short' | 'neutral';
 }
 
 export interface ScreenerRecommendationGroup {
@@ -332,6 +333,7 @@ export interface ScreenerRecommendationGroup {
   label: string;
   rationale: string;
   recommendations: ScreenerRecommendationItem[];
+  direction_bias?: 'long' | 'short' | 'neutral';
 }
 
 export interface ScreenerRecommendationBatch {
@@ -706,6 +708,7 @@ export interface PaperTradingSessionConfig {
   strategy_id?: string;
   plan_interval_hours?: number;
   indicator_timeframe?: string;  // OHLCV timeframe for indicator fetch and trigger generation
+  direction_bias?: string;  // 'long' | 'short' | 'neutral' — from screener candidate
   replan_on_day_boundary?: boolean;
   enable_symbol_discovery?: boolean;
   min_volume_24h?: number;

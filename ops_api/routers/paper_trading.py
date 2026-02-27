@@ -92,6 +92,15 @@ class PaperTradingSessionConfig(BaseModel):
         ),
     )
 
+    direction_bias: str = Field(
+        default="neutral",
+        description=(
+            "Directional bias for the session: 'long', 'short', or 'neutral'. "
+            "Injected as a direction hint into the LLM prompt when non-neutral. "
+            "Sourced from screener candidate direction_bias."
+        ),
+    )
+
     @field_validator("indicator_timeframe")
     @classmethod
     def validate_indicator_timeframe(cls, v: str) -> str:
@@ -101,6 +110,14 @@ class PaperTradingSessionConfig(BaseModel):
                 f"indicator_timeframe '{v}' is not supported by Coinbase. "
                 f"Allowed values: {sorted(allowed)}"
             )
+        return v
+
+    @field_validator("direction_bias")
+    @classmethod
+    def validate_direction_bias(cls, v: str) -> str:
+        allowed = {"long", "short", "neutral"}
+        if v not in allowed:
+            raise ValueError(f"direction_bias '{v}' invalid. Allowed: {sorted(allowed)}")
         return v
 
     replan_on_day_boundary: Optional[bool] = Field(
@@ -498,6 +515,8 @@ async def start_session(config: PaperTradingSessionConfig):
             "research_budget_enabled": config.research_budget_enabled,
             "research_budget_fraction": config.research_budget_fraction,
             "research_max_loss_pct": config.research_max_loss_pct,
+            # R59: directional bias
+            "direction_bias": config.direction_bias,
         }
 
         # Start workflow

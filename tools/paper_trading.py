@@ -95,6 +95,11 @@ class PaperTradingConfig(BaseModel):
         ),
     )
 
+    direction_bias: str = Field(
+        default="neutral",
+        description="Directional bias for the session: 'long', 'short', or 'neutral'.",
+    )
+
     @field_validator("indicator_timeframe")
     @classmethod
     def validate_indicator_timeframe(cls, v: str) -> str:
@@ -127,6 +132,7 @@ class SessionState(BaseModel):
     strategy_prompt: Optional[str]
     plan_interval_hours: float
     indicator_timeframe: str = "1h"
+    direction_bias: str = "neutral"
     replan_on_day_boundary: bool = True
     current_plan: Optional[Dict[str, Any]] = None
     last_plan_time: Optional[str] = None
@@ -165,6 +171,7 @@ async def generate_strategy_plan_activity(
     session_id: Optional[str] = None,
     repair_instructions: Optional[str] = None,
     indicator_timeframe: Optional[str] = None,
+    direction_bias: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate a strategy plan using the LLM client.
 
@@ -254,6 +261,16 @@ async def generate_strategy_plan_activity(
     )
     effective_prompt = (effective_prompt or "") + timeframe_hint
 
+    # R59: Inject direction bias hint so the LLM generates direction-aligned triggers
+    _dir = (direction_bias or "neutral").strip().lower()
+    if _dir in {"long", "short"}:
+        _dir_str = "LONG (upside breakout / buy)" if _dir == "long" else "SHORT (downside break / sell)"
+        effective_prompt += (
+            f"\nDIRECTION: {_dir_str}. All entry triggers must align with this direction. "
+            f"Do NOT generate entry triggers for the opposite direction.\n"
+            f"REQUIRED: Every entry trigger must specify a target_anchor_type or numeric target_price_abs.\n"
+        )
+
     llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
     try:
         plan = llm_client.generate_plan(
@@ -278,6 +295,7 @@ async def generate_strategy_plan_activity(
             session_id=session_id,
             repair_instructions=_missing_stop_repair_instructions(str(exc)),
             indicator_timeframe=indicator_timeframe,
+            direction_bias=direction_bias,
         )
 
     plan_dict = plan.model_dump()
@@ -749,6 +767,7 @@ class PaperTradingWorkflow:
         self.strategy_prompt: Optional[str] = None
         self.plan_interval_hours: float = DEFAULT_PLAN_INTERVAL_HOURS
         self.indicator_timeframe: str = "1h"
+        self.direction_bias: str = "neutral"
         self.replan_on_day_boundary: bool = True
         self.current_plan: Optional[Dict[str, Any]] = None
         self.last_plan_time: Optional[datetime] = None
@@ -1088,6 +1107,7 @@ class PaperTradingWorkflow:
             self.strategy_prompt = parsed_config.strategy_prompt
             self.plan_interval_hours = parsed_config.plan_interval_hours
             self.indicator_timeframe = parsed_config.indicator_timeframe
+            self.direction_bias = parsed_config.direction_bias
             self.replan_on_day_boundary = parsed_config.replan_on_day_boundary
             self.enable_symbol_discovery = parsed_config.enable_symbol_discovery
             self.min_volume_24h = parsed_config.min_volume_24h
@@ -1342,6 +1362,7 @@ class PaperTradingWorkflow:
                 self.session_id,
                 None,  # repair_instructions
                 self.indicator_timeframe,
+                self.direction_bias,
             ],
             schedule_to_close_timeout=timedelta(minutes=5),
             retry_policy=RetryPolicy(maximum_attempts=2),
@@ -1368,6 +1389,7 @@ class PaperTradingWorkflow:
                     self.session_id,
                     _validation.repair_prompt(),  # repair_instructions
                     self.indicator_timeframe,
+                    self.direction_bias,
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -2061,6 +2083,7 @@ class PaperTradingWorkflow:
             strategy_prompt=self.strategy_prompt,
             plan_interval_hours=self.plan_interval_hours,
             indicator_timeframe=self.indicator_timeframe,
+            direction_bias=self.direction_bias,
             replan_on_day_boundary=self.replan_on_day_boundary,
             current_plan=self.current_plan,
             last_plan_time=self.last_plan_time.isoformat() if self.last_plan_time else None,
@@ -2089,6 +2112,7 @@ class PaperTradingWorkflow:
         self.strategy_prompt = parsed.strategy_prompt
         self.plan_interval_hours = parsed.plan_interval_hours
         self.indicator_timeframe = parsed.indicator_timeframe
+        self.direction_bias = parsed.direction_bias
         self.replan_on_day_boundary = parsed.replan_on_day_boundary
         self.current_plan = parsed.current_plan
         self.last_plan_time = datetime.fromisoformat(parsed.last_plan_time) if parsed.last_plan_time else None

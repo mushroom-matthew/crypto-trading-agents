@@ -809,6 +809,7 @@ class PlanEnforcementResult:
     exit_rule_sanitizations: List[ExitRuleSanitization] = field(default_factory=list)
     template_violations: List[TemplateViolation] = field(default_factory=list)
     refinement_violations: List[RefinementModeViolation] = field(default_factory=list)  # R56
+    directional_violations: List[TemplateViolation] = field(default_factory=list)  # R59
 
     @property
     def total_corrections(self) -> int:
@@ -819,6 +820,7 @@ class PlanEnforcementResult:
             + len(self.exit_rule_sanitizations)
             + len(self.template_violations)
             + len(self.refinement_violations)
+            + len(self.directional_violations)
         )
 
 
@@ -1271,6 +1273,95 @@ def enforce_template_identifiers(
     return violations
 
 
+# R59: directional template name → long/short/neutral
+_DIRECTIONAL_LONG_TEMPLATES: frozenset[str] = frozenset({
+    "compression_breakout_long",
+    "volatile_breakout_long",
+    "range_long",
+    "bull_trending",
+})
+_DIRECTIONAL_SHORT_TEMPLATES: frozenset[str] = frozenset({
+    "compression_breakout_short",
+    "volatile_breakout_short",
+    "range_short",
+    "bear_defensive",
+})
+# Cross-direction identifiers: usage in the wrong template direction is a violation.
+# Key = identifier, Value = the direction it implies (it is forbidden in the opposite direction).
+_CROSS_DIRECTION_INDICATORS: dict[str, str] = {
+    "donchian_lower_short": "short",   # forbidden in long templates (stop for shorts)
+    "donchian_upper_short": "long",    # forbidden in short templates (stop for longs)
+    "bollinger_lower": "short",        # forbidden in long templates
+    "bollinger_upper": "long",         # forbidden in short templates
+}
+
+
+def _get_template_direction(template_id: str | None) -> str:
+    """Return 'long', 'short', or 'neutral' for a given template_id."""
+    if not template_id:
+        return "neutral"
+    if template_id in _DIRECTIONAL_LONG_TEMPLATES:
+        return "long"
+    if template_id in _DIRECTIONAL_SHORT_TEMPLATES:
+        return "short"
+    return "neutral"
+
+
+def enforce_directional_target_requirement(
+    plan: StrategyPlan,
+) -> List[TemplateViolation]:
+    """R59: Entry triggers in directional templates must declare a target.
+
+    Returns violations; does NOT mutate plan.triggers.
+    Emergency exits are exempt. Entry triggers are identified by direction in {"long", "short"}.
+    """
+    template_id = plan.template_id
+    direction = _get_template_direction(template_id)
+    if direction not in {"long", "short"}:
+        return []
+
+    violations: List[TemplateViolation] = []
+    for trigger in plan.triggers:
+        if trigger.category == "emergency_exit":
+            continue
+        if trigger.direction not in {"long", "short"}:
+            continue
+        has_target = bool(getattr(trigger, "target_anchor_type", None))
+        if not has_target:
+            violations.append(TemplateViolation(
+                trigger_id=trigger.id,
+                template_id=template_id or "unknown",
+                violations=[
+                    f"missing_target_for_directional_template: entry trigger in "
+                    f"'{template_id}' ({direction}) must declare target_anchor_type"
+                ],
+            ))
+
+    # Also check for cross-direction identifiers in entry/hold rules
+    for trigger in plan.triggers:
+        if trigger.category == "emergency_exit":
+            continue
+        cross: List[str] = []
+        for expr in (trigger.entry_rule, trigger.hold_rule):
+            if not expr:
+                continue
+            for ident, ident_direction in _CROSS_DIRECTION_INDICATORS.items():
+                if ident in expr:
+                    # long template must not reference short-specific identifiers
+                    if direction == "long" and ident_direction == "short":
+                        cross.append(f"cross_direction_identifier: '{ident}' is short-specific, forbidden in long template '{template_id}'")
+                    elif direction == "short" and ident_direction == "long":
+                        cross.append(f"cross_direction_identifier: '{ident}' is long-specific, forbidden in short template '{template_id}'")
+        if cross:
+            violations.append(TemplateViolation(
+                trigger_id=trigger.id,
+                template_id=template_id or "unknown",
+                violations=cross,
+            ))
+
+    return violations
+
+
 def enforce_refinement_mode_mapping(
     plan: StrategyPlan,
 ) -> List[RefinementModeViolation]:
@@ -1402,6 +1493,16 @@ def enforce_plan_quality(
             v.trigger_id,
             v.template_id,
             v.violations,
+        )
+
+    # R59: Directional target requirement + cross-direction identifier enforcement.
+    result.directional_violations = enforce_directional_target_requirement(plan)
+    for dv in result.directional_violations:
+        logger.warning(
+            "Trigger '%s' [directional_violation] template='%s' violations=%s",
+            dv.trigger_id,
+            dv.template_id,
+            dv.violations,
         )
 
     # R56: Refinement mode enforcement — validates activation_refinement_mode against triggers.
