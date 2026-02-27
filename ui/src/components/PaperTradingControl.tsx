@@ -34,6 +34,7 @@ export function PaperTradingControl() {
   const [selectedStrategyId, setSelectedStrategyId] = useState('default');
   const [planIntervalHours, setPlanIntervalHours] = useState(4);
   const [indicatorTimeframe, setIndicatorTimeframe] = useState<string>('1h');
+  const [directionBias, setDirectionBias] = useState<string>('neutral');
   const [enableDiscovery, setEnableDiscovery] = useState(false);
   const [annotateScreenerShortlist, setAnnotateScreenerShortlist] = useState(false);
 
@@ -240,6 +241,7 @@ export function PaperTradingControl() {
         strategy_prompt: strategyPrompt,
         plan_interval_hours: planIntervalHours,
         indicator_timeframe: indicatorTimeframe,
+        direction_bias: directionBias,
         enable_symbol_discovery: enableDiscovery,
         exit_binding_mode: 'category',
         // Aggressive trading settings
@@ -289,6 +291,9 @@ export function PaperTradingControl() {
       setPlanIntervalHours(interval);
     }
     setIndicatorTimeframe(item.expected_hold_timeframe);
+    if (item.direction_bias) {
+      setDirectionBias(item.direction_bias);
+    }
   };
   const selectedPositionMeta = portfolio?.position_meta?.[chartSymbol];
   const selectedPositionQty = portfolio?.positions?.[chartSymbol] ?? 0;
@@ -462,7 +467,7 @@ export function PaperTradingControl() {
                   <div className="grid grid-cols-1 gap-3 max-h-96 overflow-y-auto pr-1">
                     {screenerPreflight.shortlist.groups.map((group) => (
                       <div
-                        key={`${group.hypothesis}:${group.timeframe}`}
+                        key={`${group.hypothesis}:${group.direction_bias ?? 'neutral'}:${group.timeframe}`}
                         className="rounded-lg border border-sky-200/80 dark:border-sky-800 p-3 bg-white/70 dark:bg-gray-900/30"
                       >
                         <div className="flex items-start justify-between gap-3">
@@ -475,6 +480,16 @@ export function PaperTradingControl() {
                               <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300 font-mono">
                                 {group.timeframe}
                               </span>
+                              {group.direction_bias && group.direction_bias !== 'neutral' && (
+                                <span className={cn(
+                                  'text-[11px] px-1.5 py-0.5 rounded font-semibold',
+                                  group.direction_bias === 'long'
+                                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                                    : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                                )}>
+                                  {group.direction_bias === 'long' ? '↑ Long' : '↓ Short'}
+                                </span>
+                              )}
                             </div>
                             <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
                               {group.rationale}

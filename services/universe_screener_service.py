@@ -333,14 +333,19 @@ class UniverseScreenerService:
         """Group shortlist candidates by supported strategy hypothesis + timeframe."""
         limit = max_per_group or self._max_recommendations_per_group()
         ranked = sorted(result.top_candidates, key=lambda c: c.composite_score, reverse=True)
-        grouped: dict[tuple[str, str], list[InstrumentRecommendationItem]] = {}
-        grouped_symbols: dict[tuple[str, str], set[str]] = {}
-        group_order: list[tuple[str, str]] = []
+        grouped: dict[tuple[str, str, str], list[InstrumentRecommendationItem]] = {}
+        grouped_symbols: dict[tuple[str, str, str], set[str]] = {}
+        group_order: list[tuple[str, str, str]] = []
 
         for idx, candidate in enumerate(ranked, start=1):
             hypothesis = self._candidate_hypothesis(candidate)
             timeframe = self._candidate_hold_timeframe(candidate, hypothesis)
-            key = (hypothesis, timeframe)
+            direction = str(candidate.direction_bias or "neutral")
+            # R59: range_mean_revert with neutral direction → reroute to uncertain_wait (no trade)
+            if hypothesis == "range_mean_revert" and direction == "neutral":
+                hypothesis = "uncertain_wait"
+                direction = "neutral"
+            key = (hypothesis, direction, timeframe)
             if key not in grouped:
                 grouped[key] = []
                 grouped_symbols[key] = set()
@@ -366,13 +371,14 @@ class UniverseScreenerService:
                 rank_global=idx,
                 rank_in_group=len(grouped[key]) + 1,
                 score_components=dict(candidate.score_components or {}),
+                direction_bias=direction,  # type: ignore[arg-type]
             )
             grouped[key].append(item)
             grouped_symbols[key].add(candidate.symbol)
 
         groups: list[InstrumentRecommendationGroup] = []
-        for hypothesis, timeframe in group_order:
-            items = grouped[(hypothesis, timeframe)]
+        for hypothesis, direction, timeframe in group_order:
+            items = grouped[(hypothesis, direction, timeframe)]
             if not items:
                 continue
             groups.append(
@@ -380,9 +386,10 @@ class UniverseScreenerService:
                     hypothesis=hypothesis,
                     timeframe=timeframe,
                     template_id=items[0].template_id or hypothesis,
-                    label=self._group_label(hypothesis, timeframe),
+                    label=self._group_label(hypothesis, direction, timeframe),
                     rationale=self._group_rationale(hypothesis, timeframe, items),
                     recommendations=items,
+                    direction_bias=direction,  # type: ignore[arg-type]
                 )
             )
 
@@ -513,6 +520,11 @@ class UniverseScreenerService:
             composite_score=composite_score,
         )
 
+        # R59: Donchian-based price position (0 = range low, 1 = range high)
+        hypothesis_for_direction = template_id_suggestion or "uncertain_wait"
+        price_position_in_range = self._compute_price_position_in_range(df, close)
+        direction_bias = self._candidate_direction(hypothesis_for_direction, price_position_in_range)
+
         return SymbolAnomalyScore(
             symbol=symbol,
             as_of=_utcnow(),
@@ -526,6 +538,8 @@ class UniverseScreenerService:
             dist_to_prior_high_pct=round(dist_to_prior_high_pct, 6),
             dist_to_prior_low_pct=round(dist_to_prior_low_pct, 6),
             composite_score=round(composite_score, 6),
+            price_position_in_range=round(price_position_in_range, 6),
+            direction_bias=direction_bias,  # type: ignore[arg-type]
             score_components={
                 "compression_score": round(compression_score, 6),
                 "expansion_score": round(expansion_score, 6),
@@ -534,6 +548,8 @@ class UniverseScreenerService:
                 "range_component": round(_clamp(max(range_expansion_z, 0.0) / 3.0, 0.0, 1.0), 6),
                 "weights": weights,
                 "template_id_suggestion": template_id_suggestion,
+                "price_position_in_range": round(price_position_in_range, 6),
+                "direction_bias": direction_bias,
             },
         )
 
@@ -657,6 +673,42 @@ class UniverseScreenerService:
             return "high"
         return "extreme"
 
+    @staticmethod
+    def _compute_price_position_in_range(df: "pd.DataFrame", close: float) -> float:
+        """0 = at 20-bar Donchian low, 1 = at 20-bar Donchian high."""
+        lookback = min(20, len(df))
+        range_high = _safe_float(df["high"].rolling(lookback, min_periods=5).max().iloc[-1], 0.0)
+        range_low = _safe_float(df["low"].rolling(lookback, min_periods=5).min().iloc[-1], 0.0)
+        span = range_high - range_low
+        return _clamp((close - range_low) / span, 0.0, 1.0) if span > 1e-9 else 0.5
+
+    @classmethod
+    def _candidate_direction(cls, hypothesis: str, price_position: float) -> str:
+        """Deterministic long/short/neutral routing from hypothesis + price position."""
+        if hypothesis == "compression_breakout":
+            if price_position >= 0.65:
+                return "short"
+            if price_position <= 0.35:
+                return "long"
+            return "neutral"
+        if hypothesis == "volatile_breakout":
+            if price_position >= 0.65:
+                return "long"
+            if price_position <= 0.35:
+                return "short"
+            return "neutral"
+        if hypothesis == "range_mean_revert":
+            if price_position >= 0.70:
+                return "short"
+            if price_position <= 0.30:
+                return "long"
+            return "neutral"
+        if hypothesis == "bull_trending":
+            return "long"
+        if hypothesis == "bear_defensive":
+            return "short"
+        return "neutral"
+
     @classmethod
     def _template_id_from_scores(
         cls,
@@ -677,8 +729,24 @@ class UniverseScreenerService:
         return None
 
     def _candidate_template_id(self, candidate: SymbolAnomalyScore) -> str | None:
-        hint = candidate.score_components.get("template_id_suggestion")
-        return str(hint) if hint else None
+        base_hint = candidate.score_components.get("template_id_suggestion")
+        direction = candidate.direction_bias or "neutral"
+        if base_hint == "compression_breakout":
+            if direction == "short":
+                return "compression_breakout_short"
+            if direction == "long":
+                return "compression_breakout_long"
+        if base_hint == "volatile_breakout":
+            if direction == "long":
+                return "volatile_breakout_long"
+            if direction == "short":
+                return "volatile_breakout_short"
+        if base_hint == "range_mean_revert":
+            if direction == "long":
+                return "range_long"
+            if direction == "short":
+                return "range_short"
+        return str(base_hint) if base_hint else None
 
     def _candidate_hypothesis(self, candidate: SymbolAnomalyScore) -> str:
         template_id = self._candidate_template_id(candidate)
@@ -741,7 +809,7 @@ class UniverseScreenerService:
         )
 
     @classmethod
-    def _group_label(cls, hypothesis: str, timeframe: str) -> str:
+    def _group_label(cls, hypothesis: str, direction: str, timeframe: str) -> str:
         label_map = {
             "compression_breakout": "Compression Breakout",
             "volatile_breakout": "Volatile Breakout",
@@ -750,7 +818,9 @@ class UniverseScreenerService:
             "range_mean_revert": "Range Mean Revert",
             "uncertain_wait": "Uncertain / Wait",
         }
-        return f"{label_map.get(hypothesis, hypothesis)} ({timeframe})"
+        direction_label = {"long": " \u2191 Long", "short": " \u2193 Short", "neutral": ""}
+        dir_str = direction_label.get(direction, "")
+        return f"{label_map.get(hypothesis, hypothesis)}{dir_str} ({timeframe})"
 
     @classmethod
     def _group_rationale(

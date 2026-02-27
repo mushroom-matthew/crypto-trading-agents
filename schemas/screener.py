@@ -32,6 +32,8 @@ class SymbolAnomalyScore(SerializableModel):
     dist_to_prior_low_pct: float
     composite_score: float
     score_components: dict[str, Any] = Field(default_factory=dict)
+    price_position_in_range: float = Field(default=0.5, ge=0.0, le=1.0)
+    direction_bias: Literal["long", "short", "neutral"] = "neutral"
 
 
 class ScreenerResult(SerializableModel):
@@ -74,6 +76,7 @@ class InstrumentRecommendationItem(SerializableModel):
     rank_global: int = Field(ge=1)
     rank_in_group: int = Field(ge=1)
     score_components: dict[str, Any] = Field(default_factory=dict)
+    direction_bias: Literal["long", "short", "neutral"] = "neutral"
 
 
 class InstrumentRecommendationGroup(SerializableModel):
@@ -85,6 +88,7 @@ class InstrumentRecommendationGroup(SerializableModel):
     label: str
     rationale: str
     recommendations: list[InstrumentRecommendationItem] = Field(default_factory=list)
+    direction_bias: Literal["long", "short", "neutral"] = "neutral"
 
 
 class InstrumentRecommendationBatch(SerializableModel):

@@ -583,7 +583,35 @@ uv run pytest --ignore=tests/test_agent_workflows.py --ignore=tests/test_metrics
 ## Human Verification Evidence
 
 ```text
-(To be filled after implementation)
+Test run 2026-02-26:
+- tests/test_screener_direction_routing.py: 20 passed
+- tests/test_trigger_compiler_directional.py: 55 passed
+- tests/test_universe_screener.py: 10 passed (all pre-existing screener tests pass)
+- tests/test_trigger_compiler.py: 76 passed (all pre-existing compiler tests pass)
+- Full suite: 1724 passed, 2 skipped, 2 pre-existing failures (test_factor_loader — pandas H→h API issue, unrelated)
+
+Schema: price_position_in_range (ge=0.0, le=1.0) and direction_bias on SymbolAnomalyScore,
+  InstrumentRecommendationItem, InstrumentRecommendationGroup verified.
+
+Direction routing: compression_breakout pos<=0.35→long, >=0.65→short; volatile_breakout pos>=0.65→long, <=0.35→short;
+  range_mean_revert pos>=0.70→short, <=0.30→long; bull_trending always long; bear_defensive always short.
+  All verified in test_screener_direction_routing.py.
+
+range_mean_revert neutral → uncertain_wait rerouting confirmed in test.
+
+Directional group key (hypothesis, direction, timeframe) confirmed; long/short groups separate in test.
+
+Trigger compiler: _get_template_direction for all 6 new template IDs + existing templates verified.
+  enforce_directional_target_requirement: missing_target_for_directional_template violation fires correctly.
+  Cross-direction identifier (donchian_lower_short in long template, etc.) violation fires correctly.
+  directional_violations field on PlanEnforcementResult counted in total_corrections.
+  enforce_plan_quality wiring confirmed.
+
+Paper trading: direction_bias threaded PaperTradingConfig → SessionState → generate_strategy_plan_activity.
+  Direction hint injected into prompt when non-neutral.
+  UI: direction_bias in api.ts PaperTradingSessionConfig + ScreenerRecommendationItem + ScreenerRecommendationGroup.
+  applyScreenerCandidateToForm threads direction_bias from screener item.
+  Direction badge (↑ Long / ↓ Short) shown in screener group headers.
 ```
 
 ## Change Log
@@ -591,6 +619,7 @@ uv run pytest --ignore=tests/test_agent_workflows.py --ignore=tests/test_metrics
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-25 | Runbook created — directional bias templates for long/short across all hypotheses | Claude |
+| 2026-02-26 | Implementation complete — schemas, screener service, vector store docs, prompt templates, trigger compiler, paper trading threading, UI, tests | Claude |
 
 ## Worktree Setup
 
