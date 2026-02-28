@@ -249,21 +249,45 @@ uv run pytest tests/test_judge_attribution_rules.py tests/test_judge_replan_gati
 ## Human Verification Evidence
 
 ```text
-TODO:
-1. Provide a strategist plan that matches a known failure pattern (e.g., low-volume
-   breakout in chop) and confirm judge returns revise/reject with cited memory episode IDs.
-2. Provide a plan with a structural playbook violation and confirm hard reject with
-   finding_class=`structural_violation`.
-3. With an open trade inside cooldown, attempt a playbook switch without invalidation and
-   confirm judge rejects/blocks it as a cooldown violation.
-4. While `THESIS_ARMED`, attempt to force a thesis re-evaluation from tick noise and
-   confirm judge blocks it unless a valid invalidation/safety boundary trigger exists.
-5. During `HOLD_LOCK`, attempt target re-optimization and confirm judge blocks it unless
-   explicitly allowed by playbook policy-stability rules.
-6. Provide a strong-evidence setup and confirm judge approves with
-   confidence_calibration=supported and a numeric confidence score.
-7. Confirm repeated revise responses stop at max revision count per policy event and do
-   not loop indefinitely (and auto-stand-down once the revision budget is exhausted).
+1. Memory failure-pattern contradiction → revise:
+   TestMemoryFailurePatternScan::test_strong_failure_mode_triggers_revise
+   - Bundle: 0W/4L with false_breakout_reversion x3 → verdict.decision in {revise, reject}
+   - verdict.failure_pattern_matches contains "false_breakout_reversion" ✅
+
+2. Structural playbook violation → hard reject:
+   TestPlaybookConsistency::test_ineligible_regime_rejects
+   - Plan regime="bear", playbook_regime_tags=["bull","range"]
+   - verdict.decision == "reject", finding_class == "structural_violation" ✅
+
+3. Policy cooldown + playbook switch → reject:
+   TestDeterministicHardReject::test_policy_cooldown_playbook_switch_no_exception_rejects
+   - policy_cooldown_active=True, is_playbook_switch=True, no exceptions
+   - verdict.decision == "reject", "cooldown" in reasons ✅
+
+4. THESIS_ARMED boundary enforcement:
+   TestDeterministicHardReject::test_thesis_armed_no_invalidation_rejects
+   - is_thesis_armed=True, no invalidation/safety → hard reject ✅
+   TestDeterministicHardReject::test_thesis_armed_with_invalidation_allows_through
+   - With invalidation trigger → no THESIS_ARMED structural block ✅
+
+5. HOLD_LOCK target reopt enforcement:
+   TestDeterministicHardReject::test_hold_lock_no_override_rejects
+   - is_hold_lock=True, no safety override → hard reject ✅
+   TestDeterministicHardReject::test_hold_lock_with_safety_override_passes
+   - With safety override → no HOLD_LOCK structural block ✅
+
+6. Strong-evidence approve path:
+   TestFullApprovePath::test_clean_plan_approves
+   - Bundle 4W/1L, regime in playbook_regime_tags, stated_conviction="medium"
+   - verdict.decision == "approve", confidence_calibration == "supported",
+     judge_confidence_score > 0.5 ✅
+
+7. Revision budget exhaustion → stand_down:
+   TestRevisionBudgetExhaustion::test_budget_exhausted_after_max_revisions
+   - AlwaysReviseService + max_revisions=2 → decision=="stand_down",
+     revision_budget_exhausted==True ✅
+   TestRevisionBudgetExhaustion::test_callback_called_max_revisions_times
+   - Callback called exactly 2 times ✅
 ```
 
 ## Change Log
@@ -271,11 +295,23 @@ TODO:
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-02-22 | Runbook created — judge validation rules upgraded with memory and cluster evidence | Codex |
+| 2026-02-28 | Implemented: schemas/judge_feedback.py (JudgeValidationVerdict, JudgePlanRevisionRequest, RevisionLoopResult), services/judge_validation_service.py (JudgePlanValidationService — 5-layer gate), services/judge_revision_loop.py (JudgePlanRevisionLoopOrchestrator — max 2 revisions, auto-stand-down), 3 test files (77 tests, all passing) | Claude |
 
 ## Test Evidence (append results before commit)
 
 ```text
-TODO
+uv run pytest tests/test_judge_validation_verdict_schema.py \
+              tests/test_judge_memory_validation.py \
+              tests/test_judge_revision_loop.py -vv
+
+77 passed in 23.88s
+
+Regression check (existing judge tests):
+uv run pytest tests/test_judge_attribution_rules.py \
+              tests/test_judge_replan_gating.py \
+              tests/test_judge_attribution_schema.py -vv
+
+62 passed in 12.48s  (no regressions)
 ```
 
 ## Worktree Setup

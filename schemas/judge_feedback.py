@@ -228,6 +228,105 @@ class JudgeAction(SerializableModel):
     playbook_edit_suggestion: Optional[PlaybookEditSuggestion] = None
 
 
+# ---------------------------------------------------------------------------
+# R53 — Judge Plan Validation Schemas (memory-backed, policy-boundary check)
+# ---------------------------------------------------------------------------
+
+
+#: Valid decisions produced by the plan-level judge validation gate.
+JudgeValidationDecision = Literal["approve", "revise", "reject", "stand_down"]
+
+#: Finding classes that distinguish the nature of a non-approve verdict.
+JudgeValidationFindingClass = Literal[
+    "structural_violation",    # hard reject — deterministic invariant or playbook contract
+    "statistical_suspicion",   # soft revise — evidence weak/mixed, confidence too high
+    "memory_contradiction",    # explain-or-revise — loser patterns contradict proposal
+    "none",                    # approve path — no material finding
+]
+
+#: Confidence calibration result.
+JudgeConfidenceCalibration = Literal["supported", "weakly_supported", "unsupported"]
+
+
+class JudgeValidationVerdict(SerializableModel):
+    """Typed output of the judge plan validation gate (Runbook 53).
+
+    Produced once per policy-boundary evaluation.  Tick-level execution
+    remains deterministic and is never routed through this object.
+
+    Fields
+    ------
+    decision
+        ``approve`` / ``revise`` / ``reject`` / ``stand_down``.
+    finding_class
+        Explicit classification of the primary finding.
+    reasons
+        Human-readable list of reasons for the decision.
+    judge_confidence_score
+        Judge's own confidence in the verdict (0.0–1.0).
+    memory_evidence_refs
+        Bundle IDs / snapshot hashes consulted.
+    cited_episode_ids
+        Specific episode IDs cited as evidence (win or loss).
+    failure_pattern_matches
+        Failure mode labels from FAILURE_MODE_TAXONOMY that match the plan.
+    cluster_support_summary
+        One-sentence summary of cluster win/loss support (or None).
+    confidence_calibration
+        Whether proposal confidence is supported by evidence.
+    divergence_from_nearest_losers
+        Required non-None when approving despite contradictory loser evidence.
+    requested_revisions
+        Ordered list of specific revisions requested (non-empty when revise).
+    revision_count
+        How many revision attempts have been made so far this policy event.
+    """
+
+    decision: JudgeValidationDecision
+    finding_class: JudgeValidationFindingClass = "none"
+    reasons: List[str] = Field(default_factory=list)
+    judge_confidence_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    memory_evidence_refs: List[str] = Field(default_factory=list)
+    cited_episode_ids: List[str] = Field(default_factory=list)
+    failure_pattern_matches: List[str] = Field(default_factory=list)
+    cluster_support_summary: Optional[str] = None
+    confidence_calibration: JudgeConfidenceCalibration = "weakly_supported"
+    divergence_from_nearest_losers: Optional[str] = None
+    requested_revisions: List[str] = Field(default_factory=list)
+    revision_count: int = Field(default=0, ge=0)
+
+
+class JudgePlanRevisionRequest(SerializableModel):
+    """Structured revision request passed back to the strategist when verdict=revise.
+
+    Contains the exact failing criteria, cited failure patterns, and expectation
+    mismatches so the strategist can address them without re-running a full replan.
+    """
+
+    verdict: JudgeValidationVerdict
+    revision_number: int = Field(ge=1)
+    max_revisions: int = Field(ge=1)
+    failing_criteria: List[str] = Field(default_factory=list)
+    cited_failure_patterns: List[str] = Field(default_factory=list)
+    expectation_mismatches: List[str] = Field(default_factory=list)
+    revision_guidance: Optional[str] = None
+
+
+class RevisionLoopResult(SerializableModel):
+    """Result of a full revision loop run for one policy event.
+
+    Includes the final plan (may be None if stand_down), the final verdict,
+    and metadata about how many revisions were attempted.
+    """
+
+    final_verdict: JudgeValidationVerdict
+    revision_attempts: int = Field(ge=0)
+    revision_budget_exhausted: bool = False
+    stand_down_reason: Optional[str] = None
+    # plan_id of the final plan accepted (or None if stand_down)
+    accepted_plan_id: Optional[str] = None
+
+
 def apply_trigger_floor(
     constraints: JudgeConstraints,
     triggers: list,
