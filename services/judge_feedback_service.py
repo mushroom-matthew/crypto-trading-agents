@@ -31,6 +31,17 @@ from trading_core.trade_quality import TradeMetrics
 logger = logging.getLogger(__name__)
 
 
+def _cap_json(obj: Any, max_chars: int = 500, label: str = "") -> str:
+    """Serialize obj to compact JSON, truncating at max_chars with an omission marker."""
+    if not obj:
+        return f"No {label} provided." if label else ""
+    text = json.dumps(obj, default=str)  # compact, no indent
+    if len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars + 20
+    return text[:max_chars - 20] + f'... [+{omitted} chars omitted]'
+
+
 class JudgeTransport(Protocol):
     """Protocol for judge response transport (enables shimming)."""
 
@@ -678,7 +689,7 @@ class JudgeFeedbackService:
         fills_since_last_judge = summary.get("fills_since_last_judge") or []
         if fills_since_last_judge:
             fill_lines = []
-            for fill in fills_since_last_judge[:20]:
+            for fill in fills_since_last_judge[:10]:
                 fill_lines.append(
                     "- {timestamp} {symbol} {side} qty={qty} price={price} trigger={trigger_id} pnl={pnl}".format(
                         timestamp=fill.get("timestamp"),
@@ -702,7 +713,7 @@ class JudgeFeedbackService:
                 key=lambda item: (item[1].get("attempted", 0), item[1].get("blocked", 0)),
                 reverse=True,
             )
-            for trigger_id, stats in ranked[:20]:
+            for trigger_id, stats in ranked[:10]:
                 reasons = stats.get("blocked_by_reason") or {}
                 reason_str = ", ".join(f"{key}:{val}" for key, val in list(reasons.items())[:5])
                 attempt_lines.append(
@@ -717,7 +728,7 @@ class JudgeFeedbackService:
         active_triggers = summary.get("active_triggers") or []
         if active_triggers:
             trigger_lines = []
-            for trigger in active_triggers[:20]:
+            for trigger in active_triggers[:10]:
                 entry_rule = _truncate(str(trigger.get("entry_rule", "")))
                 exit_rule = _truncate(str(trigger.get("exit_rule", "")))
                 trigger_lines.append(
@@ -756,16 +767,10 @@ class JudgeFeedbackService:
             position_quality_text = "No open positions."
 
         market_structure = summary.get("market_structure") or {}
-        if market_structure:
-            market_structure_text = json.dumps(market_structure, indent=2, default=str)
-        else:
-            market_structure_text = "No market structure provided."
+        market_structure_text = _cap_json(market_structure, max_chars=600, label="market structure")
 
         factor_exposures = summary.get("factor_exposures") or {}
-        if factor_exposures:
-            factor_exposures_text = json.dumps(factor_exposures, indent=2, default=str)
-        else:
-            factor_exposures_text = "No factor exposures provided."
+        factor_exposures_text = _cap_json(factor_exposures, max_chars=400, label="factor exposures")
 
         trigger_summary = (
             f"{len(active_triggers)} active triggers; {len(trigger_attempts)} trigger attempts since last judge."
@@ -775,7 +780,7 @@ class JudgeFeedbackService:
 
         # Build the analysis prompt
         analysis_prompt = prompt_template.format(
-            strategy_context=json.dumps(strategy_context, indent=2) if strategy_context else "No strategy context available.",
+            strategy_context=_cap_json(strategy_context, max_chars=800, label="strategy context"),
             risk_parameters=strategy_context.get("risk_params", "No risk parameters configured.") if strategy_context else "No risk parameters configured.",
             trigger_summary=trigger_summary,
             execution_settings="Default execution settings.",
@@ -787,7 +792,7 @@ class JudgeFeedbackService:
             position_quality=position_quality_text,
             market_structure=market_structure_text,
             factor_exposures=factor_exposures_text,
-            risk_state=json.dumps(summary.get("risk_state", {}), indent=2) if summary.get("risk_state") else "No risk state provided.",
+            risk_state=_cap_json(summary.get("risk_state") or {}, max_chars=400, label="risk state"),
             total_transactions=summary.get("trade_count", 0),
             buy_count=summary.get("buy_count", 0),
             sell_count=summary.get("sell_count", 0),

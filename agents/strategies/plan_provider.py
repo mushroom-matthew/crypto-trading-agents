@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import logging
 import math
 import os
@@ -27,7 +28,8 @@ logger = logging.getLogger(__name__)
 def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    return max(1, math.ceil(len(text) / 4))
+    from services.prompt_token_counter import count_tokens
+    return count_tokens(text)
 
 
 @lru_cache(maxsize=1)
@@ -112,6 +114,12 @@ def _context_flags(llm_input: LLMInput) -> dict[str, object]:
         "has_strategy_memory": bool(context.get("strategy_memory")),
         "has_risk_adjustments": bool(context.get("risk_adjustments")),
         "auto_hedge_mode": context.get("auto_hedge_mode"),
+        # Size telemetry
+        "market_structure_chars": len(_json.dumps(llm_input.market_structure or {}, default=str)),
+        "factor_exposures_chars": len(_json.dumps(context.get("factor_exposures") or {}, default=str)),
+        "judge_feedback_chars": len(_json.dumps(context.get("judge_feedback") or {}, default=str)),
+        "assets_count": len(llm_input.assets),
+        "previous_triggers_count": len(llm_input.previous_triggers or []),
     }
 
 

@@ -1,0 +1,311 @@
+STRATEGYPLAN SCHEMA (SHARED)
+
+CRITICAL - Available Timeframes Constraint:
+- The input includes "available_timeframes" in global_context listing which timeframes are loaded (e.g., ["1h", "6h"]).
+- You may ONLY reference cross-timeframe indicators (tf_<timeframe>_<field>) for timeframes listed in available_timeframes.
+- Triggers referencing unavailable timeframes will be BLOCKED and never fire.
+- If only one timeframe is available, use ONLY direct indicators (close, ema_short, rsi_14) without tf_ prefixes.
+- When multiple timeframes are available, use tf_<timeframe>_ prefixes for cross-timeframe confirmation.
+
+Allowed Rule Identifiers (entry_rule/exit_rule/hold_rule may ONLY use these):
+- Base indicators: symbol, timeframe, close, volume, volume_multiple, sma_short, sma_medium, sma_long, ema_short, ema_medium, ema_long, rsi_14, macd, macd_signal, macd_hist, atr_14, roc_short, roc_medium, realized_vol_short, realized_vol_medium, donchian_upper_short, donchian_lower_short, bollinger_upper, bollinger_lower, cycle_high_200, cycle_low_200, cycle_range_200, cycle_position, fib_236, fib_382, fib_500, fib_618, fib_786, last_expansion_pct, last_contraction_pct, expansion_contraction_ratio, ema_fast, ema_very_fast, realized_vol_fast, ewma_vol, vwap, vwap_distance_pct, vol_burst.
+- Candlestick morphology identifiers: candle_body_pct, candle_upper_wick_pct, candle_lower_wick_pct, candle_strength, is_bullish, is_bearish, is_doji, is_hammer, is_shooting_star, is_pin_bar, is_bullish_engulfing, is_bearish_engulfing, is_inside_bar, is_outside_bar, is_impulse_candle.
+- Higher-timeframe structural anchors: htf_daily_open, htf_daily_high, htf_daily_low, htf_daily_close, htf_prev_daily_high, htf_prev_daily_low, htf_prev_daily_open, htf_daily_atr, htf_daily_range_pct, htf_price_vs_daily_mid, htf_5d_high, htf_5d_low, htf_prev_daily_mid.
+- Derived indicators: bollinger_middle, trend_state, vol_state.
+- Position fields: position, is_flat, is_long, is_short, position_qty, position_value, entry_price, avg_entry_price, entry_side, position_opened_at.
+- PnL and time-in-trade: unrealized_pnl_pct, unrealized_pnl_abs, unrealized_pnl, position_pnl_pct, position_pnl_abs, position_age_minutes, position_age_hours, holding_minutes, holding_hours, time_in_trade_min, time_in_trade_hours.
+- Market-structure fields: nearest_support, nearest_resistance, distance_to_support_pct, distance_to_resistance_pct, trend, recent_tests.
+- Cross-timeframe fields: tf_<timeframe>_<field> for any available_timeframes, including tf_<timeframe>_trend_state, tf_<timeframe>_vol_state, tf_<timeframe>_bollinger_middle.
+- Numeric suffix aliases are allowed: any indicator ending in _NN may be referenced without the suffix (e.g., rsi_14 -> rsi, atr_14 -> atr, fib_236 -> fib). Aliases also work with tf_<timeframe>_ prefixes.
+
+You MUST include the following top-level keys in every response:
+- generated_at (ISO 8601 timestamp string)
+- valid_until (ISO 8601 timestamp string)
+- regime (one of: bull, bear, range, high_vol, mixed)
+- risk_constraints (object)
+- sizing_rules (array)
+- triggers (array; can be empty but must exist)
+
+Optional top-level keys (include when applicable):
+- template_id           Optional[str]   Named template you selected from the TEMPLATE SELECTION
+                                        block above. Use the exact id string (e.g., "compression_breakout").
+                                        Omit or set null if no template applies. When present, the
+                                        trigger compiler enforces that all trigger identifiers are
+                                        members of that template's allowed set.
+- template_parameters   Optional[dict]  Threshold overrides for the selected template.
+                                        Example: {"entry_vol_multiple_min": 1.5, "bb_bandwidth_max": 0.25}
+                                        Only parameter names documented in the template are valid.
+
+Trigger schema (each item in triggers MUST include these keys):
+- id (string)
+- symbol (string, e.g., "BTC-USD")
+- category (trend_continuation | reversal | volatility_breakout | mean_reversion | emergency_exit | other)
+- confidence_grade (A | B | C)
+- direction (long | short | exit)
+- timeframe (e.g., "1h")
+- entry_rule (string expression - NO subscript syntax like indicator[-1])
+- exit_rule (string expression - NO subscript syntax like indicator[-1]; REQUIRED and non-empty for emergency_exit triggers)
+- stop_loss_pct (REQUIRED for short entries): percentage-based stop distance (e.g., 2.0 means 2% stop)
+
+IMPORTANT - Short entries:
+- All short triggers MUST include stop_loss_pct. Short entries without stop_loss_pct will be BLOCKED.
+- Example short trigger: {"direction": "short", "stop_loss_pct": 2.5, ...}
+
+IMPORTANT - Cross-Timeframe ATR Tautology (PLAN WILL BE REJECTED if violated):
+- ATR scales naturally as sqrt(T_high / T_low) across timeframes. Any comparison where
+  the multiplier k is below this natural ratio is a TAUTOLOGY — always True regardless of
+  market conditions. Emergency exits containing tautologies will fire on EVERY bar and
+  cause constant buy-exit churn. The plan validator REJECTS plans with these patterns.
+
+  Minimum required k values (k must be STRICTLY GREATER than these):
+    1D vs 1H:  sqrt(1440/60)  = 4.9x → require k ≥ 6.4   (e.g. htf_daily_atr > 6.4 * atr_14)
+    1D vs 4H:  sqrt(1440/240) = 2.4x → require k ≥ 3.2   (e.g. tf_1d_atr > 3.2 * tf_4h_atr)
+    4H vs 1H:  sqrt(240/60)   = 2.0x → require k ≥ 2.6   (e.g. tf_4h_atr > 2.6 * atr_14)
+    1D vs 15m: sqrt(1440/15)  = 9.8x → require k ≥ 12.7
+
+- WRONG: htf_daily_atr > 3 * atr_14     (k=3 < 6.4 → always true → REJECTED)
+- WRONG: tf_1d_atr > 2.5 * tf_4h_atr   (k=2.5 < 3.2 → always true → REJECTED)
+- WRONG: tf_4h_atr > tf_1h_atr          (k=1 < 2.6 → always true → REJECTED)
+
+PREFERRED: Use deterministic regime labels instead of raw ATR math for emergency exits:
+- BEST: vol_state == 'extreme'           (your own classifier, calibrated, never tautological)
+- GOOD: htf_daily_range_pct > 6.0       (prior session was extreme range — absolute, not relative)
+- GOOD: unrealized_pnl_pct < -5.0       (hard dollar-loss emergency — position-specific)
+- GOOD: close < nearest_support * 0.97  (structural break with 3% buffer)
+- GOOD: rsi_14 < 12                     (genuine crash RSI, not just oversold)
+
+If you MUST use ATR ratios: verify k exceeds the minimum above by a comfortable margin.
+A typical correct emergency exit: "not is_flat and (vol_state == 'extreme' or unrealized_pnl_pct < -6.0)"
+
+IMPORTANT - Exit Binding Constraint:
+- Exit rules only close positions opened by triggers in the SAME category.
+- A "trend_continuation" exit will NOT close a position opened by a "reversal" entry.
+- CORRECT: Each symbol's entries should be in ONE category, with matching exits.
+- WRONG: BTC-USD entries split across "trend_continuation" and "reversal" — exits won't cross-close.
+- If you need multiple entry strategies for one symbol, use a single category or add explicit risk_reduce/risk_off exits that cover all positions.
+
+Do NOT use these keys in triggers: type, risk_grade.
+
+Risk constraints MUST include:
+- max_position_risk_pct  — fraction of equity to RISK per trade (loss at stop). E.g., 2.0 = willing
+    to lose 2% of equity if stopped out. The engine converts this to notional via stop distance:
+    position_notional = (equity × risk_pct / 100) / stop_distance_per_unit × price.
+    With a 2% stop on a $10 000 account: risk = $200, notional ≈ $10 000. The symbol/portfolio
+    caps below apply as hard upper bounds. Recommended: 1.0–2.0.
+- max_symbol_exposure_pct — maximum notional in any single symbol as % of equity.
+    This is the primary cap on position size when risk-based notional exceeds it.
+    With max_position_risk_pct=2 and a 2% stop, you need max_symbol_exposure_pct ≥ ~50 to
+    get meaningful risk per trade. Recommended: 50–80 for 2-symbol portfolios.
+- max_portfolio_exposure_pct — total open notional across all symbols. Recommended: 80–95.
+- max_daily_loss_pct — daily drawdown limit before all sizing is blocked. Recommended: 4–6.
+- max_daily_risk_budget_pct (optional) — daily risk budget (sum of per-trade risks). Recommended: 5–8.
+
+Sizing rules MUST include one entry per symbol. If unsure, use:
+{ "symbol": "<SYMBOL>", "sizing_mode": "fixed_fraction", "target_risk_pct": <max_position_risk_pct> }
+
+IMPORTANT - Hold Rule Calibration:
+- hold_rule (optional field on triggers) keeps a position open when exit_rule fires. If hold_rule evaluates True, the exit is suppressed.
+- A degenerate hold rule can suppress ALL normal exits, forcing emergency exits as the only way out.
+- BAD hold rule: "rsi_14 > 45" — RSI is above 45 most of the time, suppresses nearly all exits
+- BAD hold rule: single condition only (e.g., "close > sma_short") — too easy to be always true
+- GOOD hold rule: "rsi_14 > 60 and close > sma_medium and atr_14 < 500" — multiple conditions, harder to be always true
+- If you use hold_rule, ensure it can actually become False within normal market conditions.
+- NOTE: Degenerate hold rules (single-condition or low-threshold RSI) will be AUTO-STRIPPED at compile time. Write quality hold rules or omit them entirely.
+
+IMPORTANT - Trigger Fire Rate Calibration:
+- Each entry trigger should fire approximately 1-3 times per day on 1h bars.
+- A trigger with 0 fires after 48+ evaluations is considered "dead" — its conditions are too restrictive.
+- Use is_flat instead of "not is_long" for position filters (is_flat is always available).
+- Calibrate thresholds: rsi_14 < 30 fires <5% of bars (restrictive); rsi_14 < 40 fires ~10-15% (moderate).
+- Avoid combining 4+ conditions with "and" — each additional condition multiplicatively reduces fire rate.
+
+Optional fields (if provided) MUST follow these schemas:
+- regime_alerts: array of objects with keys:
+  indicator (string), threshold (number), direction (above|below|crosses), symbol (string), interpretation (string), priority (high|medium|low)
+- sizing_hints: array of objects with keys:
+  symbol (string), suggested_risk_pct (number), rationale (string)
+- max_triggers_per_symbol_per_day: integer
+- trigger_budgets: object mapping symbol -> integer (per-symbol trigger caps)
+
+CANDLESTICK PATTERN IDENTIFIERS (scalar/boolean):
+  candle_body_pct         — body as fraction of range (0=doji, 1=marubozu)
+  candle_upper_wick_pct   — upper wick fraction of range
+  candle_lower_wick_pct   — lower wick fraction of range
+  candle_strength         — body / ATR (>1.0 = impulse move, <0.3 = indecision)
+  is_bullish              — 1.0 if close > open
+  is_bearish              — 1.0 if close < open
+  is_doji                 — 1.0 if body_pct < 0.10 (indecision)
+  is_hammer               — 1.0 if bullish reversal shape at low
+  is_shooting_star        — 1.0 if bearish reversal shape at high
+  is_pin_bar              — 1.0 if wick > 60% of range (either side)
+  is_bullish_engulfing    — 1.0 if current bar engulfs prior bearish body
+  is_bearish_engulfing    — 1.0 if current bar engulfs prior bullish body
+  is_inside_bar           — 1.0 if current range inside prior bar (compression)
+  is_outside_bar          — 1.0 if current range outside prior bar (expansion)
+  is_impulse_candle       — 1.0 if body >= ATR threshold (decisive move)
+
+CANDLESTICK USAGE GUIDANCE:
+Use boolean patterns as confirmation only; combine with structural context.
+
+HIGHER-TIMEFRAME STRUCTURAL ANCHOR IDENTIFIERS (prior completed daily session):
+  htf_daily_high          — Prior session's high (key resistance)
+  htf_daily_low           — Prior session's low (key support)
+  htf_daily_open          — Prior session's open (intraday pivot reference)
+  htf_daily_close         — Prior session's close (momentum reference)
+  htf_prev_daily_high     — Session-before-prior's high (2-day lookback high)
+  htf_prev_daily_low      — Session-before-prior's low (2-day lookback low)
+  htf_daily_atr           — Daily ATR(14) (volatility normalizer for HTF)
+  htf_daily_range_pct     — Prior session's range as % of close
+  htf_price_vs_daily_mid  — (close - daily_mid) / daily_atr; ATR-normalized position
+                            >0 = above prior midpoint, <0 = below, |value|>1 = far from mid
+  htf_5d_high             — Rolling 5-session high (weekly proxy resistance)
+  htf_5d_low              — Rolling 5-session low (weekly proxy support)
+  htf_prev_daily_mid      — Midpoint of session-before-prior: (prev2_high + prev2_low) / 2
+
+HTF STOP AND TARGET ANCHORING:
+- Long stop: below htf_daily_low * 0.995 (0.5% buffer); short stop: above htf_daily_high * 1.005.
+- Long target: approach htf_daily_high * 0.998; breakout target: htf_5d_high * 0.995.
+- In non-breakout context, cap targets at htf_5d_high (long) / htf_5d_low (short); avoid overshooting weekly structure.
+- htf_* fields are None before second completed daily bar — always include a fallback condition.
+
+LEVEL-ANCHORED STOP/TARGET FIELDS (Runbook 42):
+  stop_anchor_type (optional field on TriggerCondition):
+    Controls how the stop price is computed when the trigger fires.
+    Stop must be below entry for longs, above entry for shorts.
+
+    Long-only anchors (stop below support):
+      'htf_daily_low'       — 0.5% below prior session low
+      'htf_prev_daily_low'  — 0.5% below session-before-prior low
+      'donchian_lower'      — 0.5% below Donchian lower band
+      'candle_low'          — 0.2% below trigger bar's low
+    Short-only anchors (stop above resistance):
+      'htf_daily_high'      — 0.5% above prior session high
+      'htf_prev_daily_high' — 0.5% above session-before-prior high
+      'donchian_upper'      — 0.5% above Donchian upper band
+      'candle_high'         — 0.2% above trigger bar's high
+    Direction-auto family (auto-selects support/resistance):
+      'htf_daily_extreme'      — low for longs, high for shorts
+      'htf_prev_daily_extreme' — same, session-before-prior
+      'donchian_extreme'       — Donchian lower/upper
+      'candle_extreme'         — bar low/high
+    Both directions (computed):
+      'pct'     — stop_loss_pct % from entry (required: set stop_loss_pct)
+      'atr'     — stop_loss_atr_mult * ATR(14) from entry (default mult=1.5)
+      'fib_618' — exact 618 retracement level
+    Default (null): uses stop_loss_pct percentage calculation.
+    PREFERRED for longs: 'htf_daily_extreme' or 'donchian_extreme'.
+
+  stop_loss_atr_mult (optional field on TriggerCondition):
+    ATR multiplier when stop_anchor_type='atr'. Default: 1.5.
+    Example: stop_loss_atr_mult: 2.0 → stop at 2 * ATR from entry.
+
+  target_anchor_type (optional field on TriggerCondition):
+    Controls how the profit target is computed at fill time.
+    Target must be above entry for longs, below entry for shorts.
+
+    Long-only anchors (target at resistance):
+      'htf_daily_high' — 0.2% below prior session high
+      'htf_5d_high'    — 0.2% below 5-day rolling high
+    Short-only anchors (target at support):
+      'htf_daily_low'  — 0.2% above prior session low
+      'htf_5d_low'     — 0.2% above 5-day rolling low
+    Direction-auto family:
+      'htf_daily_extreme' — high for longs, low for shorts
+      'htf_5d_extreme'    — 5d high/low
+    Both directions (computed):
+      'measured_move' — Donchian range height projected from entry
+      'r_multiple_2'  — 2R from entry (requires stop_price_abs)
+      'r_multiple_3'  — 3R from entry
+    Default (null): no stored target, exits via exit_rule only.
+
+  estimated_bars_to_resolution (optional integer on TriggerCondition):
+    Your forecast for how many candles until this trade reaches its target OR stop.
+    This is NOT a trigger — it is purely a statistical recording used to measure
+    your prediction accuracy against actual outcome per playbook.
+    Example: estimated_bars_to_resolution = 4 means you expect resolution within 4 bars
+    of the trigger's timeframe.  Set based on your regime assessment:
+    - Range mean-reversion: 2–6 bars (quick snaps)
+    - Trend continuation: 4–12 bars (needs structure time)
+    - Compression breakout: 3–8 bars (expansion should be fast or it stalls)
+    - Leave null if genuinely uncertain — omitting is better than guessing.
+
+BUILT-IN IDENTIFIERS available after entry (evaluate to True/False or float):
+  stop_hit    — True when stop is triggered (direction-aware: close < stop for longs,
+                close > stop for shorts). CANONICAL — use this in exit rules.
+  target_hit  — True when target is reached (direction-aware: close > target for longs,
+                close < target for shorts). CANONICAL — use this in exit rules.
+  below_stop      — Alias for stop_hit (backward compat; same value)
+  above_target    — Alias for target_hit (backward compat; same value)
+  stop_price      — The resolved stop price (float, 0.0 if no stop set)
+  target_price    — The resolved target price (float, 0.0 if no target set)
+  stop_distance_pct   — % distance between close and stop_price
+  target_distance_pct — % distance between close and target_price
+
+USAGE IN EXIT RULES:
+  HARD INVARIANT: exit_rule expressions may ONLY use stop_hit, target_hit,
+  R-tracking identifiers (current_R, r1_reached, etc.), and position-state guards
+  (is_flat, position_age_minutes, etc.).  Indicator conditions (RSI, MACD, SMA,
+  Bollinger, ATR comparisons, volume, etc.) in exit_rule will be AUTO-STRIPPED at
+  compile time and replaced with the canonical safe form below.
+
+  If you want an indicator signal to influence a trade, express it as:
+    - A stop tightening in hold_rule (advance the stop closer to price)
+    - A partial exit in risk_reduce_rule (reduce size, not full close)
+    - A cooldown / block_reentry in hold_rule (prevent new entries)
+  NEVER use indicator conditions to drive a full position close via exit_rule.
+
+  Canonical exit pattern (structure-based entries — works for long and short):
+    exit_rule: "not is_flat and (stop_hit or target_hit)"
+
+  Approach-to-target scale-out (risk_reduce):
+    exit_rule: "not is_flat and target_distance_pct < 0.3"
+    exit_fraction: 0.5
+
+STOP ANCHORING PRIORITY (tightest anchor that makes structural sense):
+  1. candle_extreme — below trigger bar's low (longs); tightest, high-conviction only
+  2. donchian_extreme — below compression range; canonical for breakouts
+  3. htf_daily_extreme — below prior session low; structurally important
+  4. atr — volatility-normalized fallback
+  For shorts: same priority, mirrored anchors.
+
+R-TRACKING IDENTIFIERS (Runbook 45 — adaptive trade management):
+  These are populated automatically once a position is open and initial_risk_abs is set.
+  Use them in exit_rule, hold_rule, or risk_reduce conditions.
+
+  current_R       — (float) Current unrealized gain/loss as a multiple of initial risk.
+                    Positive = in profit, negative = drawdown. E.g. 1.5 = up 1.5× initial risk.
+  mfe_r           — (float) Maximum favourable excursion in R since entry (peak current_R).
+  mae_r           — (float) Maximum adverse excursion in R since entry (most negative current_R seen).
+  trade_state     — (str)  "EARLY" | "MATURE" | "EXTENDED" | "TRAIL"
+                    EARLY: 0–1R, no automatic action taken.
+                    MATURE: stop moved to −0.25R breakeven zone after R1 trigger.
+                    EXTENDED: 50% partial taken + stop at +0.5R after R2 trigger.
+                    TRAIL: stop at +1.5R after R3 trigger.
+  position_fraction — (float) Remaining position size as a fraction of entry (1.0 = full).
+                    Decreases after partial exits.
+  r1_reached      — (bool) True once current_R >= 1.0
+  r2_reached      — (bool) True once current_R >= 2.0
+  r3_reached      — (bool) True once current_R >= 3.0
+
+USAGE IN EXIT/HOLD RULES:
+  Canonical R-exit: "not is_flat and (stop_hit or (r2_reached and current_R < 1.0))"
+  Hold until mature: hold_rule: "not is_flat and trade_state == 'EARLY'"
+  Scale-out at target: exit_rule: "not is_flat and r2_reached and target_distance_pct < 0.3" + exit_fraction: 0.5
+  NOTE: Engine auto-takes 50% partial at +2R. Do not duplicate this in exit_fraction.
+
+COMPRESSION / BREAKOUT IDENTIFIERS (Runbook 40):
+  bb_bandwidth_pct_rank   — Percentile rank of BB bandwidth in 50-bar rolling window
+                            (0.0 = most compressed, 1.0 = most expanded)
+  compression_flag        — 1.0 if bb_bandwidth_pct_rank < 0.20 (consolidation phase)
+  expansion_flag          — 1.0 if bb_bandwidth_pct_rank > 0.80 AND bandwidth growing (expansion phase)
+  breakout_confirmed      — 1.0 if close is outside Donchian range AND vol_burst == true
+
+USAGE IN ENTRY/EXIT RULES:
+  Wait for compression before entering breakout trades:
+    entry_rule: "is_flat and compression_flag > 0.5 and breakout_confirmed > 0.5 and is_impulse_candle > 0.5"
+
+  Exit if false breakout (price returns inside range):
+    exit_rule: "not is_flat and below_stop"
+
+  Hold while expansion continues:
+    hold_rule: "expansion_flag > 0.5 and volume_multiple > 0.9"

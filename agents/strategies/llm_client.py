@@ -26,6 +26,23 @@ from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint,
 from .prompt_builder import build_prompt_context
 from .trigger_vector_store import get_trigger_vector_store
 from vector_store.retriever import get_strategy_vector_store, vector_store_enabled
+from services.prompt_token_counter import count_tokens as _count_tokens
+
+
+@lru_cache(maxsize=2)
+def _load_schema_prompt(mode: str) -> str:
+    """Load the StrategyPlan schema prompt for the given mode ('core' or 'verbose').
+
+    Falls back to the full schema if the core file is missing.
+    """
+    prompts_dir = Path(__file__).resolve().parents[2] / "prompts"
+    if mode == "core":
+        path = prompts_dir / "strategy_plan_schema_core.txt"
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+    # "verbose" or core file missing → fall back to full schema
+    path = prompts_dir / "strategy_plan_schema.txt"
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
 
 
 def _repair_json(raw: str) -> str:
@@ -207,6 +224,20 @@ class LLMClient:
                     prompt_context,
                     strategy_context,
                 )
+                _user_payload = llm_input.to_json()
+                _prompt_budget = {
+                    "base_prompt_chars": len(self._default_prompt()),
+                    "schema_chars": len(self._schema_prompt()),
+                    "template_chars": len(effective_template or ""),
+                    "prompt_context_chars": len(prompt_context or ""),
+                    "strategy_context_chars": len(strategy_context or ""),
+                    "vector_context_chars": len(vector_context or ""),
+                    "system_prompt_total_chars": len(system_prompt),
+                    "user_payload_chars": len(_user_payload),
+                    "system_prompt_tokens_est": _count_tokens(system_prompt),
+                    "user_payload_tokens_est": _count_tokens(_user_payload),
+                    "schema_mode": os.environ.get("STRATEGIST_SCHEMA_MODE", "core"),
+                }
                 with langfuse_span("llm_strategist.backtest", metadata={"model": self.model}) as span:
                     completion = self.client.responses.create(
                         model=self.model,
@@ -249,6 +280,7 @@ class LLMClient:
                             "prompt_hash": input_hash,
                             "plan_id": plan_id,
                             "duration_ms": duration_ms,
+                            "prompt_budget": _prompt_budget,
                             **(metadata or {}),
                         }
                     )
@@ -641,11 +673,11 @@ class LLMClient:
         return ""
 
     @staticmethod
-    @lru_cache(1)
     def _schema_prompt() -> str:
-        """Load shared StrategyPlan schema block for all strategist prompts."""
+        """Load shared StrategyPlan schema block for all strategist prompts.
 
-        schema_path = Path(__file__).resolve().parents[2] / "prompts" / "strategy_plan_schema.txt"
-        if schema_path.exists():
-            return schema_path.read_text(encoding="utf-8").strip()
-        return ""
+        Delegates to the module-level _load_schema_prompt() which is lru_cached.
+        The active mode is controlled by STRATEGIST_SCHEMA_MODE env var (default: 'core').
+        """
+        mode = os.environ.get("STRATEGIST_SCHEMA_MODE", "core").lower()
+        return _load_schema_prompt(mode)
