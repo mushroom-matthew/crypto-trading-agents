@@ -37,7 +37,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - **Phase 5:** `[pending]` (`07`, `08` infra expansion not marked complete).
 - **Phase 6:** `[complete]` (`37`, `38`, `39`, `40`, `41`, `42`, `43`, `44`, `45` all implemented; R39 universe screener merged `b7c5d5f`, now in paper trading validation gate).
 - **Phase 7:** `[complete]` (`48` research budget runtime implemented `aa90202`; `46` template routing implemented `dc5bb98`; `47` hard template binding implemented `7f24256`; R46/R47 accuracy gates tracked via `GET /analytics/template-routing` during paper trading).
-- **Phase 8:** `[partial]` (R49 ✅, R50 ✅, R51 ✅, R52 ✅, R53 ✅, R55 ✅, R56 ✅, R58 ✅, R59 ✅, R60 ✅ implemented; R54 is an authored design contract not yet implemented).
+- **Phase 8:** `[partial]` (R49 ✅, R50 ✅, R51 ✅, R52 ✅, R53 ✅, R54 ✅, R55 ✅, R56 ✅, R58 ✅, R59 ✅, R60 ✅ implemented; all Phase 8 runbooks now implemented).
 
 ## Current Active Priorities (Git-Derived)
 - **Primary execution frontier:** **Start paper trading session** to validate Phase 6 (R39 screener + R40/42 templates). This is the gate for R46 and R47.
@@ -66,7 +66,7 @@ This folder contains branch-specific runbooks for parallel agents. Each runbook 
 - [51-memory-store-diversified-retrieval.md](51-memory-store-diversified-retrieval.md): Diversified episode memory store and contrastive retrieval (`wins`, `losses`, `failure_modes`) for strategist and judge grounding. Builds on Signal Ledger outcome data and adds regime fingerprints + playbook metadata. `✅ implemented`
 - [52-playbook-definition-regime-tags.md](52-playbook-definition-regime-tags.md): Typed playbook schema with regime eligibility, entry/invalidation rules, stop/target logic, time-horizon expectations, and historical stats (including holding-time/MAE/MFE distributions). Strategist selects playbook first, then instantiates a plan. `✅ implemented`
 - [53-judge-validation-rules-memory-evidence.md](53-judge-validation-rules-memory-evidence.md): Judge loop upgrade from risk-only checks to evidence-based validation using memory failure patterns and cluster evidence; explicit revise/reject criteria for unsupported or overconfident strategist proposals. `✅ implemented`
-- [54-reasoning-agent-cadence-rules.md](54-reasoning-agent-cadence-rules.md): Central cadence runbook for a three-tier model (deterministic tick engine, event-driven policy loop, slow structural learning loop), including policy heartbeats/triggers, reflection cadence, and slow-loop scheduling. `[docs-only runbook]`
+- [54-reasoning-agent-cadence-rules.md](54-reasoning-agent-cadence-rules.md): Central cadence runbook for a three-tier model (deterministic tick engine, event-driven policy loop, slow structural learning loop), including policy heartbeats/triggers, reflection cadence, and slow-loop scheduling. `✅ implemented`
 - [55-regime-fingerprint-transition-detector.md](55-regime-fingerprint-transition-detector.md): Deterministic regime fingerprint + transition detector (bounded, decomposable distance + asymmetric hysteresis + HTF-close gating) that emits `regime_state_changed` policy events and drives policy-loop cadence without per-tick LLM calls. `✅ implemented`
 - [56-structural-target-activation-refinement-enforcement.md](56-structural-target-activation-refinement-enforcement.md): Deterministic enforcement layer between playbook schema and trigger engine — compiler validation for structural target candidate selection (expectancy gate telemetry) and activation refinement mode -> trigger identifier/timeframe/confirmation mapping. `✅ implemented`
 - [58-deterministic-structure-engine-and-context-exposure.md](58-deterministic-structure-engine-and-context-exposure.md): Deterministic structure engine (`StructureSnapshot`, levels, ladders, structural events) as reusable context for policy reassessment triggers and deterministic entry/stop/target selection, with user-visible ops/UI exposure. `✅ implemented`
@@ -265,10 +265,10 @@ system around multimodal inputs, reflection, memory, and evidence gating.
 36. **56**: Structural target + activation refinement enforcement (compiler + deterministic mapping layer) `[docs-only]`
 37. **60**: Precommitted exit contracts + portfolio meta-risk overlay (position-level exit contract at entry; deterministic portfolio-level trims/reallocation separate from strategy exits) `[docs-only]`
 38. **50**: Dual reflection templates (policy-level fast reflection, high-level batch review) `✅ implemented`
-39. **53**: Judge validation rules with memory-backed rejection criteria `[docs-only]`
+39. **53**: Judge validation rules with memory-backed rejection criteria `✅ implemented`
 
 **Stratum I — Operations control plane (after Stratum H starts landing):**
-40. **54**: Reasoning-agent cadence rules (three-tier scheduling, policy triggers/heartbeats, slow-loop thresholds) `[docs-only]`
+40. **54**: Reasoning-agent cadence rules (three-tier scheduling, policy triggers/heartbeats, slow-loop thresholds) `✅ implemented`
 
 > **Why this order:** `MarketSnapshot` (49) establishes normalized inputs, but policy-loop
 > cadence is only trustworthy once the deterministic regime transition detector (55)
