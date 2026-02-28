@@ -178,6 +178,7 @@ async def generate_strategy_plan_activity(
     repair_instructions: Optional[str] = None,
     indicator_timeframe: Optional[str] = None,
     direction_bias: Optional[str] = None,
+    preferred_symbol: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate a strategy plan using the LLM client.
 
@@ -251,6 +252,19 @@ async def generate_strategy_plan_activity(
         assets=assets,
         risk_params={},
     )
+
+    # Step 4: Symbol-local payload shaping — slim non-selected assets to compact
+    # summaries (~18 fields vs 70+) to reduce token cost on multi-symbol calls.
+    # Auto-activate for single-symbol sessions; use explicit preferred_symbol when
+    # a screener recommendation has selected a focal instrument.
+    _focal = preferred_symbol or (symbols[0] if len(symbols) == 1 else None)
+    if _focal and len(assets) > 1:
+        llm_input = llm_input.slim_for_symbol(_focal)
+        logger.debug(
+            "Payload shaping active: full indicators for %s, compact for %d other asset(s)",
+            _focal,
+            len(assets) - 1,
+        )
 
     # Generate plan — inject repair instructions into the prompt if provided
     effective_prompt = strategy_prompt
@@ -1623,6 +1637,7 @@ class PaperTradingWorkflow:
                 None,  # repair_instructions
                 self.indicator_timeframe,
                 self.direction_bias,
+                self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
             ],
             schedule_to_close_timeout=timedelta(minutes=5),
             retry_policy=RetryPolicy(maximum_attempts=2),
@@ -1650,6 +1665,7 @@ class PaperTradingWorkflow:
                     _validation.repair_prompt(),  # repair_instructions
                     self.indicator_timeframe,
                     self.direction_bias,
+                    self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=1),

@@ -37,6 +37,26 @@ from ops_api.websocket_manager import manager as ws_manager
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
+def _cors_origins() -> list[str]:
+    """Return allowed CORS origins from env or safe local-dev defaults.
+
+    Set CORS_ORIGINS="https://your-domain.com,https://app.your-domain.com"
+    in production.  Wildcard ("*") is intentionally disallowed here because
+    the browser CORS spec forbids allow_credentials=True with a wildcard origin.
+    """
+    raw = os.environ.get("CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    # Safe local-dev defaults; override CORS_ORIGINS before any internet exposure.
+    return [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8081",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ]
+
+
 app = FastAPI(
     title="Crypto Trading Agents - Unified Ops API",
     version="0.2.0",
@@ -44,7 +64,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -191,6 +191,75 @@ class LLMInput(SerializableModel):
     market_structure: Dict[str, Any] = Field(default_factory=dict)
     previous_triggers: List[TriggerSummary] = Field(default_factory=list)
 
+    def slim_for_symbol(
+        self,
+        selected_symbol: "str | None",
+        max_other_symbols: int = 5,
+        trigger_cap: int = 50,
+    ) -> "LLMInput":
+        """Slim non-selected assets to compact indicator snapshots.
+
+        When a screener recommendation selects a focal symbol, only that symbol
+        needs full indicator detail.  Other symbols get compact summaries
+        (OHLCV + key regime indicators only) to reduce token cost significantly
+        (~70 fields → ~18 fields per non-selected asset snapshot).
+
+        Step 4 of _prompt-budget-and-context-offload.md backlog.
+        """
+        if not selected_symbol or len(self.assets) <= 1:
+            return self
+
+        # Fields kept for non-selected symbols — enough for the LLM to understand
+        # regime/momentum context without full indicator payloads.
+        _COMPACT_FIELDS = frozenset({
+            "symbol", "timeframe", "as_of",
+            # OHLCV
+            "open", "high", "low", "close", "volume",
+            # Key regime indicators
+            "rsi_14", "atr_14", "adx_14", "sma_medium", "ema_50",
+            # Compression / breakout state
+            "compression_flag", "expansion_flag", "breakout_confirmed", "vol_burst",
+            # HTF structural context
+            "htf_daily_high", "htf_daily_low", "htf_daily_close",
+        })
+
+        slimmed_assets: List[AssetState] = []
+        other_count = 0
+        for asset in self.assets:
+            if asset.symbol == selected_symbol:
+                slimmed_assets.append(asset)
+            elif other_count < max_other_symbols:
+                compact_indicators = [
+                    IndicatorSnapshot(
+                        **{
+                            field: getattr(snap, field)
+                            for field in _COMPACT_FIELDS
+                            if getattr(snap, field, None) is not None
+                        }
+                    )
+                    for snap in asset.indicators
+                ]
+                slimmed_assets.append(
+                    AssetState(
+                        symbol=asset.symbol,
+                        indicators=compact_indicators,
+                        trend_state=asset.trend_state,
+                        vol_state=asset.vol_state,
+                        regime_assessment=asset.regime_assessment,
+                    )
+                )
+                other_count += 1
+
+        # Rank previous_triggers: selected-symbol triggers first, then others up to cap.
+        ranked_triggers = (
+            [t for t in self.previous_triggers if t.symbol == selected_symbol]
+            + [t for t in self.previous_triggers if t.symbol != selected_symbol]
+        )[:trigger_cap]
+
+        return self.model_copy(
+            update={"assets": slimmed_assets, "previous_triggers": ranked_triggers}
+        )
+
 
 class TriggerCondition(SerializableModel):
     """Entry/exit specification provided by the LLM."""

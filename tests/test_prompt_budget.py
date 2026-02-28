@@ -214,3 +214,164 @@ class TestSchemaMode:
         ]
         for fragment in required_fragments:
             assert fragment in core, f"Missing required section: {fragment!r}"
+
+
+# ---------------------------------------------------------------------------
+# TestSlimForSymbol — Step 4: multi-instrument payload shaping
+# ---------------------------------------------------------------------------
+
+def _make_snapshot(symbol: str, timeframe: str = "1h", close: float = 100.0) -> "IndicatorSnapshot":
+    from datetime import timezone
+    from schemas.llm_strategist import IndicatorSnapshot
+    return IndicatorSnapshot(
+        symbol=symbol,
+        timeframe=timeframe,
+        as_of=__import__("datetime").datetime(2026, 1, 1, tzinfo=timezone.utc),
+        close=close,
+        open=close * 0.99,
+        high=close * 1.01,
+        low=close * 0.98,
+        volume=1_000_000.0,
+        rsi_14=55.0,
+        atr_14=2.5,
+        adx_14=30.0,
+        sma_medium=98.0,
+        ema_50=97.0,
+        compression_flag=0.0,
+        expansion_flag=1.0,
+        breakout_confirmed=1.0,
+        vol_burst=True,
+        htf_daily_high=105.0,
+        htf_daily_low=95.0,
+        htf_daily_close=101.0,
+        # Extra fields that should be dropped in compact mode
+        macd=0.5,
+        macd_signal=0.3,
+        macd_hist=0.2,
+        bollinger_upper=110.0,
+        bollinger_lower=90.0,
+        candle_body_pct=0.8,
+        htf_daily_atr=3.0,
+        fib_618=99.5,
+    )
+
+
+def _make_asset(symbol: str) -> "AssetState":
+    from schemas.llm_strategist import AssetState
+    return AssetState(
+        symbol=symbol,
+        indicators=[_make_snapshot(symbol)],
+        trend_state="uptrend",
+        vol_state="normal",
+    )
+
+
+def _make_llm_input(symbols: list) -> "LLMInput":
+    from datetime import timezone
+    from schemas.llm_strategist import LLMInput, PortfolioState
+    return LLMInput(
+        portfolio=PortfolioState(
+            timestamp=__import__("datetime").datetime(2026, 1, 1, tzinfo=timezone.utc),
+            equity=10000.0,
+            cash=10000.0,
+            positions={},
+            realized_pnl_7d=0.0,
+            realized_pnl_30d=0.0,
+            sharpe_30d=0.0,
+            max_drawdown_90d=0.0,
+            win_rate_30d=0.0,
+            profit_factor_30d=1.0,
+        ),
+        assets=[_make_asset(s) for s in symbols],
+        risk_params={},
+    )
+
+
+class TestSlimForSymbol:
+    def test_noop_for_single_asset(self):
+        inp = _make_llm_input(["BTC-USD"])
+        slimmed = inp.slim_for_symbol("BTC-USD")
+        assert slimmed is inp  # same object — no copy needed
+
+    def test_noop_when_no_selected_symbol(self):
+        inp = _make_llm_input(["BTC-USD", "ETH-USD"])
+        slimmed = inp.slim_for_symbol(None)
+        assert slimmed is inp
+
+    def test_selected_asset_keeps_full_indicators(self):
+        inp = _make_llm_input(["BTC-USD", "ETH-USD", "SOL-USD"])
+        slimmed = inp.slim_for_symbol("BTC-USD")
+        btc_asset = next(a for a in slimmed.assets if a.symbol == "BTC-USD")
+        snap = btc_asset.indicators[0]
+        # Full snapshot preserved: field like fib_618 should still be present
+        assert snap.fib_618 == 99.5
+        assert snap.macd == 0.5
+        assert snap.bollinger_upper == 110.0
+
+    def test_non_selected_assets_are_compact(self):
+        inp = _make_llm_input(["BTC-USD", "ETH-USD", "SOL-USD"])
+        slimmed = inp.slim_for_symbol("BTC-USD")
+        for asset in slimmed.assets:
+            if asset.symbol == "BTC-USD":
+                continue
+            snap = asset.indicators[0]
+            # Compact fields present
+            assert snap.rsi_14 == 55.0
+            assert snap.atr_14 == 2.5
+            assert snap.compression_flag == 0.0
+            assert snap.htf_daily_high == 105.0
+            # Extra fields dropped (None in compact mode)
+            assert snap.macd is None
+            assert snap.fib_618 is None
+            assert snap.bollinger_upper is None
+            assert snap.candle_body_pct is None
+
+    def test_compact_has_fewer_populated_fields(self):
+        """Non-selected assets should have fewer non-null indicator fields."""
+        inp = _make_llm_input(["BTC-USD", "ETH-USD"])
+        slimmed = inp.slim_for_symbol("BTC-USD")
+
+        full_eth = next(a for a in inp.assets if a.symbol == "ETH-USD")
+        slim_eth = next(a for a in slimmed.assets if a.symbol == "ETH-USD")
+
+        def _populated_count(snap) -> int:
+            return sum(1 for v in snap.model_dump().values() if v is not None)
+
+        full_count = _populated_count(full_eth.indicators[0])
+        slim_count = _populated_count(slim_eth.indicators[0])
+        # Compact mode must have fewer populated fields than the full snapshot
+        assert slim_count < full_count
+
+    def test_all_symbols_present_after_slimming(self):
+        symbols = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD"]
+        inp = _make_llm_input(symbols)
+        slimmed = inp.slim_for_symbol("BTC-USD")
+        slimmed_symbols = {a.symbol for a in slimmed.assets}
+        assert slimmed_symbols == set(symbols)
+
+    def test_max_other_symbols_cap(self):
+        symbols = ["BTC-USD"] + [f"COIN{i}-USD" for i in range(10)]
+        inp = _make_llm_input(symbols)
+        slimmed = inp.slim_for_symbol("BTC-USD", max_other_symbols=3)
+        # BTC-USD + at most 3 others = 4 total
+        assert len(slimmed.assets) == 4
+        assert any(a.symbol == "BTC-USD" for a in slimmed.assets)
+
+    def test_trigger_ranking_selected_first(self):
+        from schemas.llm_strategist import TriggerSummary
+        inp = _make_llm_input(["BTC-USD", "ETH-USD"])
+        eth_trigger = TriggerSummary(
+            id="t1", symbol="ETH-USD", timeframe="1h",
+            direction="long", entry_rule="close > sma_medium",
+            exit_rule="close < ema_50",
+        )
+        btc_trigger = TriggerSummary(
+            id="t2", symbol="BTC-USD", timeframe="1h",
+            direction="long", entry_rule="close > sma_medium",
+            exit_rule="close < ema_50",
+        )
+        inp = inp.model_copy(update={"previous_triggers": [eth_trigger, btc_trigger]})
+        slimmed = inp.slim_for_symbol("BTC-USD")
+        # BTC trigger should be ranked first
+        assert slimmed.previous_triggers[0].symbol == "BTC-USD"
+        assert slimmed.previous_triggers[1].symbol == "ETH-USD"
