@@ -230,6 +230,16 @@ class StrategyPlanProvider:
         )
         plan = self._enrich_plan(plan, llm_input)
         plan = plan.model_copy(update={"run_id": run_id})
+
+        # R50 — Policy-level reflection (fast path, event-driven).
+        # Runs after enrichment, before cache write and return.
+        # Only enabled when POLICY_REFLECTION_ENABLED=true.
+        reflection_result = self._maybe_run_policy_reflection(
+            plan, llm_input, policy_snapshot
+        )
+        if reflection_result is not None:
+            object.__setattr__(plan, "_reflection_result", reflection_result)
+
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(plan.to_json(indent=2))
         self.daily_counts[date_key] += 1
@@ -392,6 +402,62 @@ class StrategyPlanProvider:
             "context_flags": _context_flags(llm_input),
             **_prompt_metadata(prompt_template),
         }
+
+    def _maybe_run_policy_reflection(
+        self,
+        plan: "StrategyPlan",
+        llm_input: "LLMInput",
+        policy_snapshot: "PolicySnapshot | None",
+    ) -> "PolicyLevelReflectionResult | None":
+        """Invoke policy-level reflection if enabled (R50).
+
+        Returns the reflection result (attached as ``_reflection_result`` on
+        the plan) or None if reflection is disabled or errors out.
+        """
+        try:
+            from services.low_level_reflection_service import (  # noqa: PLC0415
+                PolicyLevelReflectionService,
+                build_reflection_request,
+                is_enabled,
+            )
+            from schemas.reflection import PolicyLevelReflectionResult  # noqa: PLC0415
+        except ImportError:
+            return None
+
+        if not is_enabled():
+            return None
+
+        try:
+            rationale_excerpt: str | None = None
+            if hasattr(plan, "rationale") and plan.rationale:
+                rationale_excerpt = plan.rationale[:400]
+
+            request = build_reflection_request(
+                plan_id=plan.plan_id,
+                playbook_id=getattr(plan, "playbook_id", None),
+                template_id=getattr(plan, "template_id", None),
+                trigger_count=len(plan.triggers),
+                allowed_directions=list(plan.allowed_directions or []),
+                regime=plan.regime,
+                rationale_excerpt=rationale_excerpt,
+                risk_constraints_present=plan.risk_constraints is not None,
+                snapshot_id=policy_snapshot.provenance.snapshot_id if policy_snapshot else None,
+                snapshot_hash=policy_snapshot.provenance.snapshot_hash if policy_snapshot else None,
+                source="plan_provider",
+                policy_event_type="plan_generation",
+            )
+            svc = PolicyLevelReflectionService()
+            result = svc.reflect(request)
+            logger.debug(
+                "Policy reflection plan=%s status=%s latency_ms=%d",
+                plan.plan_id,
+                result.status,
+                result.latency_ms,
+            )
+            return result
+        except Exception:
+            logger.debug("Policy-level reflection failed (non-fatal)", exc_info=True)
+            return None
 
     def _emit_plan_generated(
         self,
