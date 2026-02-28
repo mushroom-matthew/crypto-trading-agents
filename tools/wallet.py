@@ -1,3 +1,5 @@
+# DEPRECATED: EVM wallet utilities — system uses Coinbase CDP, not raw EVM signing.
+# Safe to remove after 2026-06-01 if no active imports found.
 """Wallet signing and sending utilities for EVM chains."""
 
 from __future__ import annotations

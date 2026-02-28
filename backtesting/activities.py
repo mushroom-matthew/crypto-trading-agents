@@ -490,6 +490,10 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         "final_positions": result.final_positions,
         "intraday_judge_history": result.intraday_judge_history,
         "judge_triggered_replans": result.judge_triggered_replans,
+        # B1: artifact fields previously dropped before persistence
+        "setup_events": result.setup_events,
+        "exit_contracts": result.exit_contracts,
+        "trade_mgmt_events": result.trade_mgmt_events,
     }
     if isinstance(result.summary, dict):
         if result.summary.get("trigger_evaluation_samples") is not None:

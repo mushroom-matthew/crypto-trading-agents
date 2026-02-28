@@ -59,6 +59,12 @@ DEFAULT_PLAN_INTERVAL_HOURS = float(os.environ.get("PAPER_TRADING_PLAN_INTERVAL_
 PLAN_CACHE_DIR = Path(os.environ.get("PAPER_TRADING_PLAN_CACHE", ".cache/paper_trading_plans"))
 
 
+def _timeframe_to_minutes(tf: str) -> int:
+    """Convert a Coinbase-style timeframe string to minutes for plan validation."""
+    _MAP = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "6h": 360, "1d": 1440}
+    return _MAP.get(str(tf).lower(), 60)
+
+
 def _is_missing_stop_validation_error(exc: Exception) -> bool:
     text = str(exc)
     return "must define a stop" in text and "stop_anchor_type" in text
@@ -270,6 +276,62 @@ async def generate_strategy_plan_activity(
             f"Do NOT generate entry triggers for the opposite direction.\n"
             f"REQUIRED: Every entry trigger must specify a target_anchor_type or numeric target_price_abs.\n"
         )
+
+    # A5: Inject episode memory context so the LLM can learn from prior outcomes.
+    # Only runs when DB is available and at least one symbol has resolved episodes.
+    if not repair_instructions:  # skip memory injection in repair passes
+        try:
+            from services.episode_memory_service import EpisodeMemoryStore
+            from services.memory_retrieval_service import MemoryRetrievalService
+            from schemas.episode_memory import MemoryRetrievalRequest
+
+            _mem_store = EpisodeMemoryStore()
+            _memory_lines: List[str] = []
+            for _sym in (symbols or [])[:3]:  # limit to first 3 symbols
+                _recent = _mem_store.load_recent(_sym, limit=30)
+                if not _recent:
+                    continue
+                for _r in _recent:
+                    _mem_store.add(_r)
+                _req = MemoryRetrievalRequest(symbol=_sym, regime_fingerprint={})
+                _bundle = MemoryRetrievalService(_mem_store).retrieve(_req)
+                _wins = _bundle.winning_contexts[:3]
+                _losses = _bundle.losing_contexts[:3]
+                _failures = _bundle.failure_mode_patterns[:3]
+                if _wins or _losses or _failures:
+                    _memory_lines.append(f"\n[{_sym}]")
+                    if _wins:
+                        _memory_lines.append(
+                            "  Wins: "
+                            + "; ".join(
+                                f"r={r.r_achieved:.1f} tf={r.timeframe} playbook={r.playbook_id or 'n/a'}"
+                                for r in _wins if r.r_achieved is not None
+                            )
+                        )
+                    if _losses:
+                        _memory_lines.append(
+                            "  Losses: "
+                            + "; ".join(
+                                f"r={r.r_achieved:.1f} modes={','.join(r.failure_modes[:2]) or 'n/a'}"
+                                for r in _losses if r.r_achieved is not None
+                            )
+                        )
+                    if _failures:
+                        _memory_lines.append(
+                            "  Failure patterns: "
+                            + "; ".join(
+                                ",".join(r.failure_modes[:2]) for r in _failures if r.failure_modes
+                            )
+                        )
+            if _memory_lines:
+                effective_prompt = (
+                    (effective_prompt or "")
+                    + "\n\nMEMORY_CONTEXT (recent resolved episodes — calibrate risk accordingly):\n"
+                    + "\n".join(_memory_lines)
+                    + "\n"
+                )
+        except Exception as _mem_exc:
+            logger.debug("Memory context injection failed (non-fatal): %s", _mem_exc)
 
     llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
     try:
@@ -501,6 +563,11 @@ def evaluate_triggers_activity(
                 position_meta=position_meta,
             )
 
+            # Build a lookup of trigger dicts by id for signal emission.
+            _trigger_map: Dict[str, Any] = {
+                t.get("id", ""): t for t in plan_dict.get("triggers", []) if isinstance(t, dict)
+            }
+
             for order in orders:
                 order_dict = {
                     "symbol": order.symbol,
@@ -513,6 +580,68 @@ def evaluate_triggers_activity(
                     "intent": order.intent,
                     "reason": order.reason,
                 }
+
+                # A1: Emit a SignalEvent for each entry order and thread signal_id.
+                if getattr(order, "intent", None) == "entry":
+                    try:
+                        from schemas.signal_event import SignalEvent as _SignalEvent
+                        from services.signal_ledger_service import (
+                            SignalLedgerService as _SLS,
+                            compute_regime_snapshot_hash as _hash_snap,
+                        )
+                        _trig = _trigger_map.get(order.reason or "", {})
+                        _direction = "long" if order.side.lower() == "buy" else "short"
+                        _close = float(order.price or close_price)
+                        # Best-effort stop from trigger pct (replaced by resolved stop on fill)
+                        _slp = _trig.get("stop_loss_pct")
+                        if _slp:
+                            _stop_est = _close * (1 - float(_slp) / 100) if _direction == "long" else _close * (1 + float(_slp) / 100)
+                        else:
+                            _stop_est = _close * 0.98  # 2% default placeholder
+                        _target_est = float(_trig.get("target_price_abs") or 0.0) or (_close * 1.04)
+                        _risk = abs(_close - _stop_est)
+                        _reward = abs(_target_est - _close)
+                        _r_mult = round(_reward / _risk, 2) if _risk > 0 else 0.0
+                        _hold_bars = int(_trig.get("estimated_bars_to_resolution") or 4)
+                        _thesis = (
+                            _trig.get("thesis")
+                            or plan_dict.get("global_view")
+                            or f"{_direction} signal from {order.reason}"
+                        )
+                        _snap_hash = _hash_snap({
+                            "close": close_price, "symbol": symbol, "timeframe": timeframe,
+                            "rsi_14": data.get("rsi_14"), "atr_14": data.get("atr_14"),
+                        })
+                        _signal = _SignalEvent(
+                            engine_version="1.0.0",
+                            ts=bar_ts,
+                            valid_until=bar_ts + timedelta(hours=_hold_bars),
+                            timeframe=timeframe,
+                            symbol=order.symbol,
+                            direction=_direction,
+                            trigger_id=order.reason or "unknown",
+                            strategy_type=(
+                                order.trigger_category
+                                or _trig.get("category")
+                                or plan_dict.get("regime", "unknown")
+                            ),
+                            regime_snapshot_hash=_snap_hash,
+                            entry_price=_close,
+                            stop_price_abs=_stop_est,
+                            target_price_abs=_target_est,
+                            risk_r_multiple=_r_mult,
+                            expected_hold_bars=_hold_bars,
+                            thesis=str(_thesis)[:500],
+                            playbook_id=_trig.get("playbook_id"),
+                            strategy_template_version=plan_dict.get("template_id"),
+                        )
+                        order_dict["signal_id"] = _signal.signal_id
+                        order_dict["signal_ts"] = bar_ts.isoformat()
+                        order_dict["signal_entry_price"] = _close
+                        _SLS().insert_signal(_signal)
+                    except Exception as _sig_exc:
+                        logger.debug("signal_id emission failed (non-fatal): %s", _sig_exc)
+
                 all_orders.append(order_dict)
 
                 # M1 guardrail (Runbook 60): detect non-emergency direction="exit" triggers
@@ -750,6 +879,137 @@ async def emit_paper_trading_event_activity(
         run_id=session_id,
     )
     store.append(event)
+
+
+@activity.defn
+async def record_signal_fill_activity(
+    signal_id: str,
+    fill_price: float,
+    fill_ts_iso: str,
+    signal_ts_iso: str,
+    signal_entry_price: float,
+) -> None:
+    """Record fill drift telemetry to the signal_ledger table (non-fatal).
+
+    Called after a paper trading fill to capture slippage_bps and fill_latency_ms.
+    """
+    try:
+        from services.signal_ledger_service import SignalLedgerService
+        from datetime import datetime as _dt, timezone as _tz
+
+        fill_ts = _dt.fromisoformat(fill_ts_iso)
+        signal_ts = _dt.fromisoformat(signal_ts_iso)
+        if fill_ts.tzinfo is None:
+            fill_ts = fill_ts.replace(tzinfo=_tz.utc)
+        if signal_ts.tzinfo is None:
+            signal_ts = signal_ts.replace(tzinfo=_tz.utc)
+        SignalLedgerService().record_fill(
+            signal_id=signal_id,
+            fill_price=fill_price,
+            fill_ts=fill_ts,
+            signal_ts=signal_ts,
+            signal_entry_price=signal_entry_price,
+        )
+    except Exception as exc:
+        logger.debug("record_signal_fill_activity failed (non-fatal): %s", exc)
+
+
+@activity.defn
+async def build_episode_activity(
+    signal_id: Optional[str],
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    fill_ts_iso: str,
+    exit_price: float,
+    exit_ts_iso: str,
+    stop_price_abs: Optional[float],
+    target_price_abs: Optional[float],
+    hit: str,
+    timeframe: str,
+    playbook_id: Optional[str] = None,
+    template_id: Optional[str] = None,
+) -> None:
+    """Build and persist an EpisodeMemoryRecord after a position closes.
+
+    Called when _sweep_stop_target detects a stop or target hit.
+    """
+    try:
+        from services.episode_memory_service import EpisodeMemoryStore, build_episode_record
+        from schemas.signal_event import SignalEvent as _SE
+        from datetime import datetime as _dt, timezone as _tz
+
+        fill_ts = _dt.fromisoformat(fill_ts_iso)
+        exit_ts = _dt.fromisoformat(exit_ts_iso)
+        if fill_ts.tzinfo is None:
+            fill_ts = fill_ts.replace(tzinfo=_tz.utc)
+        if exit_ts.tzinfo is None:
+            exit_ts = exit_ts.replace(tzinfo=_tz.utc)
+
+        # Compute outcome metrics
+        if direction == "long":
+            pnl = exit_price - entry_price
+            if stop_price_abs and target_price_abs:
+                risk = entry_price - stop_price_abs
+                reward = exit_price - entry_price
+                r_achieved = reward / risk if risk > 0 else 0.0
+            else:
+                r_achieved = pnl / max(abs(entry_price * 0.02), 1e-6)
+            mfe_pct = max(0.0, (exit_price - entry_price) / entry_price * 100) if hit == "target" else 0.0
+            mae_pct = min(0.0, (exit_price - entry_price) / entry_price * 100) if hit == "stop" else 0.0
+        else:
+            pnl = entry_price - exit_price
+            if stop_price_abs and target_price_abs:
+                risk = stop_price_abs - entry_price
+                reward = entry_price - exit_price
+                r_achieved = reward / risk if risk > 0 else 0.0
+            else:
+                r_achieved = pnl / max(abs(entry_price * 0.02), 1e-6)
+            mfe_pct = max(0.0, (entry_price - exit_price) / entry_price * 100) if hit == "target" else 0.0
+            mae_pct = min(0.0, (entry_price - exit_price) / entry_price * 100) if hit == "stop" else 0.0
+
+        # Build a minimal SignalEvent to feed build_episode_record
+        from services.signal_ledger_service import compute_regime_snapshot_hash as _hash
+        _snap_hash = _hash({"symbol": symbol, "entry_price": entry_price})
+        _hold_bars = max(1, int((exit_ts - fill_ts).total_seconds() / 3600))
+        proxy_signal = _SE(
+            signal_id=signal_id or str(uuid4()),
+            engine_version="1.0.0",
+            ts=fill_ts,
+            valid_until=exit_ts,
+            timeframe=timeframe,
+            symbol=symbol,
+            direction=direction,
+            trigger_id="paper_trading",
+            strategy_type="paper_trading",
+            regime_snapshot_hash=_snap_hash,
+            entry_price=entry_price,
+            stop_price_abs=stop_price_abs or (entry_price * 0.98 if direction == "long" else entry_price * 1.02),
+            target_price_abs=target_price_abs or (entry_price * 1.04 if direction == "long" else entry_price * 0.96),
+            risk_r_multiple=abs(r_achieved),
+            expected_hold_bars=_hold_bars,
+            thesis=f"{direction} position closed via {hit}",
+            playbook_id=playbook_id,
+            strategy_template_version=template_id,
+        )
+
+        record = build_episode_record(
+            signal_event=proxy_signal,
+            exit_ts=exit_ts,
+            pnl=pnl,
+            r_achieved=r_achieved,
+            mfe_pct=mfe_pct,
+            mae_pct=mae_pct,
+        )
+        store = EpisodeMemoryStore()
+        store.add(record)
+        store.persist_episode(record)
+        logger.info(
+            "episode_memory: built episode signal_id=%s symbol=%s hit=%s r=%.2f",
+            signal_id, symbol, hit, r_achieved,
+        )
+    except Exception as exc:
+        logger.warning("build_episode_activity failed (non-fatal): %s", exc)
 
 
 # ============================================================================
@@ -1373,7 +1633,7 @@ class PaperTradingWorkflow:
         # found, attempt one repair pass with the error context injected into the
         # prompt.  The runtime failsafe in trigger_engine handles anything that slips
         # through (e.g. plans persisted before this validator existed).
-        _validation = validate_trigger_plan(plan_dict, base_tf_minutes=60)
+        _validation = validate_trigger_plan(plan_dict, base_tf_minutes=_timeframe_to_minutes(self.indicator_timeframe))
         if not _validation.is_valid:
             workflow.logger.warning(
                 f"Plan validation failed — attempting repair pass:\n{_validation.summary()}"
@@ -1394,7 +1654,7 @@ class PaperTradingWorkflow:
                 schedule_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
-            _recheck = validate_trigger_plan(_repair_dict, base_tf_minutes=60)
+            _recheck = validate_trigger_plan(_repair_dict, base_tf_minutes=_timeframe_to_minutes(self.indicator_timeframe))
             if _recheck.is_valid:
                 workflow.logger.info("Repair plan passed validation — using repaired plan.")
                 plan_dict = _repair_dict
@@ -1738,6 +1998,35 @@ class PaperTradingWorkflow:
                 "reason": trigger_id,
             })
 
+            # A4: Build episode record after position close (non-fatal).
+            try:
+                _entry_price = float(
+                    meta.get("signal_entry_price")
+                    or portfolio_state.get("entry_prices", {}).get(symbol)
+                    or price
+                )
+                _fill_ts = meta.get("opened_at") or workflow.now().isoformat()
+                await workflow.execute_activity(
+                    build_episode_activity,
+                    args=[
+                        meta.get("signal_id"),   # signal_id (may be None)
+                        symbol,
+                        direction,
+                        _entry_price,
+                        _fill_ts,
+                        float(price),
+                        workflow.now().isoformat(),
+                        stop_px,
+                        target_px,
+                        hit,
+                        self.indicator_timeframe,
+                    ],
+                    schedule_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except Exception:
+                pass  # episode construction is non-critical
+
     def _resolve_order_stop_target(
         self, order: Dict[str, Any], fill_price: float
     ) -> tuple[float | None, float | None]:
@@ -1905,6 +2194,16 @@ class PaperTradingWorkflow:
             fill_payload["stop_price_abs"] = stop_price_abs
         if target_price_abs is not None:
             fill_payload["target_price_abs"] = target_price_abs
+        # A2: thread signal_id + signal metadata through fill payload for position_meta.
+        _signal_id = order.get("signal_id")
+        _signal_ts = order.get("signal_ts")
+        _signal_entry_price = order.get("signal_entry_price")
+        if _signal_id:
+            fill_payload["signal_id"] = _signal_id
+        if _signal_ts:
+            fill_payload["signal_ts"] = _signal_ts
+        if _signal_entry_price is not None:
+            fill_payload["signal_entry_price"] = float(_signal_entry_price)
         # Carry the LLM's time estimate to the fill record for playbook accuracy stats
         if order.get("intent") == "entry":
             trigger_id = order.get("trigger_id") or order.get("reason")
@@ -1985,6 +2284,19 @@ class PaperTradingWorkflow:
                 fill_payload["exit_contract_id"] = _exit_contract.contract_id
 
         await ledger_handle.signal("record_fill", fill_payload)
+
+        # A2: Record fill drift telemetry to signal_ledger (non-fatal, fire-and-forget).
+        if _signal_id and _signal_ts and _signal_entry_price is not None:
+            try:
+                _fill_ts_iso = workflow.now().isoformat()
+                await workflow.execute_activity(
+                    record_signal_fill_activity,
+                    args=[_signal_id, fill_price, _fill_ts_iso, _signal_ts, _signal_entry_price],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except Exception:
+                pass  # fill drift telemetry is non-critical
 
         # Emit position_exit_contract_created event for auditable contract provenance
         if _exit_contract is not None:

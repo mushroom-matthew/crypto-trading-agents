@@ -307,6 +307,13 @@ class ExecutionLedgerWorkflow:
                     meta["stop_price_abs"] = float(fill["stop_price_abs"])
                 if fill.get("target_price_abs") is not None:
                     meta["target_price_abs"] = float(fill["target_price_abs"])
+                # A2: carry signal provenance so episode records can link back to signals.
+                if fill.get("signal_id"):
+                    meta["signal_id"] = fill["signal_id"]
+                if fill.get("signal_ts"):
+                    meta["signal_ts"] = fill["signal_ts"]
+                if fill.get("signal_entry_price") is not None:
+                    meta["signal_entry_price"] = float(fill["signal_entry_price"])
                 self.position_meta[symbol] = meta
         self.fill_count += 1
 

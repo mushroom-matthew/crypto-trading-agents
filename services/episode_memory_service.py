@@ -1,10 +1,8 @@
-"""Episode memory service: in-memory store and record builder (Runbook 51).
+"""Episode memory service: in-memory store and record builder (Runbook 51/A3).
 
 Converts resolved SignalEvents into EpisodeMemoryRecord objects and provides
-a simple in-memory store keyed by episode_id.
-
-No database I/O — the store lives in process memory. DB persistence is deferred
-to a future runbook.
+a store keyed by episode_id.  In-memory for session lifetime; optional DB
+persistence via persist_episode() / load_recent() (Runbook A3).
 
 DISCLAIMER: Records are research telemetry. No trading decisions are derived
 automatically from memory content.
@@ -12,10 +10,14 @@ automatically from memory content.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from uuid import uuid4
+
+import sqlalchemy as sa
 
 from schemas.episode_memory import (
     FAILURE_MODE_TAXONOMY,
@@ -24,6 +26,58 @@ from schemas.episode_memory import (
 from schemas.signal_event import SignalEvent
 
 logger = logging.getLogger(__name__)
+
+_EPISODE_MEMORY_ENABLED = os.environ.get("EPISODE_MEMORY_DB_ENABLED", "1") == "1"
+
+_CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS episode_memory (
+    episode_id      TEXT PRIMARY KEY,
+    signal_id       TEXT,
+    symbol          TEXT NOT NULL,
+    timeframe       TEXT,
+    playbook_id     TEXT,
+    template_id     TEXT,
+    direction       TEXT,
+    outcome_class   TEXT NOT NULL,
+    r_achieved      REAL,
+    mfe_pct         REAL,
+    mae_pct         REAL,
+    hold_bars       INTEGER,
+    regime_fingerprint_hash TEXT,
+    failure_modes_json      TEXT,
+    entry_ts        TIMESTAMP WITH TIME ZONE,
+    exit_ts         TIMESTAMP WITH TIME ZONE,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+_INSERT_EPISODE_SQL = """
+INSERT INTO episode_memory (
+    episode_id, signal_id, symbol, timeframe, playbook_id, template_id,
+    direction, outcome_class, r_achieved, mfe_pct, mae_pct, hold_bars,
+    regime_fingerprint_hash, failure_modes_json, entry_ts, exit_ts
+) VALUES (
+    :episode_id, :signal_id, :symbol, :timeframe, :playbook_id, :template_id,
+    :direction, :outcome_class, :r_achieved, :mfe_pct, :mae_pct, :hold_bars,
+    :regime_fingerprint_hash, :failure_modes_json, :entry_ts, :exit_ts
+)
+ON CONFLICT (episode_id) DO NOTHING
+"""
+
+
+def _make_episode_engine(db_url: Optional[str] = None):
+    """Create a synchronous SQLAlchemy engine for episode_memory."""
+    url = db_url or os.environ.get("DB_DSN", "")
+    if not url:
+        return None
+    url = url.replace("postgresql+asyncpg://", "postgresql://")
+    url = url.replace("asyncpg://", "postgresql://")
+    try:
+        engine = sa.create_engine(url, pool_pre_ping=True, pool_size=2)
+        return engine
+    except Exception as exc:
+        logger.warning("episode_memory: could not create engine: %s", exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -209,27 +263,140 @@ def build_episode_record(
 # ---------------------------------------------------------------------------
 
 class EpisodeMemoryStore:
-    """Thread-unsafe in-memory store for EpisodeMemoryRecord objects.
+    """In-memory store for EpisodeMemoryRecord objects with optional DB persistence.
 
     Keyed by episode_id. Thread safety is the caller's responsibility.
-    DB persistence is deferred — this is intentionally pure-memory for R51.
+    DB persistence is enabled when DB_DSN is set and EPISODE_MEMORY_DB_ENABLED=1.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, engine=None, db_url: Optional[str] = None) -> None:
         self._records: Dict[str, EpisodeMemoryRecord] = {}
+        self._engine = engine
+        self._table_ensured = False
+        if self._engine is None and _EPISODE_MEMORY_ENABLED:
+            self._engine = _make_episode_engine(db_url)
+
+    def _ensure_table(self) -> None:
+        """Create the episode_memory table if it doesn't exist."""
+        if self._table_ensured or self._engine is None:
+            return
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(sa.text(_CREATE_TABLE_SQL))
+            self._table_ensured = True
+        except Exception as exc:
+            logger.warning("episode_memory: table creation failed (non-fatal): %s", exc)
 
     def add(self, record: EpisodeMemoryRecord) -> None:
         """Insert or overwrite a record by episode_id."""
         self._records[record.episode_id] = record
 
+    def persist_episode(self, record: EpisodeMemoryRecord) -> None:
+        """Write an episode record to the DB (non-fatal if DB unavailable)."""
+        if self._engine is None:
+            return
+        self._ensure_table()
+        try:
+            # Compute a short hash of regime_fingerprint for indexed lookup
+            fp_hash: Optional[str] = None
+            if record.regime_fingerprint:
+                import hashlib
+                canonical = json.dumps(record.regime_fingerprint, sort_keys=True, default=str)
+                fp_hash = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+            with self._engine.begin() as conn:
+                conn.execute(
+                    sa.text(_INSERT_EPISODE_SQL),
+                    {
+                        "episode_id": record.episode_id,
+                        "signal_id": record.signal_id,
+                        "symbol": record.symbol,
+                        "timeframe": record.timeframe,
+                        "playbook_id": record.playbook_id,
+                        "template_id": record.template_id,
+                        "direction": record.direction,
+                        "outcome_class": record.outcome_class,
+                        "r_achieved": float(record.r_achieved) if record.r_achieved is not None else None,
+                        "mfe_pct": float(record.mfe_pct) if record.mfe_pct is not None else None,
+                        "mae_pct": float(record.mae_pct) if record.mae_pct is not None else None,
+                        "hold_bars": record.hold_bars,
+                        "regime_fingerprint_hash": fp_hash,
+                        "failure_modes_json": json.dumps(record.failure_modes) if record.failure_modes else None,
+                        "entry_ts": record.entry_ts,
+                        "exit_ts": record.exit_ts,
+                    },
+                )
+            logger.info(
+                "episode_memory: persisted episode_id=%s symbol=%s outcome=%s r=%.2f",
+                record.episode_id,
+                record.symbol,
+                record.outcome_class,
+                record.r_achieved or 0.0,
+            )
+        except Exception as exc:
+            logger.warning("episode_memory: persist failed (non-fatal): %s", exc)
+
+    def load_recent(self, symbol: str, limit: int = 50) -> List[EpisodeMemoryRecord]:
+        """Load the most recent episode records for a symbol from DB.
+
+        Returns an empty list if DB is unavailable or table doesn't exist.
+        Only loads the core fields needed for retrieval scoring.
+        """
+        if self._engine is None:
+            return []
+        self._ensure_table()
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(
+                    sa.text("""
+                        SELECT episode_id, signal_id, symbol, timeframe, playbook_id,
+                               template_id, direction, outcome_class, r_achieved,
+                               mfe_pct, mae_pct, hold_bars, failure_modes_json,
+                               entry_ts, exit_ts
+                        FROM episode_memory
+                        WHERE symbol = :symbol
+                        ORDER BY created_at DESC
+                        LIMIT :limit
+                    """),
+                    {"symbol": symbol, "limit": limit},
+                ).fetchall()
+        except Exception as exc:
+            logger.debug("episode_memory: load_recent failed (non-fatal): %s", exc)
+            return []
+
+        records: List[EpisodeMemoryRecord] = []
+        for row in rows:
+            try:
+                failure_modes = json.loads(row.failure_modes_json) if row.failure_modes_json else []
+                records.append(EpisodeMemoryRecord(
+                    episode_id=row.episode_id,
+                    signal_id=row.signal_id,
+                    symbol=row.symbol,
+                    timeframe=row.timeframe,
+                    playbook_id=row.playbook_id,
+                    template_id=row.template_id,
+                    direction=row.direction,
+                    outcome_class=row.outcome_class,
+                    r_achieved=float(row.r_achieved) if row.r_achieved is not None else None,
+                    mfe_pct=float(row.mfe_pct) if row.mfe_pct is not None else None,
+                    mae_pct=float(row.mae_pct) if row.mae_pct is not None else None,
+                    hold_bars=row.hold_bars,
+                    failure_modes=failure_modes,
+                    entry_ts=row.entry_ts,
+                    exit_ts=row.exit_ts,
+                ))
+            except Exception as exc:
+                logger.debug("episode_memory: skipping malformed row: %s", exc)
+        return records
+
     def get_by_symbol(self, symbol: str) -> List[EpisodeMemoryRecord]:
-        """Return all records for a given symbol, unsorted."""
+        """Return all in-memory records for a given symbol, unsorted."""
         return [r for r in self._records.values() if r.symbol == symbol]
 
     def get_all(self) -> List[EpisodeMemoryRecord]:
-        """Return all records across all symbols, unsorted."""
+        """Return all in-memory records across all symbols, unsorted."""
         return list(self._records.values())
 
     def size(self) -> int:
-        """Return total number of records in the store."""
+        """Return total number of in-memory records in the store."""
         return len(self._records)

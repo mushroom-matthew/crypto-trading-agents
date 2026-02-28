@@ -1,3 +1,5 @@
+# DEPRECATED: Duplicate of ops_api/utils/live_daily_reporter.py — only the ops_api version is active.
+# Safe to remove after 2026-06-01. Delete this copy, keep ops_api/utils/ version.
 """Live daily report generation - matches backtest daily report format."""
 
 from __future__ import annotations

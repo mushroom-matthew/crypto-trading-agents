@@ -1,3 +1,5 @@
+# DEPRECATED: In-process intent queue — replaced by Temporal workflow signals.
+# Safe to remove after 2026-06-01 if no active imports.
 """Simple queue shared between agents for approved trade intents."""
 
 import asyncio

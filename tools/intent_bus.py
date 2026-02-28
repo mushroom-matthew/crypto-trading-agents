@@ -1,3 +1,5 @@
+# DEPRECATED: IntentBus workflow — replaced by direct Temporal signals and MCP tools.
+# Safe to remove after 2026-06-01 if no active workflows reference it.
 """Workflow that broadcasts approved intents to the MCP signal log."""
 
 from __future__ import annotations

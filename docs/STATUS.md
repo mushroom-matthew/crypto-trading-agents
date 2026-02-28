@@ -1,3 +1,5 @@
+> **Status: Historical** — Last updated Dec 2025. See `docs/backlog.md` and auto-memory `session-log.md` for current state (2026-02-28).
+
 ## Repo Status Overview
 This file summarizes current state, recent efforts, and outstanding roadmap items to help a new agent ramp quickly.
 

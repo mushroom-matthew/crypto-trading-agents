@@ -1,3 +1,5 @@
+# DEPRECATED: JSON-config batch backtest runner — not wired to any current workflow.
+# Safe to remove after 2026-06-01 if no callers surface. Use ops_api/routers/backtests.py instead.
 """Run a suite of backtests defined in a JSON configuration."""
 
 from __future__ import annotations

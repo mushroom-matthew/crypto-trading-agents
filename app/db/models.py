@@ -317,6 +317,35 @@ class PositionSnapshot(Base):
     unrealized_pnl: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
 
 
+class EpisodeMemory(Base):
+    """Resolved trade episodes for memory-guided strategy generation (Runbook 51/A3)."""
+
+    __tablename__ = "episode_memory"
+    __table_args__ = (
+        Index("ix_episode_memory_symbol_created", "symbol", "created_at"),
+        Index("ix_episode_memory_signal_id", "signal_id"),
+        Index("ix_episode_memory_playbook", "playbook_id"),
+    )
+
+    episode_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    signal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    timeframe: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    playbook_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    template_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    direction: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    outcome_class: Mapped[str] = mapped_column(String(16), nullable=False)
+    r_achieved: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    mfe_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    mae_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    hold_bars: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    regime_fingerprint_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    failure_modes_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON list
+    entry_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    exit_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class BacktestRun(Base):
     """Backtest metadata and configuration."""
 
@@ -350,6 +379,7 @@ __all__ = [
     "BlockEvent",
     "RiskAllocation",
     "PositionSnapshot",
+    "EpisodeMemory",
     "BacktestRun",
     "WalletType",
     "LedgerSide",
