@@ -1132,7 +1132,7 @@ async def get_structure_snapshot(
         # Prefer the richer time-aware query when available (selected-candle UI
         # lookup). Fall back to legacy latest-only queries for older sessions.
         try:
-            structure_payload = await handle.query("get_structure_snapshots", symbol_norm, as_of)
+            structure_payload = await handle.query("get_structure_snapshots", args=[symbol_norm, as_of])
         except RPCError:
             structure_payload = None
 

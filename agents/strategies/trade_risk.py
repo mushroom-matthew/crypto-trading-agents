@@ -69,6 +69,25 @@ class TradeRiskEvaluator:
         if action == "flatten" or trigger.category == "emergency_exit":
             return RiskCheckResult(allowed=True, quantity=0.0)
 
+        # --- R:R gate: entry with stop + target_hit in exit_rule but no target anchor ---
+        # If the exit_rule references "target_hit" (meaning the author intended a price
+        # target to terminate the trade) but target_anchor_type is not set, the target
+        # can never fire and R:R is undefined.  Block rather than post an open-ended trade.
+        # Exit-only triggers (direction not long/short) are exempt.
+        if trigger.direction in ("long", "short"):
+            exit_rule = getattr(trigger, "exit_rule", "") or ""
+            exit_rule_needs_target = "target_hit" in exit_rule
+            has_stop = (stop_distance is not None and stop_distance > 0) or bool(
+                getattr(trigger, "stop_anchor_type", None)
+            )
+            has_target = bool(getattr(trigger, "target_anchor_type", None))
+            if exit_rule_needs_target and has_stop and not has_target:
+                return RiskCheckResult(
+                    allowed=False,
+                    quantity=0.0,
+                    reason="no_target_rr_undefined",
+                )
+
         # --- Learning book gate ---
         if trigger.learning_book:
             return self._evaluate_learning(trigger, price, portfolio, indicator)

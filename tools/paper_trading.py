@@ -2316,27 +2316,31 @@ class PaperTradingWorkflow:
 
         # Emit position_exit_contract_created event for auditable contract provenance
         if _exit_contract is not None:
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[
-                    self.session_id,
-                    "position_exit_contract_created",
-                    {
-                        "contract_id": _exit_contract.contract_id,
-                        "position_id": _exit_contract.position_id,
-                        "symbol": _exit_contract.symbol,
-                        "side": _exit_contract.side,
-                        "entry_price": _exit_contract.entry_price,
-                        "stop_price_abs": _exit_contract.stop_price_abs,
-                        "target_legs_count": len(_exit_contract.target_legs),
-                        "has_time_exit": _exit_contract.time_exit is not None,
-                        "source_trigger_id": _exit_contract.source_trigger_id,
-                        "source_category": _exit_contract.source_category,
-                        "exit_class": "strategy_contract",
-                    },
-                ],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            try:
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[
+                        self.session_id,
+                        "position_exit_contract_created",
+                        {
+                            "contract_id": _exit_contract.contract_id,
+                            "position_id": _exit_contract.position_id,
+                            "symbol": _exit_contract.symbol,
+                            "side": _exit_contract.side,
+                            "entry_price": _exit_contract.entry_price,
+                            "stop_price_abs": _exit_contract.stop_price_abs,
+                            "target_legs_count": len(_exit_contract.target_legs),
+                            "has_time_exit": _exit_contract.time_exit is not None,
+                            "source_trigger_id": _exit_contract.source_trigger_id,
+                            "source_category": _exit_contract.source_category,
+                            "exit_class": "strategy_contract",
+                        },
+                    ],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except Exception:
+                pass  # event telemetry is non-critical; never crash the workflow
 
         # Emit event with stop/target for activity feed
         event_payload = dict(order)

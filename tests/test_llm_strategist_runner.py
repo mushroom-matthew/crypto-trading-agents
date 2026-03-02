@@ -70,6 +70,7 @@ def test_backtester_executes_trigger(monkeypatch, tmp_path):
                 entry_rule="timeframe=='1h'",
                 exit_rule="not is_flat and (stop_hit or target_hit)",
                 stop_loss_pct=99.0,  # Stop at ~1% of price; unreachable on test candles (100-109)
+                target_anchor_type="r_multiple_2",
             )
         ],
         risk_constraints=RiskConstraint(
@@ -630,6 +631,7 @@ def test_fee_aware_sizing_allows_full_fraction_entry(monkeypatch, tmp_path):
                 exit_rule="not is_flat and close < 0",
                 category="trend_continuation",
                 stop_loss_pct=2.0,
+                target_anchor_type="r_multiple_2",
             )
         ],
         risk_constraints=RiskConstraint(
