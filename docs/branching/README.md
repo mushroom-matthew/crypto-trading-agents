@@ -286,6 +286,60 @@ system around multimodal inputs, reflection, memory, and evidence gating.
 > prompt-only rituals. Cadence rules (54) are codified after the transition detector and
 > policy-loop triggers are concretely defined.
 
+### Phase 9 — Integration: Making Phase 8 Actually Run (2026-03)
+
+Phase 8 services are implemented and unit-tested in isolation. Phase 9 wires them into
+the live execution paths so they fire together as a coherent loop.
+
+**Status:** All Phase 9 runbooks newly authored (2026-03-01). None yet implemented.
+
+**Key insight from March 2026 audit:** 12 of 15 Phase 8 services are completely
+disconnected from `tools/paper_trading.py` and `backtesting/llm_strategist_runner.py`.
+The gap is purely wiring — no schema redesign needed.
+
+Run `scripts/check_wiring.py` at any time to see current wiring status.
+
+**Implementation order (strict — each depends on the previous):**
+
+41. **61**: [Policy Loop Cadence Wiring](61-policy-loop-cadence-wiring.md) — Wire
+    `PolicyLoopGate` (R54) and `RegimeTransitionDetector` (R55) into paper trading so
+    LLM is called only at policy boundaries. Wire `PolicyStateMachine` state transitions
+    on fill and position close. **Start here — foundational for all others.** `✅ implemented`
+
+42. **62**: [Playbook-First Plan Generation](62-playbook-first-plan-generation.md) —
+    Wire `PlaybookRegistry.list_eligible()` into `plan_provider.get_plan()`. Inject
+    `ELIGIBLE_PLAYBOOKS` block into LLM prompt. Post-LLM validate `playbook_id`. Add
+    `htf_trend_required` / `disallow_htf_counter_trend` to `RegimeEligibility`. **Gate: R61.**
+
+43. **63**: [Position Lifecycle Completion](63-position-lifecycle-completion.md) — Wire
+    `SetupEventGenerator` at trigger fire, `AdaptiveTradeManagementState` per bar, and
+    `build_episode_record()` + `persist_episode()` on position close. Adds `EpisodeMemory`
+    DB table. **Can run in parallel with R62.**
+
+44. **64**: [Tick Snapshot and Structural Target Wiring](64-tick-snapshot-wiring.md) —
+    Wire `build_tick_snapshot()` per bar into trigger engine. Wire
+    `StructuralTargetSelector` at entry for structural stop/target candidates.
+    **Can run in parallel with R62/R63.**
+
+45. **65**: [Exit Contract Enforcement](65-exit-contract-enforcement.md) — Fix
+    `exit_binding_mismatch` by recording `originating_plan_id` at fill and blocking
+    exit triggers from replanned plans against existing positions. Emergency exits bypass
+    enforcement. **Can run in parallel with R62/R63/R64.**
+
+46. **66**: [Judge Validation Gate](66-judge-validation-gate.md) — Wire
+    `JudgePlanValidationService.validate_plan()` after plan generation. Run revision
+    loop (max 2) on REJECT. Stand down if exhausted. **Gate: R62 (needs playbook context).**
+
+47. **67**: [Backtest-Paper Parity](67-backtest-paper-parity.md) — Mirror all Phase 9
+    wiring into `backtesting/llm_strategist_runner.py`. Add `episode_records`,
+    `exit_binding_mismatch_blocked`, `validation_rejected_count`,
+    `policy_loop_skip_count` to `StrategistBacktestResult`. Parity test: trigger counts
+    within 5% across identical data. **Gate: R61–R66 validated in paper trading.**
+
+> **Parallelism:** R61 is the strict prerequisite (restructures plan-gen gating).
+> R62, R63, R64, R65 can be implemented in parallel branches after R61 merges.
+> R66 should follow R62. R67 comes last.
+
 ## Backlog Runbooks (_)
 - [_per-instrument-workflow.md](_per-instrument-workflow.md): Per-instrument `InstrumentStrategyWorkflow` (one Temporal workflow per active symbol). Deferred until Runbooks 39+46+47 are validated via 30-day paper trading and open architectural questions (workflow ID namespace, multi-timeframe, judge routing) are resolved with operational evidence.
   - Routing note (draft ADR, 2026-02-24): use symbol-local judge feedback plus a shared deterministic portfolio control plane that broadcasts typed constraint envelopes (not direct portfolio-judge broadcasts to symbols). See [ADR-portfolio-judge-routing-and-control-plane.md](ADR-portfolio-judge-routing-and-control-plane.md).
