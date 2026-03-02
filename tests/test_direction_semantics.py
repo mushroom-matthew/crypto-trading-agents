@@ -79,6 +79,7 @@ def test_exit_direction_not_blocked(monkeypatch, tmp_path):
                 exit_rule="False",
                 category="trend_continuation",
                 stop_loss_pct=2.0,
+                target_anchor_type="r_multiple_2",
             ),
             TriggerCondition(
                 id="emergency_exit",

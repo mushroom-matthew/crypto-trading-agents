@@ -81,6 +81,7 @@ def _simple_plan() -> StrategyPlan:
         exit_rule="close > 120",
         category="mean_reversion",
         stop_loss_pct=10.0,  # Wide stop (85.5 for entry=95); test lows are 94, never fires
+        target_anchor_type="r_multiple_2",
     )
     return StrategyPlan(
         generated_at=now,
@@ -191,6 +192,7 @@ def test_daily_risk_budget_blocks_orders(tmp_path, monkeypatch):
     # Use a 5% stop so stop_price_abs is set; alternating candles will cross below the stop
     plan.triggers[0].stop_loss_pct = 5.0
     plan.triggers[0].exit_rule = "not is_flat and (stop_hit or target_hit)"
+    plan.triggers[0].target_anchor_type = "r_multiple_2"
     market_data = _build_budget_candles()  # [91,91,91,86]*6: consistent entries at 91, stop hits at 86
     run_registry = StrategyRunRegistry(tmp_path / "runs")
     monkeypatch.setattr(execution_tools, "registry", run_registry)

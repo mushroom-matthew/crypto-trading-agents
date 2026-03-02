@@ -61,6 +61,7 @@ class AlwaysLongPlanProvider:
                     exit_rule="not is_flat and (stop_hit or target_hit)",
                     category="mean_reversion",
                     stop_loss_pct=self.stop_loss_pct,
+                    target_anchor_type="r_multiple_2",
                 )
             ],
             risk_constraints=RiskConstraint(
