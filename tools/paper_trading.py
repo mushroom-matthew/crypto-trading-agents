@@ -49,6 +49,16 @@ with workflow.unsafe.imports_passed_through():
     from trading_core.trigger_compiler import compile_plan
     from ops_api.event_store import EventStore
     from ops_api.schemas import Event
+    # Policy loop cadence (Runbook 61)
+    from services.regime_transition_detector import (
+        RegimeTransitionDetector,
+        RegimeTransitionDetectorState,
+        build_regime_fingerprint,
+    )
+    from services.policy_loop_gate import PolicyLoopGate
+    from services.policy_state_machine import PolicyStateMachine
+    from schemas.policy_state import PolicyStateMachineRecord
+    from schemas.reasoning_cadence import PolicyLoopTriggerEvent
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +171,10 @@ class SessionState(BaseModel):
     structure_history: Dict[str, List[Dict[str, Any]]] = {}
     # Active exit contracts indexed by symbol (Runbook 60 Phase M2).
     exit_contracts: Dict[str, Dict[str, Any]] = {}
+    # Policy loop cadence (Runbook 61)
+    policy_state_machine_record: Optional[Dict[str, Any]] = None
+    regime_detector_state: Optional[Dict[str, Any]] = None
+    last_policy_eval_at: Optional[str] = None  # ISO datetime string
 
 
 # ============================================================================
@@ -1074,6 +1088,12 @@ class PaperTradingWorkflow:
         self.active_experiments: List[Dict[str, Any]] = []
         # Active exit contracts indexed by symbol (Runbook 60 Phase M2)
         self.exit_contracts: Dict[str, Dict[str, Any]] = {}
+        # Policy loop cadence (Runbook 61)
+        self.policy_state_machine_record: Dict[str, Any] = {}
+        self.regime_detector_state: Optional[Dict[str, Any]] = None
+        self.last_policy_eval_at: Optional[str] = None
+        self._position_opened_since_last_eval: bool = False
+        self._position_closed_since_last_eval: bool = False
 
     # -------------------------------------------------------------------------
     # Signals
@@ -1624,36 +1644,83 @@ class PaperTradingWorkflow:
                     "vol_state": "normal",
                 }
 
-        # Generate plan
-        plan_dict = await workflow.execute_activity(
-            generate_strategy_plan_activity,
-            args=[
-                self.symbols,
-                portfolio_state,
-                self.strategy_prompt,
-                market_context,
-                None,  # llm_model
-                self.session_id,
-                None,  # repair_instructions
-                self.indicator_timeframe,
-                self.direction_bias,
-                self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
-            ],
-            schedule_to_close_timeout=timedelta(minutes=5),
-            retry_policy=RetryPolicy(maximum_attempts=2),
-        )
+        # ── Per-bar regime detection (Runbook 61) ─────────────────────────
+        policy_triggers: List[PolicyLoopTriggerEvent] = []
+        _primary_sym = self.symbols[0] if self.symbols else None
+        if _primary_sym and indicator_snapshots.get(_primary_sym):
+            try:
+                _snap_dict = indicator_snapshots[_primary_sym]
+                _snap_obj = IndicatorSnapshot.model_validate(_snap_dict)
+                _asset_st = build_asset_state(_primary_sym, [_snap_obj])
+                _fingerprint = build_regime_fingerprint(_snap_obj, _asset_st)
+                _detector = RegimeTransitionDetector(symbol=_primary_sym)
+                if self.regime_detector_state:
+                    _detector.load_state(
+                        RegimeTransitionDetectorState.model_validate(
+                            self.regime_detector_state
+                        )
+                    )
+                _bar_ts = _snap_obj.as_of
+                if _bar_ts.tzinfo is None:
+                    _bar_ts = _bar_ts.replace(tzinfo=timezone.utc)
+                _transition_event = _detector.evaluate(_fingerprint, current_ts=_bar_ts)
+                self.regime_detector_state = _detector.state.model_dump()
+                if _transition_event.decision.transition_fired:
+                    policy_triggers.append(PolicyLoopTriggerEvent(
+                        trigger_type="regime_state_changed",
+                        fired_at=workflow.now(),
+                        source_detail=f"symbol={_primary_sym}",
+                    ))
+            except Exception as _det_exc:
+                workflow.logger.warning(
+                    "Regime detection failed (non-fatal): %s", _det_exc
+                )
 
-        # Compile-time validation: detect hazardous patterns (e.g. ATR tautologies
-        # in emergency_exit rules) before the plan is stored.  If hard errors are
-        # found, attempt one repair pass with the error context injected into the
-        # prompt.  The runtime failsafe in trigger_engine handles anything that slips
-        # through (e.g. plans persisted before this validator existed).
-        _validation = validate_trigger_plan(plan_dict, base_tf_minutes=_timeframe_to_minutes(self.indicator_timeframe))
-        if not _validation.is_valid:
-            workflow.logger.warning(
-                f"Plan validation failed — attempting repair pass:\n{_validation.summary()}"
+        _now_ts = workflow.now()
+        if self._position_opened_since_last_eval:
+            policy_triggers.append(PolicyLoopTriggerEvent(
+                trigger_type="position_opened",
+                fired_at=_now_ts,
+            ))
+        if self._position_closed_since_last_eval:
+            policy_triggers.append(PolicyLoopTriggerEvent(
+                trigger_type="position_closed",
+                fired_at=_now_ts,
+            ))
+
+        # Gate: skip LLM call if policy state machine blocks evaluation.
+        _gate = PolicyLoopGate()
+        _state_record = PolicyStateMachineRecord.model_validate(
+            self.policy_state_machine_record or {}
+        )
+        _last_eval_at = (
+            datetime.fromisoformat(self.last_policy_eval_at)
+            if self.last_policy_eval_at else None
+        )
+        _gate_allowed, _skip_event = _gate.evaluate(
+            scope=self.session_id,
+            state_record=_state_record,
+            trigger_events=policy_triggers,
+            last_eval_at=_last_eval_at,
+            indicator_timeframe=self.indicator_timeframe,
+        )
+        if not _gate_allowed:
+            if _skip_event:
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[self.session_id, "policy_loop_skipped", _skip_event.model_dump()],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            workflow.logger.debug(
+                "PolicyLoopGate: plan generation skipped for session %s", self.session_id
             )
-            _repair_dict = await workflow.execute_activity(
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
+        # Generate plan (guarded by PolicyLoopGate — gate acquired above)
+        try:
+            plan_dict = await workflow.execute_activity(
                 generate_strategy_plan_activity,
                 args=[
                     self.symbols,
@@ -1662,78 +1729,113 @@ class PaperTradingWorkflow:
                     market_context,
                     None,  # llm_model
                     self.session_id,
-                    _validation.repair_prompt(),  # repair_instructions
+                    None,  # repair_instructions
                     self.indicator_timeframe,
                     self.direction_bias,
                     self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
-                retry_policy=RetryPolicy(maximum_attempts=1),
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            _recheck = validate_trigger_plan(_repair_dict, base_tf_minutes=_timeframe_to_minutes(self.indicator_timeframe))
-            if _recheck.is_valid:
-                workflow.logger.info("Repair plan passed validation — using repaired plan.")
-                plan_dict = _repair_dict
-            else:
-                workflow.logger.error(
-                    f"Repair plan still has validation errors. "
-                    f"Runtime failsafe in trigger_engine will suppress tautological "
-                    f"emergency exits:\n{_recheck.summary()}"
+
+            # Compile-time validation: detect hazardous patterns (e.g. ATR tautologies
+            # in emergency_exit rules) before the plan is stored.  If hard errors are
+            # found, attempt one repair pass with the error context injected into the
+            # prompt.  The runtime failsafe in trigger_engine handles anything that slips
+            # through (e.g. plans persisted before this validator existed).
+            _validation = validate_trigger_plan(plan_dict, base_tf_minutes=_timeframe_to_minutes(self.indicator_timeframe))
+            if not _validation.is_valid:
+                workflow.logger.warning(
+                    f"Plan validation failed — attempting repair pass:\n{_validation.summary()}"
                 )
-                # Proceed with original plan — runtime failsafe is the last line of defence
+                _repair_dict = await workflow.execute_activity(
+                    generate_strategy_plan_activity,
+                    args=[
+                        self.symbols,
+                        portfolio_state,
+                        self.strategy_prompt,
+                        market_context,
+                        None,  # llm_model
+                        self.session_id,
+                        _validation.repair_prompt(),  # repair_instructions
+                        self.indicator_timeframe,
+                        self.direction_bias,
+                        self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
+                    ],
+                    schedule_to_close_timeout=timedelta(minutes=5),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+                _recheck = validate_trigger_plan(_repair_dict, base_tf_minutes=_timeframe_to_minutes(self.indicator_timeframe))
+                if _recheck.is_valid:
+                    workflow.logger.info("Repair plan passed validation — using repaired plan.")
+                    plan_dict = _repair_dict
+                else:
+                    workflow.logger.error(
+                        f"Repair plan still has validation errors. "
+                        f"Runtime failsafe in trigger_engine will suppress tautological "
+                        f"emergency exits:\n{_recheck.summary()}"
+                    )
+                    # Proceed with original plan — runtime failsafe is the last line of defence
 
-        # Pop retrieval + R49 snapshot metadata before storing — StrategyPlan uses extra="forbid"
-        _retrieved_template_id = plan_dict.pop("_retrieved_template_id", None)
-        _snapshot_id = plan_dict.pop("_snapshot_id", None)
-        _snapshot_hash = plan_dict.pop("_snapshot_hash", None)
-        _snapshot_version = plan_dict.pop("_snapshot_version", None)
-        _snapshot_kind = plan_dict.pop("_snapshot_kind", None)
-        _snapshot_as_of_ts = plan_dict.pop("_snapshot_as_of_ts", None)
-        _snapshot_staleness_seconds = plan_dict.pop("_snapshot_staleness_seconds", None)
-        _snapshot_missing_sections = plan_dict.pop("_snapshot_missing_sections", None)
+            # Pop retrieval + R49 snapshot metadata before storing — StrategyPlan uses extra="forbid"
+            _retrieved_template_id = plan_dict.pop("_retrieved_template_id", None)
+            _snapshot_id = plan_dict.pop("_snapshot_id", None)
+            _snapshot_hash = plan_dict.pop("_snapshot_hash", None)
+            _snapshot_version = plan_dict.pop("_snapshot_version", None)
+            _snapshot_kind = plan_dict.pop("_snapshot_kind", None)
+            _snapshot_as_of_ts = plan_dict.pop("_snapshot_as_of_ts", None)
+            _snapshot_staleness_seconds = plan_dict.pop("_snapshot_staleness_seconds", None)
+            _snapshot_missing_sections = plan_dict.pop("_snapshot_missing_sections", None)
 
-        self.current_plan = plan_dict
-        self.last_plan_time = workflow.now()
+            self.current_plan = plan_dict
+            self.last_plan_time = workflow.now()
 
-        # Store plan in history
-        plan_record = {
-            "plan_index": len(self.plan_history),
-            "generated_at": self.last_plan_time.isoformat(),
-            "trigger_count": len(plan_dict.get("triggers", [])),
-            "max_trades_per_day": plan_dict.get("max_trades_per_day"),
-            "market_regime": plan_dict.get("market_regime"),
-            "symbols": plan_dict.get("allowed_symbols", self.symbols),
-            "valid_until": plan_dict.get("valid_until"),
-            "triggers": plan_dict.get("triggers", []),
-        }
-        self.plan_history.append(plan_record)
-
-        # Emit event
-        validation_errors = [
-            {"trigger_id": e.trigger_id, "code": e.code, "message": e.message}
-            for e in _validation.hard_errors
-        ]
-        await workflow.execute_activity(
-            emit_paper_trading_event_activity,
-            args=[self.session_id, "plan_generated", {
+            # Store plan in history
+            plan_record = {
+                "plan_index": len(self.plan_history),
+                "generated_at": self.last_plan_time.isoformat(),
                 "trigger_count": len(plan_dict.get("triggers", [])),
-                "plan_index": len(self.plan_history) - 1,
-                "validation_errors": validation_errors,
-                "retrieved_template_id": _retrieved_template_id,
-                "template_id": plan_dict.get("template_id"),
-                # R49 snapshot provenance
-                "snapshot_id": _snapshot_id,
-                "snapshot_hash": _snapshot_hash,
-                "snapshot_version": _snapshot_version,
-                "snapshot_kind": _snapshot_kind,
-                "snapshot_as_of_ts": _snapshot_as_of_ts,
-                "snapshot_staleness_seconds": _snapshot_staleness_seconds,
-                "snapshot_missing_sections": _snapshot_missing_sections,
-            }],
-            schedule_to_close_timeout=timedelta(seconds=10),
-        )
+                "max_trades_per_day": plan_dict.get("max_trades_per_day"),
+                "market_regime": plan_dict.get("market_regime"),
+                "symbols": plan_dict.get("allowed_symbols", self.symbols),
+                "valid_until": plan_dict.get("valid_until"),
+                "triggers": plan_dict.get("triggers", []),
+            }
+            self.plan_history.append(plan_record)
 
-        workflow.logger.info(f"Generated strategy plan with {len(plan_dict.get('triggers', []))} triggers")
+            # Emit event
+            validation_errors = [
+                {"trigger_id": e.trigger_id, "code": e.code, "message": e.message}
+                for e in _validation.hard_errors
+            ]
+            await workflow.execute_activity(
+                emit_paper_trading_event_activity,
+                args=[self.session_id, "plan_generated", {
+                    "trigger_count": len(plan_dict.get("triggers", [])),
+                    "plan_index": len(self.plan_history) - 1,
+                    "validation_errors": validation_errors,
+                    "retrieved_template_id": _retrieved_template_id,
+                    "template_id": plan_dict.get("template_id"),
+                    # R49 snapshot provenance
+                    "snapshot_id": _snapshot_id,
+                    "snapshot_hash": _snapshot_hash,
+                    "snapshot_version": _snapshot_version,
+                    "snapshot_kind": _snapshot_kind,
+                    "snapshot_as_of_ts": _snapshot_as_of_ts,
+                    "snapshot_staleness_seconds": _snapshot_staleness_seconds,
+                    "snapshot_missing_sections": _snapshot_missing_sections,
+                }],
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
+
+            workflow.logger.info(f"Generated strategy plan with {len(plan_dict.get('triggers', []))} triggers")
+
+            # Update cadence tracking (Runbook 61)
+            self.last_policy_eval_at = workflow.now().isoformat()
+            self._position_opened_since_last_eval = False
+            self._position_closed_since_last_eval = False
+        finally:
+            _gate.release(self.session_id)
 
     async def _refresh_live_indicators(self) -> None:
         """Refresh 1-minute indicator snapshots used by the structure UI."""
@@ -2043,6 +2145,21 @@ class PaperTradingWorkflow:
             except Exception:
                 pass  # episode construction is non-critical
 
+            # Runbook 61: transition state machine to COOLDOWN on position close.
+            self._position_closed_since_last_eval = True
+            try:
+                _sm = PolicyStateMachine()
+                _sm_record = PolicyStateMachineRecord.model_validate(
+                    self.policy_state_machine_record or {}
+                )
+                if _sm_record.current_state in ("POSITION_OPEN", "HOLD_LOCK"):
+                    _sm_record = _sm.close_position(_sm_record)
+                    self.policy_state_machine_record = _sm_record.model_dump()
+            except Exception as _sm_exc:
+                workflow.logger.warning(
+                    "State machine close_position failed (non-fatal): %s", _sm_exc
+                )
+
     def _resolve_order_stop_target(
         self, order: Dict[str, Any], fill_price: float
     ) -> tuple[float | None, float | None]:
@@ -2301,6 +2418,25 @@ class PaperTradingWorkflow:
 
         await ledger_handle.signal("record_fill", fill_payload)
 
+        # Runbook 61: transition state machine on entry fill (IDLE → ... → HOLD_LOCK).
+        if order.get("intent") == "entry":
+            self._position_opened_since_last_eval = True
+            try:
+                _sm = PolicyStateMachine()
+                _sm_record = PolicyStateMachineRecord.model_validate(
+                    self.policy_state_machine_record or {}
+                )
+                if _sm_record.current_state == "IDLE":
+                    _sm_record, _ = _sm.arm_thesis(_sm_record)
+                if _sm_record.current_state == "THESIS_ARMED":
+                    _fill_pos_id = order.get("trigger_id") or f"pos_{int(workflow.now().timestamp() * 1000)}"
+                    _sm_record, _ = _sm.activate_position(_sm_record, position_id=_fill_pos_id)
+                if _sm_record.current_state == "POSITION_OPEN":
+                    _sm_record = _sm.lock_hold(_sm_record)
+                self.policy_state_machine_record = _sm_record.model_dump()
+            except Exception as _sm_exc:
+                workflow.logger.warning("State machine fill transition failed (non-fatal): %s", _sm_exc)
+
         # A2: Record fill drift telemetry to signal_ledger (non-fatal, fire-and-forget).
         if _signal_id and _signal_ts and _signal_entry_price is not None:
             try:
@@ -2433,6 +2569,10 @@ class PaperTradingWorkflow:
             active_experiments=list(self.active_experiments),
             structure_history=self._bounded_structure_history_snapshot(),
             exit_contracts=dict(self.exit_contracts),
+            # Policy loop cadence (Runbook 61)
+            policy_state_machine_record=dict(self.policy_state_machine_record) if self.policy_state_machine_record else None,
+            regime_detector_state=dict(self.regime_detector_state) if self.regime_detector_state else None,
+            last_policy_eval_at=self.last_policy_eval_at,
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -2465,6 +2605,12 @@ class PaperTradingWorkflow:
             for sym, snaps in (parsed.structure_history or {}).items()
         }
         self.exit_contracts = dict(parsed.exit_contracts or {})
+        # Policy loop cadence (Runbook 61)
+        self.policy_state_machine_record = dict(parsed.policy_state_machine_record or {})
+        self.regime_detector_state = dict(parsed.regime_detector_state) if parsed.regime_detector_state else None
+        self.last_policy_eval_at = parsed.last_policy_eval_at
+        self._position_opened_since_last_eval = False  # reset on continue-as-new
+        self._position_closed_since_last_eval = False  # reset on continue-as-new
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)

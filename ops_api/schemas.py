@@ -30,6 +30,7 @@ EventType = Literal[
     "signal_emitted",
     "fill_drift",
     "position_exit_contract_created",
+    "policy_loop_skipped",
 ]
 
 

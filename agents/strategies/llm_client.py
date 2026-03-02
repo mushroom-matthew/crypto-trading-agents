@@ -144,6 +144,7 @@ class LLMClient:
         metadata: Dict[str, Any] | None = None,
         use_vector_store: bool = False,
         event_ts: datetime | None = None,
+        eligible_playbooks: List[Any] | None = None,
     ) -> StrategyPlan:
         def _emit_llm_event(payload: Dict[str, Any]) -> None:
             try:
@@ -218,11 +219,13 @@ class LLMClient:
             try:
                 vector_context = self._get_vector_context(llm_input) if use_vector_store else None
                 prompt_context = build_prompt_context(llm_input)
+                eligible_playbooks_block = self._build_eligible_playbooks_block(eligible_playbooks)
                 system_prompt = self._build_system_prompt(
                     effective_template,
                     vector_context,
                     prompt_context,
                     strategy_context,
+                    eligible_playbooks_block=eligible_playbooks_block,
                 )
                 _user_payload = llm_input.to_json()
                 _prompt_budget = {
@@ -232,6 +235,8 @@ class LLMClient:
                     "prompt_context_chars": len(prompt_context or ""),
                     "strategy_context_chars": len(strategy_context or ""),
                     "vector_context_chars": len(vector_context or ""),
+                    "eligible_playbooks_chars": len(eligible_playbooks_block or ""),
+                    "eligible_playbooks_count": len(eligible_playbooks or []),
                     "system_prompt_total_chars": len(system_prompt),
                     "user_payload_chars": len(_user_payload),
                     "system_prompt_tokens_est": _count_tokens(system_prompt),
@@ -413,6 +418,7 @@ class LLMClient:
         vector_context: str | None = None,
         prompt_context: str | None = None,
         strategy_context: str | None = None,
+        eligible_playbooks_block: str | None = None,
     ) -> str:
         base = self._default_prompt()
         schema = self._schema_prompt()
@@ -431,7 +437,27 @@ class LLMClient:
                 base = f"{base}\n\n{template_block}"
         if vector_context:
             base = f"{base}\n\n{vector_context}"
+        if eligible_playbooks_block:
+            base = f"{base}\n\n{eligible_playbooks_block}"
         return base
+
+    @staticmethod
+    def _build_eligible_playbooks_block(eligible_playbooks: List[Any] | None) -> str | None:
+        """Format eligible playbooks as an ELIGIBLE_PLAYBOOKS block for the system prompt."""
+        if not eligible_playbooks:
+            return None
+        lines = ["<ELIGIBLE_PLAYBOOKS>"]
+        for pb in eligible_playbooks:
+            desc = pb.description or "(no description)"
+            lines.append(f"- {pb.playbook_id}: {desc}")
+            if pb.regime_eligibility.eligible_regimes:
+                lines.append(f"  regimes: {', '.join(pb.regime_eligibility.eligible_regimes)}")
+        lines.append("</ELIGIBLE_PLAYBOOKS>")
+        lines.append(
+            "Select a playbook_id from the list above. "
+            "If none fits, set playbook_id to null."
+        )
+        return "\n".join(lines)
 
     def _build_template_selection_block(self) -> str:
         """Build the TEMPLATE SELECTION instruction block from live vector store docs.
