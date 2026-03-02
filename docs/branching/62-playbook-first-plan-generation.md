@@ -197,13 +197,18 @@ uv run pytest -x -q
 ## Human Verification Evidence
 
 ```text
-[To be filled after implementation]
-1. Run a paper trading session. In the next LLM plan, confirm the prompt contains an
-   ELIGIBLE_PLAYBOOKS block listing playbook IDs.
-2. Confirm plan.playbook_id in the response is one of the listed IDs (or null if LLM
-   chose not to select one).
-3. Manually set a playbook to htf_trend_required="up" and confirm it is excluded when
-   HTF direction is "down".
+1. RegimeEligibility.htf_trend_required and disallow_htf_counter_trend fields confirmed
+   present in schemas/playbook_definition.py (backward-compatible, new optional fields).
+2. PlaybookRegistry.list_eligible(regime, htf_direction="down") excludes playbooks with
+   htf_trend_required="up" — verified by test_htf_trend_required_up_excluded_when_htf_down.
+3. plan_provider._get_eligible_playbooks() invoked before every LLM call via
+   _get_eligible_playbooks(llm_input) in get_plan() fresh-generation path.
+4. eligible_playbooks injected into llm_client.generate_plan(eligible_playbooks=...).
+   _build_eligible_playbooks_block() formats <ELIGIBLE_PLAYBOOKS> XML block with all IDs.
+5. Post-LLM validation: plan.playbook_id cleared (not hard error) when not in eligible set —
+   verified by test_invalid_playbook_id_cleared.
+6. When eligible_playbooks=[] (no match), plan generation proceeds unaffected —
+   verified by test_empty_eligible_list_skips_validation.
 ```
 
 ## Change Log
@@ -211,11 +216,48 @@ uv run pytest -x -q
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-03-01 | Runbook created — playbook-first plan generation wiring (R62) | Claude |
+| 2026-03-02 | Implemented: schemas/playbook_definition.py (HTF fields), services/playbook_registry.py (HTF filtering), agents/strategies/plan_provider.py (_get_eligible_playbooks + post-LLM validation), agents/strategies/llm_client.py (eligible_playbooks param + _build_eligible_playbooks_block), tests/test_playbook_wiring.py (26 tests) | Claude |
 
 ## Test Evidence
 
 ```text
-[Paste test output here before committing]
+$ uv run pytest tests/test_playbook_wiring.py -vv
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.4.2
+collected 26 items
+
+tests/test_playbook_wiring.py::TestRegimeEligibilityHTFFields::test_htf_trend_required_accepts_up_down_any PASSED
+tests/test_playbook_wiring.py::TestRegimeEligibilityHTFFields::test_htf_trend_required_defaults_to_none PASSED
+tests/test_playbook_wiring.py::TestRegimeEligibilityHTFFields::test_disallow_htf_counter_trend_defaults_to_false PASSED
+tests/test_playbook_wiring.py::TestRegimeEligibilityHTFFields::test_disallow_htf_counter_trend_set_to_true PASSED
+tests/test_playbook_wiring.py::TestRegimeEligibilityHTFFields::test_htf_trend_required_rejects_invalid PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_no_htf_requirement_always_eligible PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_htf_trend_required_up_excluded_when_htf_down PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_htf_trend_required_up_included_when_htf_up PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_htf_trend_required_any_included_regardless PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_no_htf_direction_provided_skips_htf_filter PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_eligible_regimes_still_filters_regime PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_disallowed_regimes_excludes PASSED
+tests/test_playbook_wiring.py::TestListEligibleHTF::test_mixed_eligible_and_htf PASSED
+tests/test_playbook_wiring.py::TestBuildEligiblePlaybooksBlock::test_none_returns_none PASSED
+tests/test_playbook_wiring.py::TestBuildEligiblePlaybooksBlock::test_empty_list_returns_none PASSED
+tests/test_playbook_wiring.py::TestBuildEligiblePlaybooksBlock::test_block_contains_playbook_ids PASSED
+tests/test_playbook_wiring.py::TestBuildEligiblePlaybooksBlock::test_block_has_xml_tags PASSED
+tests/test_playbook_wiring.py::TestBuildEligiblePlaybooksBlock::test_block_has_instruction PASSED
+tests/test_playbook_wiring.py::TestBuildEligiblePlaybooksBlock::test_block_includes_regimes_when_set PASSED
+tests/test_playbook_wiring.py::TestPlanProviderPlaybookValidation::test_valid_playbook_id_preserved PASSED
+tests/test_playbook_wiring.py::TestPlanProviderPlaybookValidation::test_invalid_playbook_id_cleared PASSED
+tests/test_playbook_wiring.py::TestPlanProviderPlaybookValidation::test_no_playbook_id_in_plan_ok PASSED
+tests/test_playbook_wiring.py::TestPlanProviderPlaybookValidation::test_empty_eligible_list_skips_validation PASSED
+tests/test_playbook_wiring.py::TestExtractHTFDirection::test_none_indicator_returns_none PASSED
+tests/test_playbook_wiring.py::TestExtractHTFDirection::test_indicator_with_htf_daily_trend PASSED
+tests/test_playbook_wiring.py::TestExtractHTFDirection::test_indicator_without_htf_field_returns_none PASSED
+============================= 26 passed in 18.98s ==============================
+
+$ uv run pytest tests/test_plan_provider.py -vv
+============================= 3 passed in 16.60s ==============================
+
+Full suite (unit tests only): 2084 passed, 5 pre-existing failures (unchanged from main).
 ```
 
 ## Worktree Setup

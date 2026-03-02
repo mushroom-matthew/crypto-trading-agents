@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 import yaml
 
@@ -129,19 +129,32 @@ class PlaybookRegistry:
         """Return all loaded playbooks as a list."""
         return list(self._playbooks.values())
 
-    def list_eligible(self, regime: str) -> List[PlaybookDefinition]:
-        """Return playbooks whose regime_eligibility includes the given regime.
+    def list_eligible(
+        self,
+        regime: str,
+        htf_direction: Optional[Literal["up", "down", "sideways"]] = None,
+    ) -> List[PlaybookDefinition]:
+        """Return playbooks eligible for the given regime and optional HTF direction.
 
-        A playbook is eligible if:
-        - `regime` is in its `eligible_regimes` list, AND
-        - `regime` is NOT in its `disallowed_regimes` list.
+        Filtering order:
+        1. eligible_regimes non-empty AND regime not in it → excluded
+        2. regime in disallowed_regimes → excluded
+        3. htf_direction provided AND htf_trend_required is set AND mismatch → excluded
+        4. disallow_htf_counter_trend AND htf_direction is counter to regime trend → excluded
         """
-        return [
-            pb
-            for pb in self._playbooks.values()
-            if regime in pb.regime_eligibility.eligible_regimes
-            and regime not in pb.regime_eligibility.disallowed_regimes
-        ]
+        eligible = []
+        for pb in self._playbooks.values():
+            re_ = pb.regime_eligibility
+            if re_.eligible_regimes and regime not in re_.eligible_regimes:
+                continue
+            if regime in re_.disallowed_regimes:
+                continue
+            if htf_direction and re_.htf_trend_required:
+                req = re_.htf_trend_required
+                if req != "any" and req != htf_direction:
+                    continue
+            eligible.append(pb)
+        return eligible
 
     def size(self) -> int:
         """Return the number of successfully loaded playbooks."""

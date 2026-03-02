@@ -103,6 +103,39 @@ def _prompt_metadata(prompt_template: str | None) -> dict[str, object]:
     }
 
 
+def _extract_htf_direction(indicator) -> str | None:
+    """Derive HTF direction from htf_* fields on an indicator snapshot, if available."""
+    if indicator is None:
+        return None
+    htf_trend = getattr(indicator, "htf_daily_trend", None)
+    if htf_trend:
+        return htf_trend  # "up", "down", "sideways"
+    return None
+
+
+def _get_eligible_playbooks(llm_input: LLMInput) -> list:
+    """Resolve the eligible playbook list for the current regime + HTF direction (R62)."""
+    try:
+        from services.playbook_registry import PlaybookRegistry
+        indicator = None
+        if llm_input.assets:
+            for asset in llm_input.assets:
+                if asset.indicators:
+                    indicator = asset.indicators[0]
+                    break
+        regime = (
+            (llm_input.indicator.regime if hasattr(llm_input, "indicator") and llm_input.indicator else None)
+            or (llm_input.global_context or {}).get("regime")
+            or "unknown"
+        )
+        htf_direction = _extract_htf_direction(indicator)
+        registry = PlaybookRegistry()
+        return registry.list_eligible(regime, htf_direction=htf_direction)
+    except Exception:
+        logger.debug("Failed to resolve eligible playbooks (non-fatal)", exc_info=True)
+        return []
+
+
 def _context_flags(llm_input: LLMInput) -> dict[str, object]:
     context = llm_input.global_context or {}
     return {
@@ -227,6 +260,8 @@ class StrategyPlanProvider:
         resolved_prompt = _resolve_prompt_template(prompt_template)
         input_hash = hashlib.sha256(llm_input.to_json().encode("utf-8")).hexdigest()
         metadata = self._llm_call_metadata(llm_input, plan_date, prompt_template=resolved_prompt)
+        # R62: resolve eligible playbooks for current regime + HTF direction
+        eligible_playbooks = _get_eligible_playbooks(llm_input)
         plan = self.llm_client.generate_plan(
             llm_input,
             prompt_template=resolved_prompt,
@@ -235,7 +270,18 @@ class StrategyPlanProvider:
             metadata=metadata,
             use_vector_store=use_vector_store,
             event_ts=emit_ts,
+            eligible_playbooks=eligible_playbooks,
         )
+        # R62: post-LLM validation — clear playbook_id if not in eligible set
+        if plan.playbook_id and eligible_playbooks:
+            eligible_ids = {pb.playbook_id for pb in eligible_playbooks}
+            if plan.playbook_id not in eligible_ids:
+                logger.warning(
+                    "plan.playbook_id '%s' not in eligible set %s — clearing",
+                    plan.playbook_id,
+                    eligible_ids,
+                )
+                plan = plan.model_copy(update={"playbook_id": None})
         plan = self._enrich_plan(plan, llm_input)
         plan = plan.model_copy(update={"run_id": run_id})
 

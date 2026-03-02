@@ -64,6 +64,8 @@ class RegimeEligibility(BaseModel):
     eligible_regimes: List[str] = Field(default_factory=list)
     disallowed_regimes: List[str] = Field(default_factory=list)
     min_confidence: Optional[float] = None  # 0-1
+    htf_trend_required: Optional[Literal["up", "down", "any"]] = None
+    disallow_htf_counter_trend: bool = False
 
 
 class EntryRuleSet(BaseModel):
