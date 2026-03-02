@@ -175,6 +175,10 @@ class SessionState(BaseModel):
     policy_state_machine_record: Optional[Dict[str, Any]] = None
     regime_detector_state: Optional[Dict[str, Any]] = None
     last_policy_eval_at: Optional[str] = None  # ISO datetime string
+    # Adaptive trade management per-position state (Runbook 63)
+    adaptive_management_states: Dict[str, Any] = {}
+    # In-session episode memory for next plan generation (Runbook 63)
+    episode_memory_store_state: List[Dict[str, Any]] = []
 
 
 # ============================================================================
@@ -305,18 +309,32 @@ async def generate_strategy_plan_activity(
             f"REQUIRED: Every entry trigger must specify a target_anchor_type or numeric target_price_abs.\n"
         )
 
-    # A5: Inject episode memory context so the LLM can learn from prior outcomes.
-    # Only runs when DB is available and at least one symbol has resolved episodes.
+    # A5 / R63: Inject episode memory context so the LLM can learn from prior outcomes.
+    # Loads both DB records and in-session records threaded via market_context.
     if not repair_instructions:  # skip memory injection in repair passes
         try:
             from services.episode_memory_service import EpisodeMemoryStore
             from services.memory_retrieval_service import MemoryRetrievalService
-            from schemas.episode_memory import MemoryRetrievalRequest
+            from schemas.episode_memory import MemoryRetrievalRequest, EpisodeMemoryRecord
 
             _mem_store = EpisodeMemoryStore()
+            # R63: load in-session episode records from market_context (no DB needed)
+            _insession_records = market_context.pop("__episode_memory_store_state__", None) or []
+            for _ep_dict in _insession_records:
+                try:
+                    _ep_dict.setdefault("outcome_class", "neutral")
+                    _ep_dict.setdefault("episode_id", str(uuid4()))
+                    _ep_dict.setdefault("symbol", "")
+                    _mem_store.add(EpisodeMemoryRecord.model_validate(_ep_dict))
+                except Exception:
+                    pass
+
             _memory_lines: List[str] = []
             for _sym in (symbols or [])[:3]:  # limit to first 3 symbols
                 _recent = _mem_store.load_recent(_sym, limit=30)
+                if not _recent:
+                    # Fall back to in-session records if DB has nothing
+                    _recent = _mem_store.get_by_symbol(_sym)
                 if not _recent:
                     continue
                 for _r in _recent:
@@ -669,6 +687,23 @@ def evaluate_triggers_activity(
                         _SLS().insert_signal(_signal)
                     except Exception as _sig_exc:
                         logger.debug("signal_id emission failed (non-fatal): %s", _sig_exc)
+
+                    # R63: SetupEventGenerator — frozen feature snapshot at trigger fire.
+                    try:
+                        from agents.analytics.setup_event_generator import SetupEventGenerator as _SetupEventGenerator
+                        from services.model_scorer import NullModelScorer as _NullModelScorer
+                        from backtesting.constants import ENGINE_SEMVER as _ENGINE_SEMVER
+                        _seg = _SetupEventGenerator(
+                            engine_semver=_ENGINE_SEMVER,
+                            scorer=_NullModelScorer(),
+                            strategy_template_version=plan_dict.get("template_id"),
+                        )
+                        _setup_evts = _seg.on_bar(symbol, timeframe, bar_ts, indicator)
+                        if _setup_evts:
+                            order_dict["setup_event_id"] = _setup_evts[0].setup_event_id
+                            order_dict["setup_event"] = _setup_evts[0].model_dump(mode="json")
+                    except Exception as _seg_exc:
+                        logger.debug("SetupEventGenerator failed (non-fatal): %s", _seg_exc)
 
                 all_orders.append(order_dict)
 
@@ -1094,6 +1129,10 @@ class PaperTradingWorkflow:
         self.last_policy_eval_at: Optional[str] = None
         self._position_opened_since_last_eval: bool = False
         self._position_closed_since_last_eval: bool = False
+        # Adaptive trade management per-position state (Runbook 63)
+        self.adaptive_management_states: Dict[str, Any] = {}
+        # In-session episode memory for next plan generation (Runbook 63)
+        self.episode_memory_store_state: List[Dict[str, Any]] = []
 
     # -------------------------------------------------------------------------
     # Signals
@@ -1720,13 +1759,20 @@ class PaperTradingWorkflow:
 
         # Generate plan (guarded by PolicyLoopGate — gate acquired above)
         try:
+            # R63: thread in-session episode records so the activity can load them
+            # into the memory store without a DB roundtrip.
+            _plan_market_ctx = dict(market_context)
+            if self.episode_memory_store_state:
+                _plan_market_ctx["__episode_memory_store_state__"] = list(
+                    self.episode_memory_store_state
+                )
             plan_dict = await workflow.execute_activity(
                 generate_strategy_plan_activity,
                 args=[
                     self.symbols,
                     portfolio_state,
                     self.strategy_prompt,
-                    market_context,
+                    _plan_market_ctx,
                     None,  # llm_model
                     self.session_id,
                     None,  # repair_instructions
@@ -1975,6 +2021,31 @@ class PaperTradingWorkflow:
         if not market_data:
             return
 
+        # R63: Per-bar AdaptiveTradeManagement tick for each open position.
+        # Runs deterministically inside the workflow (pure Pydantic state update).
+        try:
+            from services.adaptive_trade_management import AdaptiveTradeManagementState
+            _open_positions = portfolio_state.get("positions") or {}
+            _position_meta = portfolio_state.get("position_meta") or {}
+            for _sym, _qty in _open_positions.items():
+                if not _qty or _qty <= 0:
+                    continue
+                _price = float(current_prices.get(_sym) or 0)
+                if not _price:
+                    continue
+                _state_dict = self.adaptive_management_states.get(_sym, {})
+                _meta = _position_meta.get(_sym) or {}
+                _meta["symbol"] = _sym
+                _mgmt = (
+                    AdaptiveTradeManagementState.model_validate(_state_dict)
+                    if _state_dict
+                    else AdaptiveTradeManagementState.initial(_meta)
+                )
+                _mgmt = _mgmt.tick(current_price=_price)
+                self.adaptive_management_states[_sym] = _mgmt.model_dump()
+        except Exception as _amt_exc:
+            workflow.logger.debug("AdaptiveTradeManagement tick failed (non-fatal): %s", _amt_exc)
+
         result = await workflow.execute_activity(
             evaluate_triggers_activity,
             args=[
@@ -2144,6 +2215,36 @@ class PaperTradingWorkflow:
                 )
             except Exception:
                 pass  # episode construction is non-critical
+
+            # R63: Append lightweight episode record to in-session store for next plan gen.
+            try:
+                _ep_entry = float(
+                    meta.get("signal_entry_price")
+                    or portfolio_state.get("entry_prices", {}).get(symbol)
+                    or price
+                )
+                _ep_risk = abs(_ep_entry - (stop_px or _ep_entry * (0.98 if direction == "long" else 1.02)))
+                _ep_r = (
+                    (float(price) - _ep_entry) / _ep_risk if direction == "long" else (_ep_entry - float(price)) / _ep_risk
+                ) if _ep_risk > 0 else 0.0
+                self.episode_memory_store_state = (self.episode_memory_store_state or [])[-99:]
+                self.episode_memory_store_state.append({
+                    "episode_id": f"paper_{symbol}_{workflow.now().isoformat()}",
+                    "signal_id": meta.get("signal_id"),
+                    "symbol": symbol,
+                    "direction": direction,
+                    "timeframe": self.indicator_timeframe,
+                    "playbook_id": meta.get("playbook_id"),
+                    "template_id": meta.get("template_id"),
+                    "outcome_class": "win" if hit == "target" else "loss",
+                    "r_achieved": round(_ep_r, 4),
+                    "exit_ts": workflow.now().isoformat(),
+                    "failure_modes": [],
+                })
+                # Also clear adaptive management state for this symbol on close
+                self.adaptive_management_states.pop(symbol, None)
+            except Exception as _ep_exc:
+                workflow.logger.debug("episode_memory_store_state append failed (non-fatal): %s", _ep_exc)
 
             # Runbook 61: transition state machine to COOLDOWN on position close.
             self._position_closed_since_last_eval = True
@@ -2573,6 +2674,9 @@ class PaperTradingWorkflow:
             policy_state_machine_record=dict(self.policy_state_machine_record) if self.policy_state_machine_record else None,
             regime_detector_state=dict(self.regime_detector_state) if self.regime_detector_state else None,
             last_policy_eval_at=self.last_policy_eval_at,
+            # Adaptive management + episode memory (Runbook 63)
+            adaptive_management_states=dict(self.adaptive_management_states),
+            episode_memory_store_state=list(self.episode_memory_store_state)[-100:],
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -2611,6 +2715,9 @@ class PaperTradingWorkflow:
         self.last_policy_eval_at = parsed.last_policy_eval_at
         self._position_opened_since_last_eval = False  # reset on continue-as-new
         self._position_closed_since_last_eval = False  # reset on continue-as-new
+        # Adaptive management + episode memory (Runbook 63)
+        self.adaptive_management_states = dict(parsed.adaptive_management_states or {})
+        self.episode_memory_store_state = list(parsed.episode_memory_store_state or [])
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)
