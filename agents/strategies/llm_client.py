@@ -215,6 +215,23 @@ class LLMClient:
                 effective_template = template_path.read_text(encoding="utf-8").strip()
                 logging.info("Using retrieved template '%s' for plan generation", retrieved_template_id)
 
+        # R67: If eligible_playbooks not provided externally, self-populate via PlaybookRegistry.list_eligible
+        if eligible_playbooks is None:
+            try:
+                from services.playbook_registry import PlaybookRegistry
+                _regime = getattr(llm_input, "regime", None) or "unknown"
+                _htf_dir = None
+                for _as in getattr(llm_input, "assets", None) or []:
+                    for _ind in getattr(_as, "indicators", None) or []:
+                        _htf_dir = getattr(_ind, "htf_direction", None)
+                        if _htf_dir:
+                            break
+                    if _htf_dir:
+                        break
+                eligible_playbooks = PlaybookRegistry().list_eligible(_regime, htf_direction=_htf_dir)
+            except Exception:
+                eligible_playbooks = []
+
         for attempt in range(1, attempts + 1):
             try:
                 vector_context = self._get_vector_context(llm_input) if use_vector_store else None

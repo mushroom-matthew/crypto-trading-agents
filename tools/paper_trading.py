@@ -1208,6 +1208,7 @@ async def build_episode_activity(
             r_achieved=r_achieved,
             mfe_pct=mfe_pct,
             mae_pct=mae_pct,
+            episode_source="paper",
         )
         store = EpisodeMemoryStore()
         store.add(record)

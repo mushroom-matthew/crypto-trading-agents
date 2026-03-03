@@ -494,6 +494,11 @@ def run_llm_backtest_activity(config: Dict[str, Any]) -> Dict[str, Any]:
         "setup_events": result.setup_events,
         "exit_contracts": result.exit_contracts,
         "trade_mgmt_events": result.trade_mgmt_events,
+        # R67: parity fields (mirrors paper trading)
+        "episode_records": result.episode_records,
+        "exit_binding_mismatch_blocked": result.exit_binding_mismatch_blocked,
+        "validation_rejected_count": result.validation_rejected_count,
+        "policy_loop_skip_count": result.policy_loop_skip_count,
     }
     if isinstance(result.summary, dict):
         if result.summary.get("trigger_evaluation_samples") is not None:

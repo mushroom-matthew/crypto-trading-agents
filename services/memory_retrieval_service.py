@@ -153,7 +153,14 @@ def _score(
     days = _days_since(record.exit_ts)
     recency_factor = math.exp(-request.recency_decay_lambda * days)
 
-    return weighted_sum * recency_factor
+    # --- source-fidelity multiplier ---
+    # Backtest episodes carry less weight than paper or live when used to
+    # inform live trade decisions (lower execution fidelity).
+    source_multiplier = request.source_weight_multipliers.get(
+        record.episode_source, 1.0
+    )
+
+    return weighted_sum * recency_factor * source_multiplier
 
 
 # ---------------------------------------------------------------------------
