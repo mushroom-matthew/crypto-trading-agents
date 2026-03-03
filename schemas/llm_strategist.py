@@ -329,6 +329,11 @@ class TriggerCondition(SerializableModel):
                     "you expect resolution within 4 candles. Measured against actual bars_held "
                     "post-exit to surface indicator-latency and timing bias.",
     )
+    rationale: Optional[str] = Field(
+        default=None,
+        description="Optional per-trigger rationale from the LLM explaining why this trigger "
+                    "was included. Informational only — has no effect on execution logic.",
+    )
 
     @model_validator(mode="after")
     def _validate_trigger(self) -> "TriggerCondition":
