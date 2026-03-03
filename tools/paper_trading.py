@@ -75,6 +75,25 @@ def _timeframe_to_minutes(tf: str) -> int:
     return _MAP.get(str(tf).lower(), 60)
 
 
+def _get_latest_structure_snapshot(
+    structure_history: Dict[str, List[Dict[str, Any]]], symbol: str
+) -> "Any | None":
+    """Return the most recent StructureSnapshot for symbol from session history.
+
+    R64: helper used by _execute_order for structural stop/target candidate selection.
+    Returns None if no history is available or validation fails.
+    """
+    history = structure_history.get(symbol, [])
+    if not history:
+        return None
+    latest = history[-1]
+    try:
+        from schemas.structure_engine import StructureSnapshot as _StructureSnapshot
+        return _StructureSnapshot.model_validate(latest)
+    except Exception:
+        return None
+
+
 def _is_missing_stop_validation_error(exc: Exception) -> bool:
     text = str(exc)
     return "must define a stop" in text and "stop_anchor_type" in text
@@ -600,6 +619,16 @@ def evaluate_triggers_activity(
                 )
 
             asset_state = build_asset_state(symbol, [indicator])
+
+            # R64: build TickSnapshot per bar so triggers have access to
+            # normalized numeric features and snapshot provenance.
+            _tick_snapshot = None
+            try:
+                from services.market_snapshot_builder import build_tick_snapshot as _build_tick_snapshot
+                _tick_snapshot = _build_tick_snapshot(indicator)
+            except Exception as _snap_exc:
+                logger.warning("build_tick_snapshot failed: %s", _snap_exc)
+
             orders, block_entries = trigger_engine.on_bar(
                 bar,
                 indicator,
@@ -607,6 +636,7 @@ def evaluate_triggers_activity(
                 asset_state=asset_state,
                 market_structure=None,
                 position_meta=position_meta,
+                tick_snapshot=_tick_snapshot,
             )
 
             # Build a lookup of trigger dicts by id for signal emission.
@@ -2330,6 +2360,52 @@ class PaperTradingWorkflow:
                 None,
             )
         target_anchor_type = (trigger_dict or {}).get("target_anchor_type")
+        stop_anchor_type = (trigger_dict or {}).get("stop_anchor_type")
+
+        # R64: structural stop/target candidate selection at entry (supplementary logging).
+        # Only applied when the trigger has no explicit anchor type; never overrides explicit anchors.
+        if order.get("intent") == "entry":
+            _sym = order.get("symbol", "")
+            _direction = "long" if order.get("side", "buy").lower() == "buy" else "short"
+            _structure_snap = _get_latest_structure_snapshot(self.structure_history, _sym)
+            if _structure_snap:
+                try:
+                    from services.structural_target_selector import (
+                        select_stop_candidates as _select_stop_candidates,
+                        select_target_candidates as _select_target_candidates,
+                    )
+                    if stop_anchor_type is None:
+                        _stop_candidates = _select_stop_candidates(
+                            _structure_snap,
+                            direction=_direction,
+                            max_distance_atr=3.0,
+                        )
+                        if _stop_candidates:
+                            _nearest_stop = _stop_candidates[0]
+                            workflow.logger.info(
+                                "Structural stop candidate: %s @ %.4f (kind=%s)",
+                                _nearest_stop.role_now,
+                                _nearest_stop.price,
+                                _nearest_stop.kind,
+                            )
+                    if target_anchor_type is None:
+                        _target_candidates = _select_target_candidates(
+                            _structure_snap,
+                            direction=_direction,
+                            max_distance_atr=10.0,
+                        )
+                        if _target_candidates:
+                            _nearest_target = _target_candidates[0]
+                            workflow.logger.info(
+                                "Structural target candidate: %s @ %.4f (kind=%s)",
+                                _nearest_target.role_now,
+                                _nearest_target.price,
+                                _nearest_target.kind,
+                            )
+                except Exception as _struct_exc:
+                    workflow.logger.warning(
+                        "Structural candidate selection failed (non-fatal): %s", _struct_exc
+                    )
 
         # Gate: reject entries whose stop failed to resolve. An entry without a
         # known stop price cannot be risk-sized or swept. This is defense-in-depth

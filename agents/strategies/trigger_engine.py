@@ -399,14 +399,17 @@ class TriggerEngine:
         context["r2_reached"] = r_current >= 2.0
         context["r3_reached"] = r_current >= 3.0
 
-        # R49: thread TickSnapshot provenance into evaluation context (optional; None when absent)
+        # R49/R64: thread TickSnapshot provenance and staleness into evaluation context
         if tick_snapshot is not None:
             prov = getattr(tick_snapshot, "provenance", None)
             context["snapshot_id"] = getattr(prov, "snapshot_id", None) if prov else None
             context["snapshot_hash"] = getattr(prov, "snapshot_hash", None) if prov else None
+            quality = getattr(tick_snapshot, "quality", None)
+            context["snapshot_staleness_s"] = getattr(quality, "staleness_seconds", None) if quality else None
         else:
             context.setdefault("snapshot_id", None)
             context.setdefault("snapshot_hash", None)
+            context.setdefault("snapshot_staleness_s", None)
 
         return context
 
@@ -780,6 +783,7 @@ class TriggerEngine:
         market_structure: dict[str, float | str | None] | None = None,
         position_meta: Mapping[str, dict[str, Any]] | None = None,
         learning_gate_status: LearningGateStatus | None = None,
+        tick_snapshot: "Any | None" = None,
     ) -> tuple[List[Order], List[dict]]:
         orders: List[Order] = []
         block_entries: List[dict] = []
@@ -800,6 +804,7 @@ class TriggerEngine:
             market_structure,
             portfolio_for_eval,
             position_meta,
+            tick_snapshot=tick_snapshot,
         )
 
         # Track how many triggers have fired for this symbol this bar
