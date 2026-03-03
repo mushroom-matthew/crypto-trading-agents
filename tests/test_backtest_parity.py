@@ -531,3 +531,52 @@ class TestBuildEpisodeOnClose:
             pre_qty=0.1,
         )
         assert len(bt._episode_records) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestShimTriggerValidity — verifies shim plans pass StrategyPlan validation
+# ---------------------------------------------------------------------------
+
+
+class TestShimTriggerValidity:
+    """Regression test: shim triggers must pass TriggerCondition stop validation.
+
+    Entry triggers (direction=long/short) require either stop_anchor_type or
+    stop_loss_pct > 0.  This test catches any future regression where shim
+    templates are changed without adding the required stop definition.
+    """
+
+    def test_shim_plan_is_valid_strategy_plan(self) -> None:
+        """build_strategist_shim_plan should produce a plan that parses as StrategyPlan."""
+        import json
+        from backtesting.llm_shim import build_strategist_shim_plan
+        from schemas.llm_strategist import StrategyPlan
+
+        payload = json.dumps({
+            "assets": [{"symbol": "BTC-USD"}],
+            "global_context": {"regime": "bull"},
+            "risk_params": {"max_position_risk_pct": 2.0},
+        })
+        plan_dict = build_strategist_shim_plan(payload)
+        # Must not raise — previously failed with ValidationError (no stop defined)
+        plan = StrategyPlan.model_validate(plan_dict)
+        assert plan is not None
+
+    def test_all_entry_triggers_have_stops(self) -> None:
+        """Every long/short trigger in the shim has stop_loss_pct > 0."""
+        import json
+        from backtesting.llm_shim import build_strategist_shim_plan
+
+        payload = json.dumps({"assets": [{"symbol": "BTC-USD"}]})
+        plan_dict = build_strategist_shim_plan(payload)
+        entry_triggers = [
+            t for t in plan_dict.get("triggers", [])
+            if t.get("direction") in {"long", "short"}
+        ]
+        assert entry_triggers, "Shim must produce at least one entry trigger"
+        for t in entry_triggers:
+            has_pct = (t.get("stop_loss_pct") or 0.0) > 0
+            has_anchor = bool(t.get("stop_anchor_type"))
+            assert has_pct or has_anchor, (
+                f"Trigger '{t['id']}' (direction={t['direction']}) has no stop defined"
+            )

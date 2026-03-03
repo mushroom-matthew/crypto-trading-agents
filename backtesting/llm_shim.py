@@ -18,6 +18,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "1h",
         "entry_rule": "rsi_14 < 40 and close > sma_medium and position == 'flat'",
         "exit_rule": "rsi_14 > 60",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "trend_continuation_short_1",
@@ -27,6 +29,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "1h",
         "entry_rule": "rsi_14 > 60 and close < sma_medium and position == 'flat'",
         "exit_rule": "rsi_14 < 50",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "mean_reversion_long_1",
@@ -36,6 +40,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "15m",
         "entry_rule": "close < bollinger_lower and rsi_14 < 45 and position == 'flat'",
         "exit_rule": "close > sma_short",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "mean_reversion_short_1",
@@ -45,6 +51,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "15m",
         "entry_rule": "close > bollinger_upper and rsi_14 > 55 and position == 'flat'",
         "exit_rule": "close < sma_short",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "volatility_breakout_long_1",
@@ -54,6 +62,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "5m",
         "entry_rule": "close > donchian_upper_short and atr_14 > 1.5 * tf_1h_atr_14 and position == 'flat'",
         "exit_rule": "",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "volatility_breakout_short_1",
@@ -63,6 +73,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "5m",
         "entry_rule": "close < donchian_lower_short and atr_14 > 1.5 * tf_1h_atr_14 and position == 'flat'",
         "exit_rule": "",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "reversal_long_1",
@@ -72,6 +84,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "30m",
         "entry_rule": "trend_state == 'downtrend' and close > sma_short and rsi_14 < 40 and position == 'flat'",
         "exit_rule": "close < sma_short",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "reversal_short_1",
@@ -81,6 +95,8 @@ _BASE_TRIGGER_TEMPLATES: List[Dict[str, Any]] = [
         "timeframe": "30m",
         "entry_rule": "trend_state == 'uptrend' and close < sma_short and rsi_14 > 60 and position == 'flat'",
         "exit_rule": "close > sma_short",
+        "stop_loss_pct": 2.0,
+        "target_anchor_type": "r_multiple_2",
     },
     {
         "id": "emergency_exit_1_flat",
