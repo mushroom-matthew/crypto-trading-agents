@@ -218,7 +218,8 @@ async def generate_strategy_plan_activity(
     indicator_timeframe: Optional[str] = None,
     direction_bias: Optional[str] = None,
     preferred_symbol: Optional[str] = None,
-) -> Dict[str, Any]:
+    policy_state_machine_record: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """Generate a strategy plan using the LLM client.
 
     Caches plans based on input hash to reduce LLM costs.
@@ -332,6 +333,8 @@ async def generate_strategy_plan_activity(
 
     # A5 / R63: Inject episode memory context so the LLM can learn from prior outcomes.
     # Loads both DB records and in-session records threaded via market_context.
+    # R66: _validation_bundle is captured for the primary symbol to use in judge gate.
+    _validation_bundle = None
     if not repair_instructions:  # skip memory injection in repair passes
         try:
             from services.episode_memory_service import EpisodeMemoryStore
@@ -362,6 +365,9 @@ async def generate_strategy_plan_activity(
                     _mem_store.add(_r)
                 _req = MemoryRetrievalRequest(symbol=_sym, regime_fingerprint={})
                 _bundle = MemoryRetrievalService(_mem_store).retrieve(_req)
+                # R66: capture primary-symbol bundle for judge validation gate
+                if _sym == symbols[0] and _validation_bundle is None:
+                    _validation_bundle = _bundle
                 _wins = _bundle.winning_contexts[:3]
                 _losses = _bundle.losing_contexts[:3]
                 _failures = _bundle.failure_mode_patterns[:3]
@@ -426,6 +432,92 @@ async def generate_strategy_plan_activity(
             indicator_timeframe=indicator_timeframe,
             direction_bias=direction_bias,
         )
+
+    # R66: Judge validation gate — validate immediately after generation.
+    # Skip in repair passes to avoid recursive loops.
+    if not repair_instructions:
+        try:
+            from services.judge_validation_service import JudgePlanValidationService
+            from services.judge_revision_loop import JudgePlanRevisionLoopOrchestrator
+
+            # Derive policy state flags from the state machine record
+            _psm = policy_state_machine_record or {}
+            _current_state = _psm.get("current_state", "IDLE")
+            _is_thesis_armed = _current_state == "THESIS_ARMED"
+            _is_hold_lock = _current_state == "HOLD_LOCK"
+
+            # Derive eligible regime tags from the plan's playbook, if present
+            _playbook_regime_tags: Optional[List[str]] = None
+            if plan.playbook_id:
+                try:
+                    from services.playbook_registry import PlaybookRegistry
+                    _pb_def = PlaybookRegistry().get(plan.playbook_id)
+                    if _pb_def and _pb_def.regime_eligibility.eligible_regimes:
+                        _playbook_regime_tags = list(_pb_def.regime_eligibility.eligible_regimes)
+                except Exception:
+                    pass
+
+            _validator = JudgePlanValidationService()
+            _verdict = _validator.validate_plan(
+                plan,
+                memory_bundle=_validation_bundle,
+                playbook_regime_tags=_playbook_regime_tags,
+                is_thesis_armed=_is_thesis_armed,
+                is_hold_lock=_is_hold_lock,
+            )
+
+            if _verdict.decision != "approve":
+                logger.warning(
+                    "Plan validation %s (plan_id=%s): %s",
+                    _verdict.decision,
+                    plan.plan_id,
+                    "; ".join(_verdict.reasons[:3]),
+                )
+                _last_revised: list = [None]
+
+                def _revision_callback(revision_request: Any) -> Optional["StrategyPlan"]:
+                    repair = "; ".join(revision_request.failing_criteria[:3])
+                    try:
+                        _rev = llm_client.generate_plan(
+                            llm_input,
+                            prompt_template=f"REPAIR: {repair}",
+                            run_id=session_id,
+                            plan_id=str(uuid4()),
+                        )
+                        _last_revised[0] = _rev
+                        return _rev
+                    except Exception:
+                        return None
+
+                _loop = JudgePlanRevisionLoopOrchestrator(max_revisions=2)
+                _revision_result = _loop.run(
+                    plan=plan,
+                    revision_callback=_revision_callback,
+                    memory_bundle=_validation_bundle,
+                    playbook_regime_tags=_playbook_regime_tags,
+                    is_thesis_armed=_is_thesis_armed,
+                    is_hold_lock=_is_hold_lock,
+                )
+
+                if _revision_result.accepted_plan_id:
+                    plan = _last_revised[0] or plan
+                    logger.info(
+                        "Plan revision accepted (plan_id=%s, attempts=%d)",
+                        _revision_result.accepted_plan_id,
+                        _revision_result.revision_attempts,
+                    )
+                else:
+                    logger.warning(
+                        "Plan validation stand-down: %s (attempts=%d)",
+                        _revision_result.stand_down_reason,
+                        _revision_result.revision_attempts,
+                    )
+                    return None
+
+        except Exception as _validation_exc:
+            logger.warning(
+                "Judge validation gate failed (non-fatal, proceeding): %s", _validation_exc
+            )
 
     plan_dict = plan.model_dump()
     # Stash retrieval metadata for the workflow to include in plan_generated event.
@@ -1834,10 +1926,37 @@ class PaperTradingWorkflow:
                     self.indicator_timeframe,
                     self.direction_bias,
                     self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
+                    dict(self.policy_state_machine_record) if self.policy_state_machine_record else None,  # R66
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+
+            # R66: Judge validation gate — None signals stand-down (validation exhausted).
+            if plan_dict is None:
+                workflow.logger.warning(
+                    "Judge validation gate: stand-down for session %s — skipping cycle",
+                    self.session_id,
+                )
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[self.session_id, "plan_validation_rejected", {
+                        "cycle": len(self.plan_history),
+                        "reason": "validation_exhausted",
+                    }],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[self.session_id, "plan_stand_down", {
+                        "cycle": len(self.plan_history),
+                        "reason": "validation_exhausted",
+                    }],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+                return
 
             # Compile-time validation: detect hazardous patterns (e.g. ATR tautologies
             # in emergency_exit rules) before the plan is stored.  If hard errors are
@@ -1862,10 +1981,15 @@ class PaperTradingWorkflow:
                         self.indicator_timeframe,
                         self.direction_bias,
                         self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
+                        dict(self.policy_state_machine_record) if self.policy_state_machine_record else None,  # R66
                     ],
                     schedule_to_close_timeout=timedelta(minutes=5),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
+                # Repair pass skips judge validation (repair_instructions is set), so None
+                # is not expected here; treat it defensively as a pass-through.
+                if _repair_dict is None:
+                    _repair_dict = plan_dict
                 _recheck = validate_trigger_plan(_repair_dict, base_tf_minutes=_timeframe_to_minutes(self.indicator_timeframe))
                 if _recheck.is_valid:
                     workflow.logger.info("Repair plan passed validation — using repaired plan.")

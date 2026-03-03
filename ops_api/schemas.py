@@ -31,6 +31,8 @@ EventType = Literal[
     "fill_drift",
     "position_exit_contract_created",
     "policy_loop_skipped",
+    "plan_validation_rejected",
+    "plan_stand_down",
 ]
 
 
