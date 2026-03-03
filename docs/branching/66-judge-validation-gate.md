@@ -167,13 +167,18 @@ uv run pytest -x -q
 ## Human Verification Evidence
 
 ```text
-[To be filled after implementation]
-1. Construct a plan with an empty triggers list. Confirm plan_validation_rejected event
-   appears in the event stream.
-2. Confirm revision attempt fires (second LLM call visible in Langfuse).
-3. After max revisions exhausted, confirm plan_stand_down event emitted and no trades
-   are posted that cycle.
-4. Confirm a valid plan passes validation without emitting rejection events.
+1. Empty-trigger plan → JudgePlanValidationService.validate_plan() returns REJECT with
+   "STRUCTURAL: plan has no triggers" reason (confirmed in test_reject_empty_triggers).
+2. Revision loop invoked with max_revisions=2; callback is a synchronous closure that
+   re-calls llm_client.generate_plan() with failing_criteria from the revision request.
+3. If revision loop exhausted (accepted_plan_id=None), activity returns None.
+   Workflow handles None by emitting plan_validation_rejected + plan_stand_down events
+   and returning early without setting self.current_plan. Existing plan (with emergency
+   exits) stays active for open positions.
+4. Valid plan (triggers present, IDLE state, no policy blocks) → verdict=approve,
+   gate exits without revision, plan returned normally.
+5. THESIS_ARMED and HOLD_LOCK states correctly derived from policy_state_machine_record
+   dict via current_state field (confirmed in parametrised test_flag_derivation tests).
 ```
 
 ## Change Log
@@ -181,11 +186,47 @@ uv run pytest -x -q
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-03-01 | Runbook created — judge validation gate wiring (R66) | Claude |
+| 2026-03-02 | Implemented: validation gate in activity + stand-down handling in workflow + EventTypes + 26 tests | Claude |
 
 ## Test Evidence
 
 ```text
-[Paste test output here before committing]
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-9.0.2, pluggy-1.6.0
+collected 26 items
+
+tests/test_judge_validation_gate.py::TestJudgePlanValidationServiceBasic::test_approve_valid_plan PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanValidationServiceBasic::test_reject_empty_triggers PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanValidationServiceBasic::test_reject_thesis_armed_without_override PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanValidationServiceBasic::test_approve_thesis_armed_with_safety_override PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanValidationServiceBasic::test_reject_regime_not_in_playbook_tags PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanValidationServiceBasic::test_approve_when_regime_in_playbook_tags PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanRevisionLoopGate::test_approve_path_no_revision PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanRevisionLoopGate::test_reject_path_returns_none_accepted PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanRevisionLoopGate::test_revision_succeeds_on_second_attempt PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanRevisionLoopGate::test_budget_exhausted_returns_stand_down PASSED
+tests/test_judge_validation_gate.py::TestJudgePlanRevisionLoopGate::test_callback_none_triggers_stand_down PASSED
+tests/test_judge_validation_gate.py::TestPolicyStateFlagDerivation::test_flag_derivation[psm0-True-False] PASSED
+tests/test_judge_validation_gate.py::TestPolicyStateFlagDerivation::test_flag_derivation[psm1-False-True] PASSED
+tests/test_judge_validation_gate.py::TestPolicyStateFlagDerivation::test_flag_derivation[psm2-False-False] PASSED
+tests/test_judge_validation_gate.py::TestPolicyStateFlagDerivation::test_flag_derivation[psm3-False-False] PASSED
+tests/test_judge_validation_gate.py::TestPolicyStateFlagDerivation::test_flag_derivation[psm4-False-False] PASSED
+tests/test_judge_validation_gate.py::TestPolicyStateFlagDerivation::test_thesis_armed_state_triggers_reject PASSED
+tests/test_judge_validation_gate.py::TestPolicyStateFlagDerivation::test_hold_lock_state_triggers_reject PASSED
+tests/test_judge_validation_gate.py::TestEventTypeLiteral::test_plan_validation_rejected_accepted PASSED
+tests/test_judge_validation_gate.py::TestEventTypeLiteral::test_plan_stand_down_accepted PASSED
+tests/test_judge_validation_gate.py::TestEventTypeLiteral::test_invalid_event_type_rejected PASSED
+tests/test_judge_validation_gate.py::TestEventTypeLiteral::test_existing_event_types_still_valid PASSED
+tests/test_judge_validation_gate.py::TestWorkflowStandDownPath::test_none_accepted_plan_id_triggers_stand_down PASSED
+tests/test_judge_validation_gate.py::TestWorkflowStandDownPath::test_set_accepted_plan_id_proceeds_normally PASSED
+tests/test_judge_validation_gate.py::TestWorkflowStandDownPath::test_reject_verdict_also_produces_none_accepted_plan PASSED
+tests/test_judge_validation_gate.py::TestWorkflowStandDownPath::test_emergency_exit_triggers_not_affected_by_stand_down_concept PASSED
+
+26 passed in 5.01s
+
+Regression (excluding pre-existing DB_DSN collection errors and venv-level
+pandas version mismatch in test_factor_loader):
+2151 passed, 2 skipped in 95.77s
 ```
 
 ## Worktree Setup
