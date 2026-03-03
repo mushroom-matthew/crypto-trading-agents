@@ -100,6 +100,7 @@ class TriggerEngine:
         exit_binding_mode: ExitBindingMode = "none",
         conflicting_signal_policy: ConflictResolution = "reverse",
         risk_off_latch: bool = False,
+        position_originating_plans: dict[str, str] | None = None,
     ) -> None:
         """Initialize the trigger engine.
 
@@ -152,6 +153,9 @@ class TriggerEngine:
         self.exit_binding_mode = exit_binding_mode
         self.conflicting_signal_policy = conflicting_signal_policy
         self.risk_off_latch = risk_off_latch
+        # R65: position originating plan tracking for exit contract enforcement
+        self._position_originating_plans = position_originating_plans
+        self._exit_binding_mismatch_count: int = 0
         self._unknown_identifier_warnings: set[tuple[str, str, tuple[str, ...]]] = set()
         # Store trigger confidence for deduplication
         self._trigger_confidence: dict[str, Literal["A", "B", "C"] | None] = {
@@ -476,6 +480,44 @@ class TriggerEngine:
             return True
         if self.exit_binding_mode == "category":
             return entry_category == trigger.category
+        return True
+
+    @property
+    def exit_binding_mismatch_count(self) -> int:
+        """Number of exit triggers blocked by plan-level originating_plan_id mismatch (R65)."""
+        return self._exit_binding_mismatch_count
+
+    def _should_apply_exit_trigger(
+        self,
+        trigger: TriggerCondition,
+        symbol: str,
+        current_plan_id: str | None,
+        position_originating_plans: dict[str, str] | None,
+    ) -> bool:
+        """Return False if exit trigger belongs to a different plan than opened the position.
+
+        R65: Prevents cross-plan exit binding when the judge replans mid-trade.
+        Emergency exits and flatten actions always bypass this check.
+        """
+        # Emergency exits always apply (domain invariant)
+        if trigger.category == "emergency_exit":
+            return True
+        # Flatten actions (direction not long/short) always apply
+        if trigger.direction not in ("long", "short"):
+            return True
+        # No position plan tracking available — degrade gracefully
+        if position_originating_plans is None or current_plan_id is None:
+            return True
+
+        originating_plan_id = position_originating_plans.get(symbol)
+        if originating_plan_id is None:
+            return True  # No recorded origin — allow
+
+        if current_plan_id != originating_plan_id:
+            # Exit trigger is from a different plan than opened this position — BLOCK
+            self._exit_binding_mismatch_count += 1
+            return False
+
         return True
 
     def _flatten_order(
@@ -988,6 +1030,21 @@ class TriggerEngine:
                             "exit_category": trigger.category,
                             "exit_trigger_id": trigger.id,
                         },
+                    )
+                    continue
+                # R65: Plan-level exit binding check (originating_plan_id pinning).
+                # Prevents exit triggers from a replanned plan closing positions opened
+                # under the old plan. Emergency exits and flatten actions are exempt.
+                if not self._should_apply_exit_trigger(
+                    trigger, trigger.symbol, self.plan.plan_id, self._position_originating_plans
+                ):
+                    detail = (
+                        f"Exit trigger {trigger.id} blocked: plan_id mismatch "
+                        f"(current={self.plan.plan_id!r}, "
+                        f"originating={self._position_originating_plans.get(trigger.symbol)!r})"
+                    )
+                    self._record_block(
+                        block_entries, trigger, "exit_binding_plan_mismatch", detail, bar
                     )
                     continue
                 # Use exit_fraction for partial exits (risk_reduce category)

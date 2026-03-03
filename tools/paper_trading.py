@@ -198,6 +198,8 @@ class SessionState(BaseModel):
     adaptive_management_states: Dict[str, Any] = {}
     # In-session episode memory for next plan generation (Runbook 63)
     episode_memory_store_state: List[Dict[str, Any]] = []
+    # Exit contract enforcement: tracks which plan opened each position (Runbook 65)
+    position_originating_plans: Dict[str, str] = {}  # symbol → plan_id
 
 
 # ============================================================================
@@ -466,6 +468,7 @@ def evaluate_triggers_activity(
     portfolio_state: Dict[str, Any],
     exit_binding_mode: str = "category",
     conflicting_signal_policy: str = "reverse",
+    position_originating_plans: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Evaluate strategy triggers against current market data.
 
@@ -511,6 +514,7 @@ def evaluate_triggers_activity(
         stop_distance_resolver=resolve_stop_distance,
         exit_binding_mode=exit_binding_mode if exit_binding_mode else "category",
         conflicting_signal_policy=conflicting_signal_policy if conflicting_signal_policy else "reverse",
+        position_originating_plans=position_originating_plans,  # R65
     )
 
     all_orders: List[Dict[str, Any]] = []
@@ -804,7 +808,26 @@ def evaluate_triggers_activity(
                 },
             })
 
-    return {"orders": all_orders, "events": all_events}
+    # R65: emit trade_blocked event if any exits were suppressed by plan mismatch
+    mismatch_count = trigger_engine.exit_binding_mismatch_count
+    if mismatch_count > 0:
+        all_events.append({
+            "type": "trade_blocked",
+            "payload": {
+                "reason": "exit_binding_mismatch",
+                "detail": (
+                    f"{mismatch_count} exit trigger(s) blocked: current plan_id does not "
+                    "match the plan that opened the position (R65 originating_plan_id pinning)"
+                ),
+                "count": mismatch_count,
+            },
+        })
+
+    return {
+        "orders": all_orders,
+        "events": all_events,
+        "exit_binding_mismatch_blocked": mismatch_count,
+    }
 
 
 @activity.defn
@@ -1163,6 +1186,8 @@ class PaperTradingWorkflow:
         self.adaptive_management_states: Dict[str, Any] = {}
         # In-session episode memory for next plan generation (Runbook 63)
         self.episode_memory_store_state: List[Dict[str, Any]] = []
+        # Exit contract enforcement: tracks which plan opened each position (Runbook 65)
+        self.position_originating_plans: Dict[str, str] = {}  # symbol → plan_id
 
     # -------------------------------------------------------------------------
     # Signals
@@ -2084,6 +2109,7 @@ class PaperTradingWorkflow:
                 portfolio_state,
                 self.exit_binding_mode,
                 self.conflicting_signal_policy,
+                dict(self.position_originating_plans),  # R65: originating plan pinning
             ],
             schedule_to_close_timeout=timedelta(seconds=30),
         )
@@ -2595,6 +2621,17 @@ class PaperTradingWorkflow:
 
         await ledger_handle.signal("record_fill", fill_payload)
 
+        # R65: Exit contract enforcement — track which plan opened each position.
+        _fill_symbol = order.get("symbol", "")
+        _fill_intent = order.get("intent")
+        if _fill_intent == "entry":
+            _origin_plan_id = (self.current_plan or {}).get("plan_id")
+            if _origin_plan_id and _fill_symbol:
+                self.position_originating_plans[_fill_symbol] = _origin_plan_id
+        elif _fill_intent in ("exit", "flat", "conflict_exit", "conflict_reverse"):
+            # Clear originating plan when position closes
+            self.position_originating_plans.pop(_fill_symbol, None)
+
         # Runbook 61: transition state machine on entry fill (IDLE → ... → HOLD_LOCK).
         if order.get("intent") == "entry":
             self._position_opened_since_last_eval = True
@@ -2753,6 +2790,8 @@ class PaperTradingWorkflow:
             # Adaptive management + episode memory (Runbook 63)
             adaptive_management_states=dict(self.adaptive_management_states),
             episode_memory_store_state=list(self.episode_memory_store_state)[-100:],
+            # Exit contract enforcement (Runbook 65)
+            position_originating_plans=dict(self.position_originating_plans),
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -2794,6 +2833,8 @@ class PaperTradingWorkflow:
         # Adaptive management + episode memory (Runbook 63)
         self.adaptive_management_states = dict(parsed.adaptive_management_states or {})
         self.episode_memory_store_state = list(parsed.episode_memory_store_state or [])
+        # Exit contract enforcement (Runbook 65)
+        self.position_originating_plans = dict(parsed.position_originating_plans or {})
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)
