@@ -343,6 +343,7 @@ class EpisodeMemory(Base):
     failure_modes_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON list
     entry_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     exit_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    episode_source: Mapped[str] = mapped_column(String(16), nullable=False, server_default="live")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

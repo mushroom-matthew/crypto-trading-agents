@@ -87,6 +87,15 @@ def _build_results_payload(results: Dict[str, Any]) -> Dict[str, Any]:
         payload["limit_enforcement"] = [
             report.get("limit_stats") for report in daily_reports if report.get("limit_stats") is not None
         ]
+    # R67: surface parity counters at top level for dashboards
+    if "episode_count" not in payload:
+        payload["episode_count"] = len(llm_data.get("episode_records") or [])
+    if "exit_binding_mismatch_blocked" not in payload:
+        payload["exit_binding_mismatch_blocked"] = llm_data.get("exit_binding_mismatch_blocked", 0)
+    if "validation_rejected_count" not in payload:
+        payload["validation_rejected_count"] = llm_data.get("validation_rejected_count", 0)
+    if "policy_loop_skip_count" not in payload:
+        payload["policy_loop_skip_count"] = llm_data.get("policy_loop_skip_count", 0)
     return payload
 
 

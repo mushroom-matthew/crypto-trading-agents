@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from schemas.episode_memory import (
     FAILURE_MODE_TAXONOMY,
     EpisodeMemoryRecord,
+    EpisodeSource,
 )
 from schemas.signal_event import SignalEvent
 
@@ -47,19 +48,25 @@ CREATE TABLE IF NOT EXISTS episode_memory (
     failure_modes_json      TEXT,
     entry_ts        TIMESTAMP WITH TIME ZONE,
     exit_ts         TIMESTAMP WITH TIME ZONE,
+    episode_source  TEXT DEFAULT 'live',
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 )
+"""
+
+# Add episode_source to existing tables that pre-date this column.
+_MIGRATE_EPISODE_SOURCE_SQL = """
+ALTER TABLE episode_memory ADD COLUMN IF NOT EXISTS episode_source TEXT DEFAULT 'live'
 """
 
 _INSERT_EPISODE_SQL = """
 INSERT INTO episode_memory (
     episode_id, signal_id, symbol, timeframe, playbook_id, template_id,
     direction, outcome_class, r_achieved, mfe_pct, mae_pct, hold_bars,
-    regime_fingerprint_hash, failure_modes_json, entry_ts, exit_ts
+    regime_fingerprint_hash, failure_modes_json, entry_ts, exit_ts, episode_source
 ) VALUES (
     :episode_id, :signal_id, :symbol, :timeframe, :playbook_id, :template_id,
     :direction, :outcome_class, :r_achieved, :mfe_pct, :mae_pct, :hold_bars,
-    :regime_fingerprint_hash, :failure_modes_json, :entry_ts, :exit_ts
+    :regime_fingerprint_hash, :failure_modes_json, :entry_ts, :exit_ts, :episode_source
 )
 ON CONFLICT (episode_id) DO NOTHING
 """
@@ -187,6 +194,7 @@ def build_episode_record(
     snapshot_hash: Optional[str] = None,
     stance: Optional[str] = None,
     trigger_category: Optional[str] = None,
+    episode_source: "EpisodeSource" = "live",
 ) -> EpisodeMemoryRecord:
     """Build an EpisodeMemoryRecord from a resolved SignalEvent.
 
@@ -254,6 +262,7 @@ def build_episode_record(
         stance=stance,
         outcome_class=outcome_class,
         failure_modes=failure_modes,
+        episode_source=episode_source,
         retrieval_scope=None,
     )
 
@@ -277,12 +286,14 @@ class EpisodeMemoryStore:
             self._engine = _make_episode_engine(db_url)
 
     def _ensure_table(self) -> None:
-        """Create the episode_memory table if it doesn't exist."""
+        """Create the episode_memory table if it doesn't exist and apply column migrations."""
         if self._table_ensured or self._engine is None:
             return
         try:
             with self._engine.begin() as conn:
                 conn.execute(sa.text(_CREATE_TABLE_SQL))
+                # Add episode_source to tables created before this column existed.
+                conn.execute(sa.text(_MIGRATE_EPISODE_SOURCE_SQL))
             self._table_ensured = True
         except Exception as exc:
             logger.warning("episode_memory: table creation failed (non-fatal): %s", exc)
@@ -324,6 +335,7 @@ class EpisodeMemoryStore:
                         "failure_modes_json": json.dumps(record.failure_modes) if record.failure_modes else None,
                         "entry_ts": record.entry_ts,
                         "exit_ts": record.exit_ts,
+                        "episode_source": record.episode_source,
                     },
                 )
             logger.info(
@@ -352,7 +364,8 @@ class EpisodeMemoryStore:
                         SELECT episode_id, signal_id, symbol, timeframe, playbook_id,
                                template_id, direction, outcome_class, r_achieved,
                                mfe_pct, mae_pct, hold_bars, failure_modes_json,
-                               entry_ts, exit_ts
+                               entry_ts, exit_ts,
+                               COALESCE(episode_source, 'live') AS episode_source
                         FROM episode_memory
                         WHERE symbol = :symbol
                         ORDER BY created_at DESC
@@ -384,6 +397,7 @@ class EpisodeMemoryStore:
                     failure_modes=failure_modes,
                     entry_ts=row.entry_ts,
                     exit_ts=row.exit_ts,
+                    episode_source=getattr(row, "episode_source", None) or "live",
                 ))
             except Exception as exc:
                 logger.debug("episode_memory: skipping malformed row: %s", exc)

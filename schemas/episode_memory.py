@@ -21,6 +21,21 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
+# Episode source constants
+# ---------------------------------------------------------------------------
+
+EpisodeSource = Literal["backtest", "paper", "live"]
+
+# Default retrieval weight multipliers by source.
+# Live episodes carry full weight; paper trading carries 70%; backtest 40%.
+# These reflect decreasing fidelity of the execution environment.
+DEFAULT_SOURCE_WEIGHT_MULTIPLIERS: Dict[str, float] = {
+    "live": 1.0,
+    "paper": 0.7,
+    "backtest": 0.4,
+}
+
+# ---------------------------------------------------------------------------
 # Taxonomy
 # ---------------------------------------------------------------------------
 
@@ -88,6 +103,9 @@ class EpisodeMemoryRecord(BaseModel):
     # labels
     outcome_class: Literal["win", "loss", "neutral"]
     failure_modes: List[str] = Field(default_factory=list)
+
+    # execution environment — used to weight retrieval for live trade decisions
+    episode_source: EpisodeSource = "live"
 
     # retrieval
     retrieval_scope: Optional[Literal["symbol", "cohort", "global"]] = None
@@ -166,6 +184,12 @@ class MemoryRetrievalRequest(BaseModel):
     playbook_weight: float = 0.30
     timeframe_weight: float = 0.15
     feature_vector_weight: float = 0.15
+
+    # Source-fidelity multipliers — applied after all other scoring
+    # (overriding with {} disables source weighting)
+    source_weight_multipliers: Dict[str, float] = Field(
+        default_factory=lambda: dict(DEFAULT_SOURCE_WEIGHT_MULTIPLIERS)
+    )
 
     # Global fallback threshold
     global_fallback_max_fingerprint_distance: float = 0.30

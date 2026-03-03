@@ -989,6 +989,11 @@ class StrategistBacktestResult:
     trade_mgmt_events: List[Dict[str, Any]] = field(default_factory=list)
     setup_events: List[Dict[str, Any]] = field(default_factory=list)
     exit_contracts: List[Dict[str, Any]] = field(default_factory=list)
+    # R67: New parity fields
+    episode_records: List[Dict[str, Any]] = field(default_factory=list)
+    exit_binding_mismatch_blocked: int = 0
+    validation_rejected_count: int = 0
+    policy_loop_skip_count: int = 0
 
 
 class LLMStrategistBacktester:
@@ -1244,6 +1249,16 @@ class LLMStrategistBacktester:
         # R60 Phase M2 (backtest parity): active exit contracts per symbol + full audit list
         self.exit_contracts: Dict[str, dict] = {}
         self._exit_contract_audit: List[Dict[str, Any]] = []
+        # R67: Episode memory records accumulated in-run (mirrors paper trading A5/R63)
+        self._episode_records: List[Dict[str, Any]] = []
+        # R67: Counters for new parity fields
+        self._validation_rejected_count: int = 0
+        self._policy_loop_skip_count: int = 0
+        self._exit_binding_mismatch_blocked: int = 0
+        # R67: position originating plans for exit contract enforcement (R65 mirror)
+        self._position_originating_plans: Dict[str, str] = {}
+        # R67: Per-symbol AdaptiveTradeManagementState dict (mirrors paper trading R63)
+        self._amt_state: Dict[str, Any] = {}
         if self.priority_skip_confidence_threshold is None and self.is_scalp_profile:
             self.priority_skip_confidence_threshold = "B"
 
@@ -3382,6 +3397,11 @@ class LLMStrategistBacktester:
                 is_entry = _is_entry
                 if self.current_trigger_engine:
                     self.current_trigger_engine.record_fill(order.symbol, is_entry, order.timestamp)
+                if _is_entry:
+                    # R67 Step 6: pin originating_plan_id at entry fill (R65 mirror)
+                    _origin_plan_id = plan_id or (plan_payload or {}).get("plan_id")
+                    if _origin_plan_id:
+                        self._position_originating_plans[order.symbol] = _origin_plan_id
                 if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
                     # R60 M3 (backtest): warn if entry-rule flatten fires for symbol with active contract
                     if (
@@ -3397,6 +3417,10 @@ class LLMStrategistBacktester:
                     self.exit_contracts.pop(order.symbol, None)
                     self.last_flat_time_by_symbol[order.symbol] = order.timestamp
                     self.last_flat_trigger_by_symbol[order.symbol] = _base_trigger_id(order.reason)
+                    # R67 Step 4: build episode record on position close (mirrors paper R63)
+                    self._r67_build_episode_on_close(order, pre_qty)
+                    # R67 Step 6: clear originating plan on position close (R65 mirror)
+                    self._position_originating_plans.pop(order.symbol, None)
                 structure_fields = _structure_fields(structure_snapshot)
                 record = {
                     "symbol": order.symbol,
@@ -3542,6 +3566,10 @@ class LLMStrategistBacktester:
                 if abs(pre_qty) > 1e-9 and abs(post_qty) <= 1e-9:
                     self.last_flat_time_by_symbol[order.symbol] = order.timestamp
                     self.last_flat_trigger_by_symbol[order.symbol] = _base_trigger_id(order.reason)
+                    # R67 Step 4: build_episode_record on position close (mirrors paper trading R63)
+                    self._r67_build_episode_on_close(order, pre_qty)
+                    # R67 Step 6: clear originating plan on position close (R65 mirror)
+                    self._position_originating_plans.pop(order.symbol, None)
                 record = {
                     "symbol": order.symbol,
                     "side": order.side,
@@ -3914,6 +3942,13 @@ class LLMStrategistBacktester:
         self.position_risk_state.clear()
         self._trade_mgmt_events.clear()
         self._setup_events.clear()
+        # R67: reset parity state
+        self._episode_records.clear()
+        self._amt_state.clear()
+        self._position_originating_plans.clear()
+        self._validation_rejected_count = 0
+        self._policy_loop_skip_count = 0
+        self._exit_binding_mismatch_blocked = 0
         self._ensure_strategy_run(run_id)
         all_timestamps = sorted(
             {ts for pair in self.market_data.values() for df in pair.values() for ts in df.index if self.start <= ts <= self.end}
@@ -4234,32 +4269,132 @@ class LLMStrategistBacktester:
                         object.__setattr__(current_plan, "_plan_generated_at_ts", previous_generated_ts)
                     plan_rebuild = False
                 else:
-                    current_plan = self.plan_service.generate_plan_for_run(
-                        run_id,
-                        llm_input,
-                        plan_date=plan_start,
-                        event_ts=ts,
-                        prompt_template=self.prompt_template,
-                        use_vector_store=self.use_trigger_vector_store,
-                        emit_events=False,
-                    )
-                    current_plan = current_plan.model_copy(
-                        update={
-                            "risk_constraints": current_plan.risk_constraints.model_copy(
-                                update={"max_daily_risk_budget_pct": self.active_risk_limits.max_daily_risk_budget_pct}
+                    # R67 Step 1: PolicyLoopGate + RegimeTransitionDetector (mirrors paper trading R61)
+                    # Gate non-initial LLM calls to prevent over-frequent replanning.
+                    _r67_gate_skipped = False
+                    if not is_initial_plan:
+                        try:
+                            from services.regime_transition_detector import RegimeTransitionDetector, build_regime_fingerprint
+                            from services.policy_loop_gate import PolicyLoopGate
+                            _primary_sym = self.pairs[0] if self.pairs else "unknown"
+                            if not hasattr(self, "_r67_regime_detector") or self._r67_regime_detector is None:
+                                self._r67_regime_detector = RegimeTransitionDetector(symbol=_primary_sym)
+                            if not hasattr(self, "_r67_policy_gate") or self._r67_policy_gate is None:
+                                self._r67_policy_gate = PolicyLoopGate()
+                            if not hasattr(self, "_r67_last_policy_eval_at"):
+                                self._r67_last_policy_eval_at = None
+                            _primary_asset = asset_states.get(_primary_sym)
+                            _primary_indicator = (_primary_asset.indicators[0] if _primary_asset and _primary_asset.indicators else None)
+                            if _primary_indicator is not None:
+                                _fingerprint = build_regime_fingerprint(_primary_indicator, _primary_asset)
+                                _transition_event = self._r67_regime_detector.evaluate(_fingerprint, current_ts=ts)
+                                _policy_triggers: list = []
+                                if _transition_event.fired:
+                                    from schemas.policy_state import PolicyLoopTriggerEvent
+                                    _policy_triggers.append(PolicyLoopTriggerEvent(kind="regime_state_changed"))
+                                if judge_triggered_replan:
+                                    from schemas.policy_state import PolicyLoopTriggerEvent
+                                    _policy_triggers.append(PolicyLoopTriggerEvent(kind="position_closed"))
+                                from schemas.policy_state import PolicyStateMachineRecord
+                                _gate_allowed, _gate_skip_event = self._r67_policy_gate.evaluate(
+                                    scope=f"backtest-{run_id}",
+                                    state_record=PolicyStateMachineRecord(),
+                                    trigger_events=_policy_triggers,
+                                    last_eval_at=self._r67_last_policy_eval_at,
+                                    indicator_timeframe=self.base_timeframe,
+                                )
+                                if not _gate_allowed:
+                                    self._policy_loop_skip_count += 1
+                                    logger.debug("PolicyLoopGate: plan generation skipped for run %s (ts=%s)", run_id, ts.isoformat())
+                                    _r67_gate_skipped = True
+                                else:
+                                    self._r67_last_policy_eval_at = ts
+                        except Exception as _r67_gate_exc:
+                            logger.debug("R67 PolicyLoopGate check failed (non-fatal): %s", _r67_gate_exc)
+
+                    if _r67_gate_skipped and current_plan is not None:
+                        # PolicyLoopGate skipped: extend existing plan validity
+                        current_plan = current_plan.model_copy(update={"valid_until": plan_end})
+                        plan_rebuild = False
+                        current_plan, stripped_by_judge = self._strip_judge_constrained_triggers(current_plan)
+                    else:
+                        # R67 Step 2: MemoryRetrievalService — inject episode memory context (mirrors paper R63)
+                        _r67_memory_bundle = None
+                        try:
+                            from services.episode_memory_service import EpisodeMemoryStore
+                            from services.memory_retrieval_service import MemoryRetrievalService
+                            from schemas.episode_memory import MemoryRetrievalRequest, EpisodeMemoryRecord
+                            if self._episode_records:
+                                _mem_store = EpisodeMemoryStore()
+                                for _ep_dict in self._episode_records:
+                                    try:
+                                        _mem_store.add(EpisodeMemoryRecord.model_validate(_ep_dict))
+                                    except Exception:
+                                        pass
+                                if _mem_store.size() > 0:
+                                    _primary_sym = self.pairs[0] if self.pairs else ""
+                                    _mem_req = MemoryRetrievalRequest(symbol=_primary_sym, regime_fingerprint={})
+                                    _r67_memory_bundle = MemoryRetrievalService(_mem_store).retrieve(_mem_req)
+                        except Exception as _r67_mem_exc:
+                            logger.debug("R67 MemoryRetrievalService failed (non-fatal): %s", _r67_mem_exc)
+
+                        current_plan = self.plan_service.generate_plan_for_run(
+                            run_id,
+                            llm_input,
+                            plan_date=plan_start,
+                            event_ts=ts,
+                            prompt_template=self.prompt_template,
+                            use_vector_store=self.use_trigger_vector_store,
+                            emit_events=False,
+                        )
+                        current_plan = current_plan.model_copy(
+                            update={
+                                "risk_constraints": current_plan.risk_constraints.model_copy(
+                                    update={"max_daily_risk_budget_pct": self.active_risk_limits.max_daily_risk_budget_pct}
+                                )
+                            }
+                        )
+                        current_plan = current_plan.model_copy(
+                            update={
+                                "generated_at": plan_start,
+                                "valid_until": plan_end,
+                            }
+                        )
+                        object.__setattr__(current_plan, "_plan_generated_at_ts", ts)
+                        current_plan = self._apply_plan_overrides(current_plan)
+                        current_plan = self._apply_trigger_budget(current_plan)
+
+                        # R67 Step 7: JudgePlanValidationService gate (mirrors paper R66)
+                        # In backtest: log and skip rejected plans (no LLM revision — too slow)
+                        try:
+                            from services.judge_validation_service import JudgePlanValidationService
+                            _r67_validator = JudgePlanValidationService()
+                            _r67_verdict = _r67_validator.validate_plan(
+                                current_plan,
+                                memory_bundle=_r67_memory_bundle,
                             )
-                        }
-                    )
-                    current_plan = current_plan.model_copy(
-                        update={
-                            "generated_at": plan_start,
-                            "valid_until": plan_end,
-                        }
-                    )
-                    object.__setattr__(current_plan, "_plan_generated_at_ts", ts)
-                    current_plan = self._apply_plan_overrides(current_plan)
-                    current_plan = self._apply_trigger_budget(current_plan)
-                    current_plan, stripped_by_judge = self._strip_judge_constrained_triggers(current_plan)
+                            if _r67_verdict.decision == "reject":
+                                self._validation_rejected_count += 1
+                                logger.debug(
+                                    "R67 JudgePlanValidationService rejected plan %s: %s",
+                                    current_plan.plan_id,
+                                    "; ".join((_r67_verdict.reasons or [])[:3]),
+                                )
+                                if not is_initial_plan and previous_plan is not None:
+                                    # Keep previous plan; do NOT rebuild trigger engine
+                                    current_plan = previous_plan.model_copy(update={"valid_until": plan_end})
+                                    plan_rebuild = False
+                            else:
+                                # Release the PolicyLoopGate on successful approval
+                                try:
+                                    if hasattr(self, "_r67_policy_gate") and self._r67_policy_gate:
+                                        self._r67_policy_gate.release(f"backtest-{run_id}")
+                                except Exception:
+                                    pass
+                        except Exception as _r67_judge_exc:
+                            logger.debug("R67 JudgePlanValidationService failed (non-fatal): %s", _r67_judge_exc)
+
+                        current_plan, stripped_by_judge = self._strip_judge_constrained_triggers(current_plan)
                     # Track stance distribution from plan
                     plan_stance = getattr(current_plan, "stance", "active")
                     day_key = ts.strftime("%Y-%m-%d")
@@ -4417,6 +4552,8 @@ class LLMStrategistBacktester:
                         judge_constraints=self.active_judge_constraints,
                         exit_binding_mode=self.exit_binding_mode,
                         conflicting_signal_policy=self.conflicting_signal_policy,
+                        # R67: pass originating plans so exit triggers enforce plan-level binding (R65 mirror)
+                        position_originating_plans=dict(self._position_originating_plans) or None,
                     )
                 self.current_trigger_engine = trigger_engine
 
@@ -4664,6 +4801,31 @@ class LLMStrategistBacktester:
                     # updated stop_price_abs is visible to stop_hit in _context()
                     r45_partial_orders = self._advance_trade_state(bar)
 
+                    # R67: build TickSnapshot per bar (mirrors paper trading R64)
+                    _tick_snapshot = None
+                    try:
+                        from services.market_snapshot_builder import build_tick_snapshot as _build_tick_snapshot
+                        _tick_snapshot = _build_tick_snapshot(indicator)
+                    except Exception as _snap_exc:
+                        logger.debug("build_tick_snapshot failed: %s", _snap_exc)
+
+                    # R67: AdaptiveTradeManagement tick for each open position (mirrors paper trading R63)
+                    _amt_symbol = pair
+                    _amt_meta = self.portfolio.position_meta.get(_amt_symbol) or {}
+                    if abs(self.portfolio.positions.get(_amt_symbol, 0.0)) > 1e-9:
+                        try:
+                            from services.adaptive_trade_management import AdaptiveTradeManagementState
+                            _amt_state_dict = self._amt_state.get(_amt_symbol) or {}
+                            _amt_state_obj = (
+                                AdaptiveTradeManagementState.model_validate(_amt_state_dict)
+                                if _amt_state_dict
+                                else AdaptiveTradeManagementState.initial(_amt_meta)
+                            )
+                            _amt_state_obj = _amt_state_obj.tick(bar, _amt_meta)
+                            self._amt_state[_amt_symbol] = _amt_state_obj.model_dump(mode="json")
+                        except Exception as _amt_exc:
+                            logger.debug("AdaptiveTradeManagement tick failed (non-fatal): %s", _amt_exc)
+
                     # Use policy integration if available, otherwise direct trigger engine
                     if self.policy_integration is not None:
                         policy_result = self.policy_integration.on_bar(
@@ -4689,6 +4851,7 @@ class LLMStrategistBacktester:
                             asset_state,
                             market_structure=structure_snapshot,
                             position_meta=self.portfolio.position_meta,
+                            tick_snapshot=_tick_snapshot,
                         )
 
                     # Prepend Runbook 45 partial exits so they execute before new entries
@@ -4917,7 +5080,91 @@ class LLMStrategistBacktester:
             trade_mgmt_events=list(self._trade_mgmt_events),
             setup_events=list(self._setup_events),
             exit_contracts=list(self._exit_contract_audit),
+            # R67: new parity fields
+            episode_records=list(self._episode_records),
+            exit_binding_mismatch_blocked=self._exit_binding_mismatch_blocked,
+            validation_rejected_count=self._validation_rejected_count,
+            policy_loop_skip_count=self._policy_loop_skip_count,
         )
+
+    def _r67_build_episode_on_close(self, order: "Any", pre_qty: float) -> None:
+        """R67: Build an EpisodeMemoryRecord when a position closes (mirrors paper trading R63).
+
+        Called from _process_orders_with_limits when abs(post_qty) <= 1e-9.
+        All errors are caught and logged non-fatally.
+        """
+        try:
+            from services.episode_memory_service import EpisodeMemoryStore, build_episode_record
+            from schemas.signal_event import SignalEvent as _SE
+            from services.signal_ledger_service import compute_regime_snapshot_hash as _hash
+            symbol = order.symbol
+            exit_price = float(order.price or 0.0)
+            if exit_price <= 0:
+                return
+            meta = self.portfolio.position_meta.get(symbol) or {}
+            entry_price = float(meta.get("entry_price") or meta.get("stop_price_abs", 0.0) or 0.0)
+            if entry_price <= 0:
+                return
+            direction = "long" if pre_qty > 0 else "short"
+            stop_price_abs = meta.get("stop_price_abs")
+            target_price_abs = meta.get("target_price_abs")
+            timeframe = meta.get("timeframe") or self.base_timeframe
+            opened_at = meta.get("opened_at") or order.timestamp
+            if direction == "long":
+                pnl = exit_price - entry_price
+                if stop_price_abs and target_price_abs:
+                    risk = entry_price - float(stop_price_abs)
+                    reward = exit_price - entry_price
+                    r_achieved = reward / risk if risk > 0 else 0.0
+                else:
+                    r_achieved = pnl / max(abs(entry_price * 0.02), 1e-6)
+            else:
+                pnl = entry_price - exit_price
+                if stop_price_abs and target_price_abs:
+                    risk = float(stop_price_abs) - entry_price
+                    reward = entry_price - exit_price
+                    r_achieved = reward / risk if risk > 0 else 0.0
+                else:
+                    r_achieved = pnl / max(abs(entry_price * 0.02), 1e-6)
+            _snap_hash = _hash({"symbol": symbol, "entry_price": entry_price})
+            _hold_bars = max(1, int((order.timestamp - opened_at).total_seconds() / 3600)) if isinstance(opened_at, datetime) else 1
+            proxy_signal = _SE(
+                engine_version="1.0.0",
+                ts=opened_at if isinstance(opened_at, datetime) else order.timestamp,
+                valid_until=order.timestamp,
+                timeframe=timeframe,
+                symbol=symbol,
+                direction=direction,
+                trigger_id="backtest",
+                strategy_type="backtest",
+                regime_snapshot_hash=_snap_hash,
+                entry_price=entry_price,
+                stop_price_abs=float(stop_price_abs) if stop_price_abs else (entry_price * 0.98 if direction == "long" else entry_price * 1.02),
+                target_price_abs=float(target_price_abs) if target_price_abs else (entry_price * 1.04 if direction == "long" else entry_price * 0.96),
+                risk_r_multiple=abs(r_achieved),
+                expected_hold_bars=_hold_bars,
+                thesis=f"{direction} backtest position closed",
+                playbook_id=meta.get("playbook_id"),
+                strategy_template_version=meta.get("template_id"),
+            )
+            record = build_episode_record(
+                signal_event=proxy_signal,
+                exit_ts=order.timestamp,
+                pnl=pnl,
+                r_achieved=r_achieved,
+                mfe_pct=0.0,
+                mae_pct=0.0,
+                episode_source="backtest",
+            )
+            self._episode_records.append(record.model_dump(mode="json"))
+            _store = EpisodeMemoryStore()
+            _store.add(record)
+            # persist_episode writes to DB with episode_source="backtest" so retrieval
+            # can apply lower fidelity weight (0.4×) relative to paper/live episodes.
+            _store.persist_episode(record)
+            logger.debug("R67 episode_memory: built episode symbol=%s r=%.2f", symbol, r_achieved)
+        except Exception as exc:
+            logger.debug("R67 _r67_build_episode_on_close failed (non-fatal): %s", exc)
 
     def _indicator_briefs(self, asset_states: Dict[str, AssetState]) -> Dict[str, Dict[str, Any]]:
         briefs: Dict[str, Dict[str, Any]] = {}

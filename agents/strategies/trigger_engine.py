@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 from schemas.llm_strategist import AssetState, IndicatorSnapshot, PortfolioState, StrategyPlan, TriggerCondition
 from schemas.judge_feedback import JudgeConstraints
 from schemas.learning_gate import LearningGateStatus
+from schemas.position_exit_contract import PositionExitContract  # R67: exit contract enforcement
 from trading_core.execution_engine import BlockReason
 
 from .risk_engine import RiskEngine
@@ -22,6 +23,31 @@ from .rule_dsl import EvaluationTrace, MissingIndicatorError, RuleEvaluator, Rul
 from .plan_validator import check_exit_rule_for_tautology
 
 from .trade_risk import TradeRiskEvaluator
+
+# R67: Lazy imports for market snapshot and structural targeting (used in on_bar)
+# build_tick_snapshot: builds a normalized TickSnapshot from an IndicatorSnapshot
+# select_stop_candidates / select_target_candidates: StructuralTargetSelector helpers
+def _try_build_tick_snapshot(indicator: IndicatorSnapshot) -> "Any | None":
+    """Build a TickSnapshot from the current indicator, returning None on failure."""
+    try:
+        from services.market_snapshot_builder import build_tick_snapshot
+        return build_tick_snapshot(indicator)
+    except Exception:
+        return None
+
+
+def _try_select_structural_targets(indicator: IndicatorSnapshot, direction: str) -> "dict[str, Any]":
+    """Select structural stop/target candidates via StructuralTargetSelector."""
+    try:
+        from services.structural_target_selector import (
+            select_stop_candidates,
+            select_target_candidates,
+        )
+        stops = select_stop_candidates(indicator, direction=direction)
+        targets = select_target_candidates(indicator, direction=direction)
+        return {"structural_stops": stops, "structural_targets": targets}
+    except Exception:
+        return {}
 
 ExitBindingMode = Literal["none", "category"]
 ConflictResolution = Literal["ignore", "exit", "reverse", "defer"]
