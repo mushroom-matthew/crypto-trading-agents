@@ -289,6 +289,15 @@ class PaperTradingSessionConfig(BaseModel):
         description="Max loss as % of research capital before pausing (5–100%, default 50%)"
     )
 
+    # ============================================================================
+    # Screener Integration (Runbook 68)
+    # ============================================================================
+    screener_regime: Optional[str] = Field(
+        default=None,
+        description="Regime label from screener (e.g. 'bull_trending'). "
+                    "Used to pre-filter eligible playbooks before LLM generation.",
+    )
+
 
 class SessionStartResponse(BaseModel):
     """Response when starting a paper trading session."""
@@ -348,6 +357,12 @@ class StrategyPlanSummary(BaseModel):
     global_view: Optional[str] = None
     regime: Optional[str] = None
     triggers: List[TriggerSummary] = []
+    # R68/R49: snapshot provenance fields for plan inspector UI
+    snapshot_id: Optional[str] = None
+    snapshot_hash: Optional[str] = None
+    snapshot_missing_sections: List[str] = []
+    snapshot_staleness_seconds: Optional[float] = None
+    snapshot_as_of_ts: Optional[str] = None
 
 
 class TradeRecord(BaseModel):
@@ -517,6 +532,8 @@ async def start_session(config: PaperTradingSessionConfig):
             "research_max_loss_pct": config.research_max_loss_pct,
             # R59: directional bias
             "direction_bias": config.direction_bias,
+            # R68: screener-derived regime for playbook filtering
+            "screener_regime": config.screener_regime,
         }
 
         # Start workflow
@@ -741,6 +758,12 @@ async def get_current_plan(session_id: str):
             global_view=plan.get("global_view"),
             regime=plan.get("regime"),
             triggers=trigger_summaries,
+            # R68: snapshot provenance from workflow query (R49 metadata)
+            snapshot_id=plan.get("snapshot_id"),
+            snapshot_hash=plan.get("snapshot_hash"),
+            snapshot_missing_sections=plan.get("snapshot_missing_sections") or [],
+            snapshot_staleness_seconds=plan.get("snapshot_staleness_seconds"),
+            snapshot_as_of_ts=plan.get("snapshot_as_of_ts"),
         )
 
     except HTTPException:
@@ -1075,6 +1098,178 @@ async def get_trade_sets(session_id: str, limit: int = 50):
         raise
     except Exception as e:
         logger.error(f"Failed to get trade sets: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class PaperTradingMetrics(BaseModel):
+    """Session-level aggregated performance metrics."""
+
+    session_id: str
+    total_trades: int
+    win_rate_pct: float
+    total_net_pnl: float
+    avg_win: float
+    avg_loss: float
+    profit_factor: float
+    max_drawdown_pct: float
+    avg_r_per_trade: float
+    median_hold_minutes: float
+    equity_return_pct: float
+    policy_skips: int
+    validation_rejections: int
+
+
+@router.get("/sessions/{session_id}/metrics", response_model=PaperTradingMetrics)
+async def get_session_metrics(session_id: str):
+    """Get aggregated session-level performance metrics.
+
+    Computes win/loss stats from completed trade sets, draws equity return from
+    the ledger, and counts policy gate skips and validation rejections from events.
+    """
+    from ops_api.temporal_client import get_temporal_client
+    from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+    from ops_api.event_store import EventStore
+    from temporalio.service import RPCError, RPCStatusCode
+    from datetime import datetime, timezone as _tz
+
+    try:
+        client = await get_temporal_client()
+
+        # Verify session exists
+        session_handle = client.get_workflow_handle(session_id)
+        try:
+            await session_handle.query("get_session_status")
+        except RPCError as e:
+            if _is_not_found(e):
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            raise
+
+        # Fetch all transactions (same as trade_sets endpoint)
+        ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+        ledger_handle = client.get_workflow_handle(ledger_workflow_id)
+        try:
+            transactions = await ledger_handle.query("get_transaction_history", {"limit": 2000})
+        except RPCError as err:
+            if err.status != RPCStatusCode.NOT_FOUND:
+                raise
+            legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+            transactions = await legacy_ledger_handle.query("get_transaction_history", {"limit": 2000})
+
+        # Fetch portfolio state for equity return calculation
+        try:
+            portfolio = await ledger_handle.query("get_portfolio_status")
+        except Exception:
+            portfolio = {}
+
+        # Compute FIFO trade pairs (identical logic to get_trade_sets)
+        txs = sorted(transactions, key=lambda x: x.get("timestamp", 0))
+        open_entries: Dict[str, List[Dict]] = {}
+        trade_sets: List[Dict[str, Any]] = []
+
+        for tx in txs:
+            symbol = tx.get("symbol", "")
+            side = (tx.get("side", "") or "").upper()
+            qty = float(tx.get("qty", tx.get("quantity", 0)))
+            price = float(tx.get("price", tx.get("fill_price", 0)))
+            fee = float(tx.get("fee", 0) or 0)
+            ts_raw = tx.get("timestamp", 0)
+            intent = tx.get("intent", "entry" if side == "BUY" else "exit")
+
+            if side == "BUY" or intent == "entry":
+                open_entries.setdefault(symbol, []).append(tx)
+            elif side == "SELL" or intent == "exit":
+                entries = open_entries.get(symbol, [])
+                if not entries:
+                    continue
+                entry = entries.pop(0)
+                entry_price = float(entry.get("price", entry.get("fill_price", 0)))
+                entry_qty = float(entry.get("qty", entry.get("quantity", 0)))
+                entry_ts = entry.get("timestamp", 0)
+                entry_fee = float(entry.get("fee", 0) or 0)
+                used_qty = min(qty, entry_qty)
+                gross_pnl = (price - entry_price) * used_qty
+                total_fee = fee + entry_fee
+                net_pnl = gross_pnl - total_fee
+                entry_ts_sec = entry_ts if entry_ts < 1e12 else entry_ts / 1000.0
+                exit_ts_sec = ts_raw if ts_raw < 1e12 else ts_raw / 1000.0
+                hold_minutes = (exit_ts_sec - entry_ts_sec) / 60.0
+                stop_px = entry.get("stop_price_abs")
+                r_return = None
+                if stop_px and entry_price > 0:
+                    initial_risk = abs(entry_price - float(stop_px)) * used_qty
+                    if initial_risk > 0:
+                        r_return = net_pnl / initial_risk
+                trade_sets.append({
+                    "net_pnl": net_pnl,
+                    "hold_minutes": hold_minutes,
+                    "winner": net_pnl > 0,
+                    "r_return": r_return,
+                })
+
+        total = len(trade_sets)
+        wins = [t for t in trade_sets if t["winner"]]
+        losses = [t for t in trade_sets if not t["winner"]]
+        win_rate = len(wins) / total * 100 if total else 0.0
+        total_net_pnl = sum(t["net_pnl"] for t in trade_sets)
+        avg_win = sum(t["net_pnl"] for t in wins) / len(wins) if wins else 0.0
+        avg_loss = sum(t["net_pnl"] for t in losses) / len(losses) if losses else 0.0
+        gross_wins = sum(t["net_pnl"] for t in wins)
+        gross_losses = abs(sum(t["net_pnl"] for t in losses))
+        profit_factor = gross_wins / gross_losses if gross_losses > 0 else 0.0
+        r_values = [t["r_return"] for t in trade_sets if t["r_return"] is not None]
+        avg_r = sum(r_values) / len(r_values) if r_values else 0.0
+        hold_vals = sorted(t["hold_minutes"] for t in trade_sets)
+        median_hold = hold_vals[len(hold_vals) // 2] if hold_vals else 0.0
+
+        # Max drawdown from equity history (lightweight approximation)
+        initial_cash = float(portfolio.get("initial_cash", 0) or 0)
+        current_equity = float(
+            portfolio.get("total_equity") or portfolio.get("total_portfolio_value", initial_cash) or initial_cash
+        )
+        equity_return = ((current_equity - initial_cash) / initial_cash * 100) if initial_cash > 0 else 0.0
+
+        # Compute simple max drawdown from trade PnL sequence
+        running = 0.0
+        peak = 0.0
+        max_dd_abs = 0.0
+        for t in trade_sets:
+            running += t["net_pnl"]
+            if running > peak:
+                peak = running
+            dd = peak - running
+            if dd > max_dd_abs:
+                max_dd_abs = dd
+        max_dd_pct = (max_dd_abs / initial_cash * 100) if initial_cash > 0 else 0.0
+
+        # Count policy gate skips and validation rejections from event store
+        event_store = EventStore()
+        policy_skip_events = event_store.list_events_filtered(
+            event_type="policy_loop_skipped", run_id=session_id, limit=10000
+        )
+        validation_rejected_events = event_store.list_events_filtered(
+            event_type="plan_validation_rejected", run_id=session_id, limit=10000
+        )
+
+        return PaperTradingMetrics(
+            session_id=session_id,
+            total_trades=total,
+            win_rate_pct=round(win_rate, 1),
+            total_net_pnl=round(total_net_pnl, 4),
+            avg_win=round(avg_win, 4),
+            avg_loss=round(avg_loss, 4),
+            profit_factor=round(profit_factor, 3),
+            max_drawdown_pct=round(max_dd_pct, 2),
+            avg_r_per_trade=round(avg_r, 4),
+            median_hold_minutes=round(median_hold, 1),
+            equity_return_pct=round(equity_return, 2),
+            policy_skips=len(policy_skip_events),
+            validation_rejections=len(validation_rejected_events),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session metrics: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

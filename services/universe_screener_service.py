@@ -453,6 +453,14 @@ class UniverseScreenerService:
             (item.template_id for group in batch.groups for item in group.recommendations if item.template_id),
             preflight.suggested_default_template_id,
         )
+        # R68: populate suggested timeframe from the top candidate's expected_hold_timeframe
+        top_item = next(
+            (item for group in batch.groups for item in group.recommendations),
+            None,
+        )
+        preflight.suggested_default_indicator_timeframe = (
+            top_item.expected_hold_timeframe if top_item else None
+        )
         if batch.annotation_meta and batch.annotation_meta.get("applied"):
             preflight.notes = [
                 "LLM annotation/re-ranking applied on top of deterministic shortlist.",

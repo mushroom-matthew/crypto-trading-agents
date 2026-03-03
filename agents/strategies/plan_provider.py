@@ -129,6 +129,9 @@ def _get_eligible_playbooks(llm_input: LLMInput) -> list:
             or "unknown"
         )
         htf_direction = _extract_htf_direction(indicator)
+        # R68: fall back to screener-derived htf_direction from global_context
+        if htf_direction is None:
+            htf_direction = (llm_input.global_context or {}).get("htf_direction")
         registry = PlaybookRegistry()
         return registry.list_eligible(regime, htf_direction=htf_direction)
     except Exception:

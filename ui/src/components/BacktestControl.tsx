@@ -849,6 +849,47 @@ export function BacktestControl() {
                 />
               )}
             </div>
+
+            {/* R67 parity counters */}
+            {(results.validation_rejected_count != null ||
+              results.policy_loop_skip_count != null ||
+              results.exit_binding_mismatch_blocked != null ||
+              results.episode_count != null) && (
+              <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                {results.policy_loop_skip_count != null && (
+                  <div>
+                    <p className="text-xs text-gray-500 mb-0.5">Policy gate skips</p>
+                    <p className="font-semibold text-gray-700 dark:text-gray-300">
+                      {results.policy_loop_skip_count}
+                    </p>
+                  </div>
+                )}
+                {results.validation_rejected_count != null && (
+                  <div>
+                    <p className="text-xs text-gray-500 mb-0.5">Judge rejections</p>
+                    <p className="font-semibold text-gray-700 dark:text-gray-300">
+                      {results.validation_rejected_count}
+                    </p>
+                  </div>
+                )}
+                {results.exit_binding_mismatch_blocked != null && (
+                  <div>
+                    <p className="text-xs text-gray-500 mb-0.5">Exit binding blocked</p>
+                    <p className="font-semibold text-gray-700 dark:text-gray-300">
+                      {results.exit_binding_mismatch_blocked}
+                    </p>
+                  </div>
+                )}
+                {results.episode_count != null && (
+                  <div>
+                    <p className="text-xs text-gray-500 mb-0.5">Episodes recorded</p>
+                    <p className="font-semibold text-gray-700 dark:text-gray-300">
+                      {results.episode_count}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Equity Curve */}

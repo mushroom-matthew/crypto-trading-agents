@@ -113,4 +113,9 @@ class ScreenerSessionPreflight(SerializableModel):
     shortlist: InstrumentRecommendationBatch
     suggested_default_symbol: str | None = None
     suggested_default_template_id: str | None = None
+    suggested_default_indicator_timeframe: str | None = Field(
+        default=None,
+        description="From top candidate's expected_hold_timeframe. "
+                    "Pre-populate PaperTradingSessionConfig.indicator_timeframe.",
+    )
     notes: list[str] = Field(default_factory=list)

@@ -18,6 +18,7 @@ import {
   type PaperTradingTradeSet,
   type ScreenerRecommendationItem,
 } from '../lib/api';
+// Note: PaperTradingMetrics used via paperTradingAPI.getMetrics() return type (inferred)
 import { cn, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
@@ -34,6 +35,7 @@ export function PaperTradingControl() {
   const [selectedStrategyId, setSelectedStrategyId] = useState('default');
   const [planIntervalHours, setPlanIntervalHours] = useState(4);
   const [indicatorTimeframe, setIndicatorTimeframe] = useState<string>('1h');
+  const [userOverrodeTf, setUserOverrodeTf] = useState(false);
   const [directionBias, setDirectionBias] = useState<string>('neutral');
   const [enableDiscovery, setEnableDiscovery] = useState(false);
   const [annotateScreenerShortlist, setAnnotateScreenerShortlist] = useState(false);
@@ -157,6 +159,22 @@ export function PaperTradingControl() {
   });
   const tradeSets = tradeSetsData?.trade_sets ?? [];
 
+  // Fetch session metrics (R68)
+  const { data: sessionMetrics } = useQuery({
+    queryKey: ['paper-trading-metrics', selectedSessionId],
+    queryFn: () => paperTradingAPI.getMetrics(selectedSessionId!),
+    enabled: !!selectedSessionId,
+    refetchInterval: session?.status === 'running' ? 30000 : false,
+  });
+
+  // R68: auto-fill indicator_timeframe from screener preflight (unless user has overridden it)
+  useEffect(() => {
+    const suggested = screenerPreflight?.suggested_default_indicator_timeframe;
+    if (suggested && !userOverrodeTf) {
+      setIndicatorTimeframe(suggested);
+    }
+  }, [screenerPreflight?.suggested_default_indicator_timeframe, userOverrodeTf]);
+
   // Chart state
   const [chartSymbol, setChartSymbol] = useState('BTC-USD');
   const [chartTimeframe, setChartTimeframe] = useState('1m');
@@ -233,6 +251,9 @@ export function PaperTradingControl() {
         strategyPrompt = strategyData.content;
       }
 
+      // R68: derive screener_regime from the top candidate's group in the preflight
+      const screenerRegime = screenerPreflight?.shortlist?.groups?.[0]?.hypothesis ?? null;
+
       const config: PaperTradingSessionConfig = {
         symbols,
         initial_cash: initialCash,
@@ -242,6 +263,7 @@ export function PaperTradingControl() {
         plan_interval_hours: planIntervalHours,
         indicator_timeframe: indicatorTimeframe,
         direction_bias: directionBias,
+        screener_regime: screenerRegime || undefined,
         enable_symbol_discovery: enableDiscovery,
         exit_binding_mode: 'category',
         // Aggressive trading settings
@@ -291,6 +313,7 @@ export function PaperTradingControl() {
       setPlanIntervalHours(interval);
     }
     setIndicatorTimeframe(item.expected_hold_timeframe);
+    setUserOverrodeTf(true);  // R68: treat explicit candidate apply as user override
     if (item.direction_bias) {
       setDirectionBias(item.direction_bias);
     }
@@ -775,6 +798,21 @@ export function PaperTradingControl() {
             </div>
           )}
 
+          {/* R68: Session Metrics Bar */}
+          {sessionMetrics && sessionMetrics.total_trades > 0 && (
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow px-4 py-2 flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
+              <span><strong className="text-gray-900 dark:text-gray-100">{sessionMetrics.total_trades}</strong> trades</span>
+              <span><strong className={sessionMetrics.win_rate_pct >= 50 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.win_rate_pct.toFixed(0)}%</strong> win</span>
+              <span>P-factor: <strong className={sessionMetrics.profit_factor >= 1 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.profit_factor.toFixed(2)}</strong></span>
+              <span>Avg R: <strong className={sessionMetrics.avg_r_per_trade >= 0 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.avg_r_per_trade >= 0 ? '+' : ''}{sessionMetrics.avg_r_per_trade.toFixed(2)}R</strong></span>
+              <span>Max DD: <strong className="text-amber-600">-{sessionMetrics.max_drawdown_pct.toFixed(1)}%</strong></span>
+              <span>Return: <strong className={sessionMetrics.equity_return_pct >= 0 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.equity_return_pct >= 0 ? '+' : ''}{sessionMetrics.equity_return_pct.toFixed(1)}%</strong></span>
+              {sessionMetrics.policy_skips > 0 && (
+                <span className="text-gray-400">⏭ {sessionMetrics.policy_skips} gate skips</span>
+              )}
+            </div>
+          )}
+
           {/* Portfolio */}
           {portfolio && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
@@ -1094,6 +1132,43 @@ export function PaperTradingControl() {
                   )}
                 </div>
               )}
+
+              {/* R68: Snapshot Context Inspector */}
+              {plan && (plan.snapshot_id || (plan.snapshot_missing_sections ?? []).length > 0) && (
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 select-none">
+                    📸 Snapshot context
+                    {(plan.snapshot_missing_sections ?? []).length > 0 && (
+                      <span className="ml-2 text-amber-500">
+                        ⚠️ {plan.snapshot_missing_sections!.length} missing
+                      </span>
+                    )}
+                  </summary>
+                  <div className="mt-2 p-2 bg-gray-50 dark:bg-gray-700/50 rounded text-[11px] font-mono space-y-1">
+                    {plan.snapshot_id && (
+                      <div className="text-gray-500">
+                        ID: <span className="text-gray-700 dark:text-gray-200">{plan.snapshot_id.slice(0, 8)}</span>
+                        {plan.snapshot_staleness_seconds != null && (
+                          <span className="ml-3 text-gray-400">
+                            {plan.snapshot_staleness_seconds.toFixed(1)}s stale
+                          </span>
+                        )}
+                        {plan.snapshot_as_of_ts && (
+                          <span className="ml-3 text-gray-400">{plan.snapshot_as_of_ts.slice(0, 19).replace('T', ' ')}Z</span>
+                        )}
+                      </div>
+                    )}
+                    {(plan.snapshot_missing_sections ?? []).length > 0 && (
+                      <div>
+                        <span className="text-amber-500">Missing:</span>{' '}
+                        {plan.snapshot_missing_sections!.map((s) => (
+                          <span key={s} className="mr-2 text-amber-600 dark:text-amber-400">⚠️ {s}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </details>
+              )}
             </div>
           )}
         </div>
@@ -1310,6 +1385,8 @@ export function PaperTradingControl() {
                   <th className="text-right py-2 px-2">Fee</th>
                   <th className="text-right py-2 px-2">Net P&L</th>
                   <th className="text-right py-2 px-2">%</th>
+                  <th className="text-right py-2 px-2">R/hr</th>
+                  <th className="text-right py-2 px-2">Stop</th>
                   <th className="text-left py-2 px-2">Setup</th>
                 </tr>
               </thead>
@@ -1318,6 +1395,9 @@ export function PaperTradingControl() {
                   const holdStr = ts.hold_minutes >= 60
                     ? `${(ts.hold_minutes / 60).toFixed(1)}h`
                     : `${ts.hold_minutes.toFixed(0)}m`;
+                  const rph = ts.r_per_hour;
+                  const rphStr = rph != null ? `${rph >= 0 ? '+' : ''}${rph.toFixed(2)}` : '—';
+                  const rphClass = rph == null ? 'text-gray-400' : rph >= 0 ? 'text-green-600' : 'text-red-600';
                   return (
                     <tr key={idx} className={cn(
                       'border-b border-gray-100 dark:border-gray-700/50 text-xs',
@@ -1336,6 +1416,12 @@ export function PaperTradingControl() {
                       </td>
                       <td className={cn('py-2 px-2 text-right font-semibold', ts.winner ? 'text-green-600' : 'text-red-600')}>
                         {ts.pnl_pct >= 0 ? '+' : ''}{ts.pnl_pct.toFixed(2)}%
+                      </td>
+                      <td className={cn('py-2 px-2 text-right font-mono font-semibold', rphClass)}>
+                        {rphStr}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono text-gray-500">
+                        {ts.stop_price_abs != null ? formatCurrency(ts.stop_price_abs) : '—'}
                       </td>
                       <td className="py-2 px-2 text-gray-500 font-mono truncate max-w-32" title={ts.entry_trigger ?? ''}>
                         {ts.category ?? ts.entry_trigger ?? '-'}

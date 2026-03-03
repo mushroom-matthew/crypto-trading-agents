@@ -142,6 +142,11 @@ export interface BacktestResults {
   avg_win?: number;
   avg_loss?: number;
   profit_factor?: number;
+  // R67 parity counters
+  validation_rejected_count?: number;
+  policy_loop_skip_count?: number;
+  exit_binding_mismatch_blocked?: number;
+  episode_count?: number;
 }
 
 export interface EquityCurvePoint {
@@ -359,6 +364,7 @@ export interface ScreenerSessionPreflight {
   shortlist: ScreenerRecommendationBatch;
   suggested_default_symbol?: string | null;
   suggested_default_template_id?: string | null;
+  suggested_default_indicator_timeframe?: string | null;
   notes: string[];
 }
 
@@ -754,6 +760,9 @@ export interface PaperTradingSessionConfig {
   research_budget_enabled?: boolean;
   research_budget_fraction?: number;
   research_max_loss_pct?: number;
+
+  // Screener Integration (R68)
+  screener_regime?: string | null;
 }
 
 export interface PaperTradingSession {
@@ -860,6 +869,12 @@ export interface PaperTradingPlan {
   global_view: string | null;
   regime: string | null;
   triggers: PaperTradingTrigger[];
+  // R68/R49: snapshot provenance for plan inspector
+  snapshot_id?: string | null;
+  snapshot_hash?: string | null;
+  snapshot_missing_sections?: string[];
+  snapshot_staleness_seconds?: number | null;
+  snapshot_as_of_ts?: string | null;
 }
 
 export interface PaperTradingActivityEvent {
@@ -907,6 +922,25 @@ export interface PaperTradingTradeSet {
   exit_trigger: string | null;
   category: string | null;
   winner: boolean;
+  // R68: risk metrics
+  stop_price_abs?: number | null;
+  r_per_hour?: number | null;
+}
+
+export interface PaperTradingMetrics {
+  session_id: string;
+  total_trades: number;
+  win_rate_pct: number;
+  total_net_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  profit_factor: number;
+  max_drawdown_pct: number;
+  avg_r_per_trade: number;
+  median_hold_minutes: number;
+  equity_return_pct: number;
+  policy_skips: number;
+  validation_rejections: number;
 }
 
 export interface PaperTradingTradeSetsResponse {
@@ -1144,6 +1178,12 @@ export const paperTradingAPI = {
     const response = await api.get(`/paper-trading/sessions/${sessionId}/candles`, {
       params: { symbol, timeframe, limit },
     });
+    return response.data;
+  },
+
+  // Get aggregated session-level performance metrics (R68)
+  getMetrics: async (sessionId: string): Promise<PaperTradingMetrics> => {
+    const response = await api.get(`/paper-trading/sessions/${sessionId}/metrics`);
     return response.data;
   },
 };

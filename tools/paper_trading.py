@@ -135,6 +135,12 @@ class PaperTradingConfig(BaseModel):
         description="Directional bias for the session: 'long', 'short', or 'neutral'.",
     )
 
+    screener_regime: Optional[str] = Field(
+        default=None,
+        description="Regime label from screener (e.g. 'bull_trending'). "
+                    "Used to pre-filter eligible playbooks before LLM generation.",
+    )
+
     @field_validator("indicator_timeframe")
     @classmethod
     def validate_indicator_timeframe(cls, v: str) -> str:
@@ -180,6 +186,7 @@ class SessionState(BaseModel):
     exit_binding_mode: Literal["none", "category"] = "category"
     conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
     trigger_rule_edits: List[Dict[str, Any]] = []
+    screener_regime: Optional[str] = None  # R68: screener-derived regime label
     # Candle-clock: track last evaluated candle floor per timeframe to avoid
     # re-evaluating the same candle on every 30-second tick.
     last_eval_candle_by_tf: Dict[str, str] = {}
@@ -524,11 +531,30 @@ async def generate_strategy_plan_activity(
     # Prefixed with _ so it can be popped before any Pydantic re-validation.
     plan_dict["_retrieved_template_id"] = (llm_client.last_generation_info or {}).get("retrieved_template_id")
 
-    # R49: build PolicySnapshot and thread provenance into plan dict for event telemetry.
-    # Prefixed with _ so callers can pop before Pydantic re-validation.
+    # R49/R68: build PolicySnapshot with structure_snapshot wired in.
+    # The market_context carries a serialized StructureSnapshot from the workflow (R68 fix).
     try:
         from services.market_snapshot_builder import build_policy_snapshot
-        _ps = build_policy_snapshot(llm_input, policy_event_type="plan_generation")
+        _structure_snapshot_for_ps = None
+        _ss_dict = market_context.get("structure_snapshot")
+        if _ss_dict:
+            try:
+                from schemas.structure_engine import StructureSnapshot as _StructureSnapshot
+                _structure_snapshot_for_ps = _StructureSnapshot.model_validate(_ss_dict)
+            except Exception:
+                pass
+        _ps_structure_snapshots = (
+            {symbols[0]: _structure_snapshot_for_ps}
+            if _structure_snapshot_for_ps and symbols
+            else None
+        )
+        _ps_memory_summary = "retrieved" if _validation_bundle else None
+        _ps = build_policy_snapshot(
+            llm_input,
+            policy_event_type="plan_generation",
+            structure_snapshots=_ps_structure_snapshots,
+            memory_bundle_summary=_ps_memory_summary,
+        )
         plan_dict["_snapshot_id"] = _ps.provenance.snapshot_id
         plan_dict["_snapshot_hash"] = _ps.provenance.snapshot_hash
         plan_dict["_snapshot_version"] = _ps.provenance.snapshot_version
@@ -1281,6 +1307,10 @@ class PaperTradingWorkflow:
         self.episode_memory_store_state: List[Dict[str, Any]] = []
         # Exit contract enforcement: tracks which plan opened each position (Runbook 65)
         self.position_originating_plans: Dict[str, str] = {}  # symbol → plan_id
+        # R68: snapshot metadata from last plan generation (ephemeral — not persisted across continue-as-new)
+        self._current_plan_snapshot_meta: Dict[str, Any] = {}
+        # R68: screener-derived regime label (persisted)
+        self.screener_regime: Optional[str] = None
 
     # -------------------------------------------------------------------------
     # Signals
@@ -1467,8 +1497,13 @@ class PaperTradingWorkflow:
 
     @workflow.query
     def get_current_plan(self) -> Optional[Dict[str, Any]]:
-        """Get the current strategy plan."""
-        return self.current_plan
+        """Get the current strategy plan with R68 snapshot metadata merged in."""
+        if self.current_plan is None:
+            return None
+        plan_with_meta = dict(self.current_plan)
+        if self._current_plan_snapshot_meta:
+            plan_with_meta.update(self._current_plan_snapshot_meta)
+        return plan_with_meta
 
     @workflow.query
     def get_symbols(self) -> List[str]:
@@ -1589,6 +1624,7 @@ class PaperTradingWorkflow:
             self.plan_interval_hours = parsed_config.plan_interval_hours
             self.indicator_timeframe = parsed_config.indicator_timeframe
             self.direction_bias = parsed_config.direction_bias
+            self.screener_regime = parsed_config.screener_regime
             self.replan_on_day_boundary = parsed_config.replan_on_day_boundary
             self.enable_symbol_discovery = parsed_config.enable_symbol_discovery
             self.min_volume_24h = parsed_config.min_volume_24h
@@ -1910,6 +1946,27 @@ class PaperTradingWorkflow:
             # R63: thread in-session episode records so the activity can load them
             # into the memory store without a DB roundtrip.
             _plan_market_ctx = dict(market_context)
+
+            # R68: thread latest structure snapshot so build_policy_snapshot can
+            # wire structure_engine into the PolicySnapshot (fixes missing section).
+            _primary_snap_sym = self.symbols[0] if self.symbols else None
+            if _primary_snap_sym:
+                _ss_for_plan = _get_latest_structure_snapshot(
+                    self.structure_history, _primary_snap_sym
+                )
+                if _ss_for_plan:
+                    _plan_market_ctx["structure_snapshot"] = _ss_for_plan.model_dump()
+
+            # R68: inject screener regime and htf_direction into global_context so
+            # PlaybookRegistry.list_eligible() receives regime-filtered candidates.
+            _gc = _plan_market_ctx.setdefault("global_context", {})
+            if self.screener_regime and not _gc.get("regime"):
+                _gc["regime"] = self.screener_regime
+            _htf_map = {"long": "up", "short": "down", "neutral": None}
+            _htf = _htf_map.get(self.direction_bias or "neutral")
+            if _htf:
+                _gc.setdefault("htf_direction", _htf)
+
             if self.episode_memory_store_state:
                 _plan_market_ctx["__episode_memory_store_state__"] = list(
                     self.episode_memory_store_state
@@ -2012,6 +2069,15 @@ class PaperTradingWorkflow:
             _snapshot_as_of_ts = plan_dict.pop("_snapshot_as_of_ts", None)
             _snapshot_staleness_seconds = plan_dict.pop("_snapshot_staleness_seconds", None)
             _snapshot_missing_sections = plan_dict.pop("_snapshot_missing_sections", None)
+
+            # R68: store snapshot meta for query response (ephemeral — not in SessionState)
+            self._current_plan_snapshot_meta = {
+                "snapshot_id": _snapshot_id,
+                "snapshot_hash": _snapshot_hash,
+                "snapshot_missing_sections": _snapshot_missing_sections or [],
+                "snapshot_staleness_seconds": _snapshot_staleness_seconds,
+                "snapshot_as_of_ts": _snapshot_as_of_ts,
+            }
 
             self.current_plan = plan_dict
             self.last_plan_time = workflow.now()
@@ -2903,6 +2969,7 @@ class PaperTradingWorkflow:
             exit_binding_mode=self.exit_binding_mode,
             conflicting_signal_policy=self.conflicting_signal_policy,
             trigger_rule_edits=self.trigger_rule_edits,
+            screener_regime=self.screener_regime,
             last_eval_candle_by_tf=dict(self.last_eval_candle_by_tf),
             research=self.research,
             active_experiments=list(self.active_experiments),
@@ -2941,6 +3008,7 @@ class PaperTradingWorkflow:
         self.exit_binding_mode = parsed.exit_binding_mode
         self.conflicting_signal_policy = parsed.conflicting_signal_policy
         self.trigger_rule_edits = parsed.trigger_rule_edits
+        self.screener_regime = parsed.screener_regime
         self.last_eval_candle_by_tf = dict(parsed.last_eval_candle_by_tf)
         self.research = parsed.research
         self.active_experiments = list(parsed.active_experiments)
