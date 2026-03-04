@@ -12,10 +12,32 @@ export function cn(...inputs: ClassValue[]) {
  * Format number as currency
  */
 export function formatCurrency(value: number): string {
+  const fractionDigits = inferPriceFractionDigits(value);
+  const minimumFractionDigits = Math.min(2, fractionDigits);
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
+    minimumFractionDigits,
+    maximumFractionDigits: fractionDigits,
   }).format(value);
+}
+
+export function formatAssetPrice(value: number): string {
+  if (!Number.isFinite(value)) return 'N/A';
+  const fractionDigits = inferPriceFractionDigits(value);
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: fractionDigits,
+  }).format(value);
+}
+
+function inferPriceFractionDigits(value: number): number {
+  const abs = Math.abs(value);
+  if (!Number.isFinite(abs) || abs === 0) return 2;
+  if (abs >= 1) return 2;
+  if (abs >= 1e-2) return 4;
+  if (abs >= 1e-4) return 6;
+  return 8;
 }
 
 /**

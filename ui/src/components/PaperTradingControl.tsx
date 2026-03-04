@@ -19,7 +19,7 @@ import {
   type ScreenerRecommendationItem,
 } from '../lib/api';
 // Note: PaperTradingMetrics used via paperTradingAPI.getMetrics() return type (inferred)
-import { cn, formatCurrency, formatDateTime } from '../lib/utils';
+import { cn, formatAssetPrice, formatCurrency, formatDateTime } from '../lib/utils';
 import { PromptEditor } from './PromptEditor';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
 import { PlanningSettingsPanel, type PlanningSettings } from './PlanningSettingsPanel';
@@ -322,11 +322,12 @@ export function PaperTradingControl() {
   const selectedPositionQty = portfolio?.positions?.[chartSymbol] ?? 0;
   const selectedEntryPrice = portfolio?.entry_prices?.[chartSymbol] ?? null;
   const selectedStructure = structureData?.indicators?.[chartSymbol] ?? null;
+  const selectedStructureSnapshot = structureData?.structure_snapshots?.[chartSymbol] ?? null;
   const selectedStructureRows = buildStructureRows(selectedStructure, {
     requestedAsOf: structureData?.requested_as_of ?? selectedStructureAsOf ?? null,
     resolvedAsOf: structureData?.resolved_as_of ?? null,
     lookupMode: structureData?.lookup_mode ?? null,
-  });
+  }, selectedStructureSnapshot);
   const chartExecutions = activityEvents
     .filter((ev) => ev.type === 'order_executed' && ev.payload?.symbol === chartSymbol)
     .map((ev) => ({
@@ -557,7 +558,7 @@ export function PaperTradingControl() {
                                     )}
                                     {item.key_levels?.support != null && item.key_levels?.resistance != null && (
                                       <span>
-                                        Levels: <span className="font-mono">S {Number(item.key_levels.support).toFixed(2)} / R {Number(item.key_levels.resistance).toFixed(2)}</span>
+                                        Levels: <span className="font-mono">S {formatAssetPrice(Number(item.key_levels.support))} / R {formatAssetPrice(Number(item.key_levels.resistance))}</span>
                                       </span>
                                     )}
                                   </div>
@@ -1530,7 +1531,8 @@ type StructureRowMeta = {
 
 function buildStructureRows(
   snapshot: Record<string, any> | null,
-  meta: StructureRowMeta = {}
+  meta: StructureRowMeta = {},
+  structureSnapshot: Record<string, any> | null = null
 ): StructureRow[] {
   if (!snapshot) return [];
 
@@ -1558,6 +1560,8 @@ function buildStructureRows(
     Number.isFinite(requestedAsOfMs) &&
     Number.isFinite(resolvedAsOfMs) &&
     requestedAsOfMs !== resolvedAsOfMs;
+  const structureAsOf = typeof structureSnapshot?.as_of_ts === 'string' ? structureSnapshot.as_of_ts : null;
+  const hasStructureLevels = Array.isArray(structureSnapshot?.levels) && structureSnapshot.levels.length > 0;
 
   const rows: StructureRow[] = [
     { key: 'tf', label: 'Structure Source TF', value: timeframe ?? 'N/A' },
@@ -1569,6 +1573,12 @@ function buildStructureRows(
       ? [{ key: 'resolved_as_of', label: 'Matched Snapshot As Of', value: formatDateTime(resolvedAsOf) }]
       : []),
     ...(lookupMode ? [{ key: 'lookup_mode', label: 'Lookup Mode', value: lookupMode }] : []),
+    ...(structureAsOf ? [{ key: 'structure_as_of', label: 'Structure Snapshot As Of', value: formatDateTime(structureAsOf) }] : []),
+    {
+      key: 'level_source',
+      label: 'Support/Resistance Source',
+      value: hasStructureLevels ? 'Structure snapshot levels' : 'HTF anchor fallback',
+    },
     { key: 'trend', label: 'Trend State', value: trend.label, valueClassName: trend.className },
     { key: 'close', label: 'Close', value: close != null ? formatCurrency(close) : 'N/A' },
     { key: 'daily_low', label: 'D-1 Low (prev session)', value: htfDailyLow != null ? formatCurrency(htfDailyLow) : 'N/A' },
@@ -1601,24 +1611,52 @@ function buildStructureRows(
       price: number;
       source: string;
     };
-    const levelCandidates: LevelCandidate[] = [
-      { key: 'lvl_daily_low', label: 'D-1 Low', price: htfDailyLow ?? NaN, source: 'htf_daily_low' },
-      { key: 'lvl_prev_daily_low', label: 'D-2 Low', price: prevDailyLow ?? NaN, source: 'htf_prev_daily_low' },
-      { key: 'lvl_5d_low', label: '5D Window Low', price: htf5dLow ?? NaN, source: 'htf_5d_low' },
-      { key: 'lvl_prev_daily_mid', label: 'D-2 Mid', price: prevDailyMid ?? NaN, source: 'htf_prev_daily_mid' },
-      { key: 'lvl_daily_high', label: 'D-1 High', price: htfDailyHigh ?? NaN, source: 'htf_daily_high' },
-      { key: 'lvl_prev_daily_high', label: 'D-2 High', price: prevDailyHigh ?? NaN, source: 'htf_prev_daily_high' },
-      { key: 'lvl_5d_high', label: '5D Window High', price: htf5dHigh ?? NaN, source: 'htf_5d_high' },
-    ].filter((lvl) => Number.isFinite(lvl.price));
+    let supports: LevelCandidate[] = [];
+    let resistances: LevelCandidate[] = [];
 
-    const supports = levelCandidates
-      .filter((lvl) => lvl.price <= close)
-      .sort((a, b) => b.price - a.price)
-      .slice(0, 3);
-    const resistances = levelCandidates
-      .filter((lvl) => lvl.price >= close)
-      .sort((a, b) => a.price - b.price)
-      .slice(0, 3);
+    if (hasStructureLevels) {
+      const structureLevels: LevelCandidate[] = (structureSnapshot?.levels ?? [])
+        .map((lvl: Record<string, any>, idx: number): LevelCandidate => {
+          const price = toNumber(lvl.price);
+          const sourceLabel = typeof lvl.source_label === 'string' ? lvl.source_label : String(lvl.kind ?? 'level');
+          const sourceTf = typeof lvl.source_timeframe === 'string' ? lvl.source_timeframe : '';
+          return {
+            key: `structure_${idx}`,
+            label: sourceTf ? `${sourceLabel} (${sourceTf})` : sourceLabel,
+            price: price ?? NaN,
+            source: String(lvl.role_now ?? 'neutral'),
+          };
+        })
+        .filter((lvl: LevelCandidate) => Number.isFinite(lvl.price));
+
+      supports = structureLevels
+        .filter((lvl) => lvl.source === 'support' || (lvl.source === 'neutral' && lvl.price <= close))
+        .sort((a, b) => b.price - a.price)
+        .slice(0, 3);
+      resistances = structureLevels
+        .filter((lvl) => lvl.source === 'resistance' || (lvl.source === 'neutral' && lvl.price >= close))
+        .sort((a, b) => a.price - b.price)
+        .slice(0, 3);
+    } else {
+      const levelCandidates: LevelCandidate[] = [
+        { key: 'lvl_daily_low', label: 'D-1 Low', price: htfDailyLow ?? NaN, source: 'htf_daily_low' },
+        { key: 'lvl_prev_daily_low', label: 'D-2 Low', price: prevDailyLow ?? NaN, source: 'htf_prev_daily_low' },
+        { key: 'lvl_5d_low', label: '5D Window Low', price: htf5dLow ?? NaN, source: 'htf_5d_low' },
+        { key: 'lvl_prev_daily_mid', label: 'D-2 Mid', price: prevDailyMid ?? NaN, source: 'htf_prev_daily_mid' },
+        { key: 'lvl_daily_high', label: 'D-1 High', price: htfDailyHigh ?? NaN, source: 'htf_daily_high' },
+        { key: 'lvl_prev_daily_high', label: 'D-2 High', price: prevDailyHigh ?? NaN, source: 'htf_prev_daily_high' },
+        { key: 'lvl_5d_high', label: '5D Window High', price: htf5dHigh ?? NaN, source: 'htf_5d_high' },
+      ].filter((lvl) => Number.isFinite(lvl.price));
+
+      supports = levelCandidates
+        .filter((lvl) => lvl.price <= close)
+        .sort((a, b) => b.price - a.price)
+        .slice(0, 3);
+      resistances = levelCandidates
+        .filter((lvl) => lvl.price >= close)
+        .sort((a, b) => a.price - b.price)
+        .slice(0, 3);
+    }
 
     const ladderRows = (items: LevelCandidate[], side: 'support' | 'resistance'): StructureRow[] => {
       return items.map((lvl, idx) => {
@@ -1645,13 +1683,22 @@ function buildStructureRows(
       });
     };
 
-    rows.push(...ladderRows(supports, 'support'));
+    if (supports.length > 0) {
+      rows.push(...ladderRows(supports, 'support'));
+    } else {
+      rows.push({
+        key: 'no_support',
+        label: 'Support (current level set)',
+        value: 'None below current price',
+        valueClassName: 'text-gray-500',
+      });
+    }
     if (resistances.length > 0) {
       rows.push(...ladderRows(resistances, 'resistance'));
     } else {
       rows.push({
         key: 'no_resistance',
-        label: 'Resistance (current anchor set)',
+        label: 'Resistance (current level set)',
         value: 'None above current price',
         valueClassName: 'text-gray-500',
       });

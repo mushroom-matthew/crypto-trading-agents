@@ -8,7 +8,7 @@
  */
 
 import React, { useMemo } from 'react';
-import { cn } from '@/lib/utils';
+import { cn, formatAssetPrice } from '../lib/utils';
 
 // ─── Types (matches schemas/structure_engine.py) ─────────────────────────────
 
@@ -48,9 +48,7 @@ interface Props {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatPrice(p: number): string {
-  if (p >= 10000) return p.toLocaleString('en-US', { maximumFractionDigits: 0 });
-  if (p >= 100) return p.toLocaleString('en-US', { maximumFractionDigits: 2 });
-  return p.toLocaleString('en-US', { maximumFractionDigits: 4 });
+  return formatAssetPrice(p);
 }
 
 function atrBucketBadge(atrDist: number | null | undefined): { label: string; className: string } {

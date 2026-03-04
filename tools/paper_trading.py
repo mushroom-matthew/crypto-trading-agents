@@ -1286,6 +1286,12 @@ class PaperTradingWorkflow:
         self.last_live_indicators_refresh: Optional[datetime] = None
         # Bounded per-symbol snapshot history to support UI "selected candle" lookups.
         self.structure_history: Dict[str, List[Dict[str, Any]]] = {}
+        # Live StructureSnapshot cache keyed by symbol — built per plan cycle from the
+        # fetched IndicatorSnapshot via build_structure_snapshot().  Used by both
+        # PolicySnapshot wiring and structural stop/target selection at order entry.
+        # (structure_history stores IndicatorSnapshot dicts for UI; this stores real
+        # StructureSnapshot objects for computation.)
+        self._live_structure_snapshots: Dict[str, Any] = {}
         # Candle-clock: tracks the last candle floor we ran trigger evaluation on,
         # keyed by timeframe string (e.g. "1h").  Prevents re-evaluating within the
         # same candle and enforces at least one-candle separation between entry and exit.
@@ -1565,32 +1571,50 @@ class PaperTradingWorkflow:
 
         if not as_of:
             indicators = self._filter_indicator_dict(latest_source, sym_filter)
+            structure_snapshots, structure_resolved_map = self._filter_structure_snapshot_dict(
+                self._live_structure_snapshots,
+                sym_filter,
+            )
             payload: Dict[str, Any] = {
                 "indicators": indicators,
                 "lookup_mode": "latest",
+                "structure_snapshots": structure_snapshots,
+                "structure_lookup_mode": "latest",
             }
             if sym_filter:
                 resolved = self._snapshot_as_of_str(indicators.get(sym_filter))
                 if resolved:
                     payload["resolved_as_of"] = resolved
+                payload["structure_resolved_as_of"] = structure_resolved_map.get(sym_filter)
             else:
                 payload["resolved_as_of_by_symbol"] = {
                     k: ts for k, ts in (
                         (k, self._snapshot_as_of_str(v)) for k, v in indicators.items()
                     ) if ts
                 }
+                payload["structure_resolved_as_of_by_symbol"] = structure_resolved_map
             return payload
 
         indicators, resolved_map = self._lookup_structure_at_or_before(as_of, sym_filter)
+        target_ts = self._parse_ts_like(as_of)
+        structure_snapshots, structure_resolved_map = self._filter_structure_snapshot_dict(
+            self._live_structure_snapshots,
+            sym_filter,
+            as_of=target_ts,
+        )
         payload = {
             "indicators": indicators,
             "lookup_mode": "at_or_before",
             "requested_as_of": as_of,
+            "structure_snapshots": structure_snapshots,
+            "structure_lookup_mode": "latest_at_or_before",
         }
         if sym_filter:
             payload["resolved_as_of"] = resolved_map.get(sym_filter)
+            payload["structure_resolved_as_of"] = structure_resolved_map.get(sym_filter)
         else:
             payload["resolved_as_of_by_symbol"] = resolved_map
+            payload["structure_resolved_as_of_by_symbol"] = structure_resolved_map
         return payload
 
     # -------------------------------------------------------------------------
@@ -1899,6 +1923,29 @@ class PaperTradingWorkflow:
                     "Regime detection failed (non-fatal): %s", _det_exc
                 )
 
+        # R68+: build real StructureSnapshot objects for all symbols from fetched
+        # IndicatorSnapshots. These are consumed by policy snapshot construction,
+        # entry-time structural candidate selection, and UI structure inspection.
+        try:
+            from services.structure_engine import build_structure_snapshot as _build_ss
+            for _sym in self.symbols:
+                _snap_for_sym = indicator_snapshots.get(_sym)
+                if not _snap_for_sym:
+                    continue
+                try:
+                    _ind_for_ss = IndicatorSnapshot.model_validate(_snap_for_sym)
+                    _prior_ss = self._live_structure_snapshots.get(_sym)
+                    _computed_ss = _build_ss(_ind_for_ss, prior_snapshot=_prior_ss)
+                    self._live_structure_snapshots[_sym] = _computed_ss
+                except Exception as _ss_sym_exc:
+                    workflow.logger.debug(
+                        "build_structure_snapshot failed for %s (non-fatal): %s",
+                        _sym,
+                        _ss_sym_exc,
+                    )
+        except Exception as _ss_exc:
+            workflow.logger.debug("build_structure_snapshot import/setup failed (non-fatal): %s", _ss_exc)
+
         _now_ts = workflow.now()
         if self._position_opened_since_last_eval:
             policy_triggers.append(PolicyLoopTriggerEvent(
@@ -1947,13 +1994,11 @@ class PaperTradingWorkflow:
             # into the memory store without a DB roundtrip.
             _plan_market_ctx = dict(market_context)
 
-            # R68: thread latest structure snapshot so build_policy_snapshot can
-            # wire structure_engine into the PolicySnapshot (fixes missing section).
+            # R68 fix: use the real StructureSnapshot built above (not structure_history
+            # which holds IndicatorSnapshot dicts that fail StructureSnapshot.model_validate).
             _primary_snap_sym = self.symbols[0] if self.symbols else None
             if _primary_snap_sym:
-                _ss_for_plan = _get_latest_structure_snapshot(
-                    self.structure_history, _primary_snap_sym
-                )
+                _ss_for_plan = self._live_structure_snapshots.get(_primary_snap_sym)
                 if _ss_for_plan:
                     _plan_market_ctx["structure_snapshot"] = _ss_for_plan.model_dump()
 
@@ -2584,7 +2629,7 @@ class PaperTradingWorkflow:
         if order.get("intent") == "entry":
             _sym = order.get("symbol", "")
             _direction = "long" if order.get("side", "buy").lower() == "buy" else "short"
-            _structure_snap = _get_latest_structure_snapshot(self.structure_history, _sym)
+            _structure_snap = self._live_structure_snapshots.get(_sym.upper())
             if _structure_snap:
                 try:
                     from services.structural_target_selector import (
@@ -3040,11 +3085,58 @@ class PaperTradingWorkflow:
             return {symbol: snap} if snap is not None else {}
         return dict(source)
 
+    @classmethod
+    def _filter_structure_snapshot_dict(
+        cls,
+        source: Dict[str, Any],
+        symbol: Optional[str],
+        as_of: Optional[datetime] = None,
+    ) -> tuple[Dict[str, Any], Dict[str, str]]:
+        symbols = [symbol] if symbol else sorted(source.keys())
+        snapshots: Dict[str, Any] = {}
+        resolved: Dict[str, str] = {}
+
+        for sym in symbols:
+            if not sym:
+                continue
+            raw = source.get(sym)
+            if raw is None:
+                continue
+
+            if hasattr(raw, "model_dump"):
+                snap = raw.model_dump(mode="json")
+            elif isinstance(raw, dict):
+                snap = dict(raw)
+            else:
+                continue
+
+            snap_as_of = cls._parse_ts_like(snap.get("as_of_ts"))
+            if as_of is not None and snap_as_of is not None and snap_as_of > as_of:
+                continue
+
+            snapshots[sym] = snap
+            as_of_str = cls._structure_snapshot_as_of_str(snap)
+            if as_of_str:
+                resolved[sym] = as_of_str
+
+        return snapshots, resolved
+
     @staticmethod
     def _snapshot_as_of_str(snapshot: Any) -> Optional[str]:
         if not isinstance(snapshot, dict):
             return None
         as_of = snapshot.get("as_of")
+        if as_of is None:
+            return None
+        if isinstance(as_of, datetime):
+            return as_of.isoformat()
+        return str(as_of)
+
+    @staticmethod
+    def _structure_snapshot_as_of_str(snapshot: Any) -> Optional[str]:
+        if not isinstance(snapshot, dict):
+            return None
+        as_of = snapshot.get("as_of_ts")
         if as_of is None:
             return None
         if isinstance(as_of, datetime):

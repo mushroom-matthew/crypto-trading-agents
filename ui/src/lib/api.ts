@@ -893,6 +893,10 @@ export interface PaperTradingStructureSnapshot {
   requested_as_of?: string | null;
   resolved_as_of?: string | null;
   resolved_as_of_by_symbol?: Record<string, string>;
+  structure_snapshots?: Record<string, Record<string, any>>;
+  structure_lookup_mode?: string;
+  structure_resolved_as_of?: string | null;
+  structure_resolved_as_of_by_symbol?: Record<string, string>;
 }
 
 export interface PaperTradingTrade {

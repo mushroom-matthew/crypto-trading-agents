@@ -1341,7 +1341,16 @@ async def get_structure_snapshot(
                 "indicators": indicators,
             }
             # Optional metadata for selected-candle UI binding.
-            for key in ("lookup_mode", "requested_as_of", "resolved_as_of", "resolved_as_of_by_symbol"):
+            for key in (
+                "lookup_mode",
+                "requested_as_of",
+                "resolved_as_of",
+                "resolved_as_of_by_symbol",
+                "structure_snapshots",
+                "structure_lookup_mode",
+                "structure_resolved_as_of",
+                "structure_resolved_as_of_by_symbol",
+            ):
                 if key in structure_payload:
                     response[key] = structure_payload.get(key)
             return response
