@@ -75,6 +75,75 @@ def _timeframe_to_minutes(tf: str) -> int:
     return _MAP.get(str(tf).lower(), 60)
 
 
+def _normalize_regime_hint(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {"range", "range_bound", "range_mean_revert"}:
+        return "range"
+    if raw in {"volatile", "high_vol", "high-vol", "high_volatility"}:
+        return "high_vol"
+    if raw in {"bull", "bull_trending", "uptrend"}:
+        return "bull"
+    if raw in {"bear", "bear_defensive", "downtrend"}:
+        return "bear"
+    if raw in {"mixed", "uncertain", "neutral"}:
+        return "mixed"
+    return raw or "mixed"
+
+
+def _resolve_effective_direction_bias(
+    explicit_bias: Optional[str],
+    primary_snapshot: Optional[Dict[str, Any]],
+) -> str:
+    """Resolve long/short/neutral bias using explicit setting, then range position."""
+    raw = (explicit_bias or "neutral").strip().lower()
+    if raw in {"long", "short"}:
+        return raw
+
+    snap = primary_snapshot or {}
+    price_vs_mid = snap.get("htf_price_vs_daily_mid")
+    try:
+        position = float(price_vs_mid)
+    except (TypeError, ValueError):
+        position = 0.0
+
+    if position <= -0.20:
+        return "long"
+    if position >= 0.20:
+        return "short"
+    return "neutral"
+
+
+def _candidate_templates_for_context(regime: str, direction_bias: str) -> List[str]:
+    r = _normalize_regime_hint(regime)
+    d = (direction_bias or "neutral").strip().lower()
+
+    if r == "range":
+        if d == "long":
+            return ["range_long", "mean_reversion"]
+        if d == "short":
+            return ["range_short", "mean_reversion"]
+        return ["range_long", "range_short", "mean_reversion"]
+
+    if r == "high_vol":
+        if d == "long":
+            return ["volatile_breakout_long", "compression_breakout_long", "volatile_breakout"]
+        if d == "short":
+            return ["volatile_breakout_short", "compression_breakout_short", "volatile_breakout"]
+        return ["volatile_breakout", "compression_breakout"]
+
+    if r == "bull":
+        return ["compression_breakout_long", "bull_trending", "compression_breakout"]
+
+    if r == "bear":
+        return ["compression_breakout_short", "bear_defensive", "compression_breakout"]
+
+    if d == "long":
+        return ["compression_breakout_long", "mean_reversion"]
+    if d == "short":
+        return ["compression_breakout_short", "mean_reversion"]
+    return ["compression_breakout", "mean_reversion"]
+
+
 def _get_latest_structure_snapshot(
     structure_history: Dict[str, List[Dict[str, Any]]], symbol: str
 ) -> "Any | None":
@@ -294,10 +363,16 @@ async def generate_strategy_plan_activity(
         profit_factor_30d=1.0,
     )
 
+    global_context = {}
+    _raw_global_context = market_context.get("global_context")
+    if isinstance(_raw_global_context, dict):
+        global_context.update(_raw_global_context)
+
     llm_input = LLMInput(
         portfolio=portfolio,
         assets=assets,
         risk_params={},
+        global_context=global_context,
     )
 
     # Step 4: Symbol-local payload shaping — slim non-selected assets to compact
@@ -336,6 +411,42 @@ async def generate_strategy_plan_activity(
             f"\nDIRECTION: {_dir_str}. All entry triggers must align with this direction. "
             f"Do NOT generate entry triggers for the opposite direction.\n"
             f"REQUIRED: Every entry trigger must specify a target_anchor_type or numeric target_price_abs.\n"
+        )
+
+    # Template contract: derive a deterministic shortlist from instrument analysis
+    # and require the strategist to declare template_id from that shortlist.
+    _primary_symbol = symbols[0] if symbols else None
+    _primary_snapshot = market_context.get(_primary_symbol, {}) if _primary_symbol else {}
+    _regime_hint = (
+        (global_context.get("regime") if isinstance(global_context, dict) else None)
+        or market_context.get("regime")
+        or "mixed"
+    )
+    _effective_dir = _resolve_effective_direction_bias(direction_bias, _primary_snapshot)
+    _template_candidates = _candidate_templates_for_context(str(_regime_hint), _effective_dir)
+    if _template_candidates:
+        effective_prompt += (
+            "\nTEMPLATE_SELECTION_CONTRACT:\n"
+            f"- Regime hint: {_normalize_regime_hint(str(_regime_hint))}\n"
+            f"- Direction hint: {_effective_dir}\n"
+            f"- Allowed template_id values for this cycle: {', '.join(_template_candidates)}\n"
+            "- Choose exactly one template_id from the list above.\n"
+            "- Do not use template_id values outside the allowed list.\n"
+            "- In range regime with neutral bias, include both long and short entry opportunities "
+            "conditioned on being near support vs near resistance.\n"
+        )
+
+    # Frequency contract: avoid idle sessions unless stance explicitly says wait.
+    try:
+        _min_trade_floor = max(0, int(os.environ.get("PAPER_TRADING_MIN_TRADES_FLOOR", "1")))
+    except ValueError:
+        _min_trade_floor = 1
+    if _min_trade_floor > 0:
+        effective_prompt += (
+            "\nTRADE_ACTIVITY_CONTRACT:\n"
+            f"- Set min_trades_per_day >= {_min_trade_floor} unless stance is 'wait'.\n"
+            "- If stance is 'wait', explain why and set min_trades_per_day = 0.\n"
+            "- Idle sessions are not acceptable when valid opportunities exist.\n"
         )
 
     # A5 / R63: Inject episode memory context so the LLM can learn from prior outcomes.
@@ -525,6 +636,22 @@ async def generate_strategy_plan_activity(
             logger.warning(
                 "Judge validation gate failed (non-fatal, proceeding): %s", _validation_exc
             )
+
+    # Enforce a minimum activity floor to avoid extended idle sessions.
+    # Keep this soft when the strategist explicitly sets wait stance.
+    try:
+        _min_trade_floor = max(0, int(os.environ.get("PAPER_TRADING_MIN_TRADES_FLOOR", "1")))
+    except ValueError:
+        _min_trade_floor = 1
+    _has_entry_triggers = any(
+        getattr(t, "direction", None) in {"long", "short"} for t in plan.triggers
+    )
+    if plan.stance == "wait" or not _has_entry_triggers:
+        plan.min_trades_per_day = 0
+    elif _min_trade_floor > 0:
+        plan.min_trades_per_day = max(plan.min_trades_per_day or 0, _min_trade_floor)
+        if plan.max_trades_per_day is not None and plan.max_trades_per_day < plan.min_trades_per_day:
+            plan.max_trades_per_day = plan.min_trades_per_day
 
     plan_dict = plan.model_dump()
     # Stash retrieval metadata for the workflow to include in plan_generated event.
@@ -1012,6 +1139,19 @@ async def fetch_current_prices_activity(symbols: List[str]) -> Dict[str, float]:
         await client.close()
 
 
+def _ohlcv_rows_to_df(rows: list) -> "pd.DataFrame":
+    """Convert a list of ccxt OHLCV rows to a DatetimeIndex DataFrame.
+
+    Output columns: open, high, low, close, volume (index = UTC datetime).
+    This is the format expected by both compute_indicator_snapshot() and
+    build_structure_snapshot().
+    """
+    import pandas as pd
+    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["time"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    return df.set_index("time").drop(columns=["timestamp"])
+
+
 @activity.defn
 async def fetch_indicator_snapshots_activity(
     symbols: List[str],
@@ -1023,6 +1163,11 @@ async def fetch_indicator_snapshots_activity(
     Returns {symbol: dict} with all IndicatorSnapshot fields, plus
     'trend_state' and 'vol_state' derived from the indicators.  This gives
     the LLM strategist the same macro/micro picture it gets from the backtester.
+
+    Also returns '_raw_ohlcv_data': {symbol: {'intraday': [...], 'daily': [...]}}
+    so that callers can reconstruct DataFrames for build_structure_snapshot() without
+    a second round-trip to the exchange.  The '_raw_ohlcv_data' key is not a symbol
+    and should be stripped before treating results as an indicator dict.
     """
     _COINBASE_TIMEFRAMES = {"1m", "5m", "15m", "1h", "6h", "1d"}
     if timeframe not in _COINBASE_TIMEFRAMES:
@@ -1032,17 +1177,12 @@ async def fetch_indicator_snapshots_activity(
         )
     import ccxt.async_support as ccxt
     import numpy as np
-    import pandas as pd
 
     client = ccxt.coinbaseexchange()
     client.enableRateLimit = True
     now = datetime.now(timezone.utc)
     results: Dict[str, Any] = {}
-
-    def _ohlcv_to_df(rows: list) -> pd.DataFrame:
-        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["time"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        return df.set_index("time").drop(columns=["timestamp"])
+    raw_ohlcv_store: Dict[str, Any] = {}
 
     try:
         for symbol in symbols:
@@ -1052,11 +1192,11 @@ async def fetch_indicator_snapshots_activity(
                 if not ohlcv:
                     logger.warning(f"No OHLCV data for {symbol} {timeframe}")
                     continue
-                df = _ohlcv_to_df(ohlcv)
+                df = _ohlcv_rows_to_df(ohlcv)
 
                 # Fetch daily bars for HTF structural anchors (Runbook 41)
                 daily_ohlcv = await client.fetch_ohlcv(symbol, "1d", limit=30)
-                daily_df = _ohlcv_to_df(daily_ohlcv) if daily_ohlcv else None
+                daily_df = _ohlcv_rows_to_df(daily_ohlcv) if daily_ohlcv else None
 
                 # Compute full indicator snapshot (RSI, SMA, ATR, Bollinger, candlestick, etc.)
                 config = IndicatorWindowConfig(timeframe=timeframe)
@@ -1076,11 +1216,20 @@ async def fetch_indicator_snapshots_activity(
                 snap_dict = snapshot.model_dump()
                 results[symbol] = snap_dict
 
+                # Stash raw rows so the workflow can reconstruct DataFrames for the
+                # structure engine (build_structure_snapshot needs ohlcv_df/daily_df
+                # for S2 swing levels; DataFrames can't cross the activity boundary).
+                raw_ohlcv_store[symbol] = {
+                    "intraday": ohlcv,
+                    "daily": daily_ohlcv or [],
+                }
+
             except Exception as e:
                 logger.warning(f"Failed to compute indicators for {symbol}: {e}")
     finally:
         await client.close()
 
+    results["_raw_ohlcv_data"] = raw_ohlcv_store
     return results
 
 
@@ -1872,6 +2021,11 @@ class PaperTradingWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
+        # Extract raw OHLCV rows returned alongside indicators (structure engine needs them).
+        # The activity can't return DataFrames (not Temporal-serializable), so it returns
+        # raw ccxt rows; we reconstruct DataFrames here, locally, without another fetch.
+        _raw_ohlcv_data: Dict[str, Any] = indicator_snapshots.pop("_raw_ohlcv_data", None) or {}
+
         # Store snapshots for use in trigger evaluation between plan cycles
         self.last_indicators = indicator_snapshots
         self._append_structure_history(indicator_snapshots, origin="plan")
@@ -1924,8 +2078,8 @@ class PaperTradingWorkflow:
                 )
 
         # R68+: build real StructureSnapshot objects for all symbols from fetched
-        # IndicatorSnapshots. These are consumed by policy snapshot construction,
-        # entry-time structural candidate selection, and UI structure inspection.
+        # IndicatorSnapshots. Pass intraday (ohlcv_df) and daily (daily_df) DataFrames
+        # so the structure engine can populate S2 swing levels in addition to S1 HTF anchors.
         try:
             from services.structure_engine import build_structure_snapshot as _build_ss
             for _sym in self.symbols:
@@ -1935,7 +2089,17 @@ class PaperTradingWorkflow:
                 try:
                     _ind_for_ss = IndicatorSnapshot.model_validate(_snap_for_sym)
                     _prior_ss = self._live_structure_snapshots.get(_sym)
-                    _computed_ss = _build_ss(_ind_for_ss, prior_snapshot=_prior_ss)
+                    # Reconstruct DataFrames from raw rows returned by the activity.
+                    _sym_raw = _raw_ohlcv_data.get(_sym, {})
+                    _ohlcv_df = _ohlcv_rows_to_df(_sym_raw["intraday"]) if _sym_raw.get("intraday") else None
+                    _daily_df = _ohlcv_rows_to_df(_sym_raw["daily"]) if _sym_raw.get("daily") else None
+                    _computed_ss = _build_ss(
+                        _ind_for_ss,
+                        ohlcv_df=_ohlcv_df,
+                        daily_df=_daily_df,
+                        ohlcv_timeframe=self.indicator_timeframe or "1h",
+                        prior_snapshot=_prior_ss,
+                    )
                     self._live_structure_snapshots[_sym] = _computed_ss
                 except Exception as _ss_sym_exc:
                     workflow.logger.debug(
@@ -2077,7 +2241,7 @@ class PaperTradingWorkflow:
                         self.symbols,
                         portfolio_state,
                         self.strategy_prompt,
-                        market_context,
+                        _plan_market_ctx,
                         None,  # llm_model
                         self.session_id,
                         _validation.repair_prompt(),  # repair_instructions
@@ -3167,6 +3331,9 @@ class PaperTradingWorkflow:
 
         per_symbol_limit = 720
         for sym_raw, snap_raw in snapshots.items():
+            # Skip internal metadata keys (e.g. _raw_ohlcv_data returned by the activity)
+            if str(sym_raw).startswith("_"):
+                continue
             sym = str(sym_raw).upper()
             if not isinstance(snap_raw, dict):
                 continue
