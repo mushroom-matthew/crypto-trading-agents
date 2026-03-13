@@ -84,7 +84,7 @@ IMPORTANT - Exit Binding Constraint:
 - WRONG: BTC-USD entries split across "trend_continuation" and "reversal" — exits won't cross-close.
 - If you need multiple entry strategies for one symbol, use a single category or add explicit risk_reduce/risk_off exits that cover all positions.
 
-Do NOT use these keys in triggers: type, risk_grade.
+Do NOT use these keys in triggers: type, risk_grade, note, confidence_detail.
 
 Risk constraints MUST include:
 - max_position_risk_pct  — fraction of equity to RISK per trade (loss at stop). E.g., 2.0 = willing

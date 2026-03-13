@@ -36,6 +36,19 @@ def _is_not_found(err: Exception) -> bool:
     return "not found" in msg or "no rows in result set" in msg
 
 
+async def _verify_session_exists(client: Any, session_id: str) -> None:
+    """Lightweight existence check that avoids workflow query-buffer pressure."""
+    from temporalio.service import RPCError
+
+    handle = client.get_workflow_handle(session_id)
+    try:
+        await handle.describe()
+    except RPCError as err:
+        if _is_not_found(err):
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        raise
+
+
 async def _cleanup_session_ledger(
     client: Any,
     session_id: str,
@@ -680,14 +693,8 @@ async def get_portfolio(session_id: str):
     try:
         client = await get_temporal_client()
 
-        # First verify the session exists
-        session_handle = client.get_workflow_handle(session_id)
-        try:
-            await session_handle.query("get_session_status")
-        except RPCError as e:
-            if _is_not_found(e):
-                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-            raise
+        # Verify session exists without consuming workflow query slots.
+        await _verify_session_exists(client, session_id)
 
         # Query the session-scoped ledger workflow, fallback to legacy shared ledger for older sessions.
         ledger_workflow_id = _paper_ledger_workflow_id(session_id)
@@ -913,14 +920,8 @@ async def get_trades(session_id: str, limit: int = 100):
     try:
         client = await get_temporal_client()
 
-        # Verify session exists
-        session_handle = client.get_workflow_handle(session_id)
-        try:
-            await session_handle.query("get_session_status")
-        except RPCError as e:
-            if _is_not_found(e):
-                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-            raise
+        # Verify session exists without consuming workflow query slots.
+        await _verify_session_exists(client, session_id)
 
         # Query session-scoped ledger, fallback to legacy shared ledger for older sessions.
         ledger_workflow_id = _paper_ledger_workflow_id(session_id)
@@ -977,13 +978,7 @@ async def get_trade_sets(session_id: str, limit: int = 50):
     try:
         client = await get_temporal_client()
 
-        session_handle = client.get_workflow_handle(session_id)
-        try:
-            await session_handle.query("get_session_status")
-        except RPCError as e:
-            if _is_not_found(e):
-                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-            raise
+        await _verify_session_exists(client, session_id)
 
         ledger_workflow_id = _paper_ledger_workflow_id(session_id)
         ledger_handle = client.get_workflow_handle(ledger_workflow_id)
@@ -1135,14 +1130,8 @@ async def get_session_metrics(session_id: str):
     try:
         client = await get_temporal_client()
 
-        # Verify session exists
-        session_handle = client.get_workflow_handle(session_id)
-        try:
-            await session_handle.query("get_session_status")
-        except RPCError as e:
-            if _is_not_found(e):
-                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-            raise
+        # Verify session exists without consuming workflow query slots.
+        await _verify_session_exists(client, session_id)
 
         # Fetch all transactions (same as trade_sets endpoint)
         ledger_workflow_id = _paper_ledger_workflow_id(session_id)

@@ -108,8 +108,10 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-session', selectedSessionId],
     queryFn: () => paperTradingAPI.getSession(selectedSessionId!),
     enabled: !!selectedSessionId,
+    retry: false,
+    refetchOnWindowFocus: false,
     refetchInterval: (query) => {
-      return query.state.data?.status === 'running' ? 5000 : false;
+      return query.state.data?.status === 'running' ? 10000 : false;
     },
   });
 
@@ -118,7 +120,9 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-portfolio', selectedSessionId],
     queryFn: () => paperTradingAPI.getPortfolio(selectedSessionId!),
     enabled: !!selectedSessionId && session?.status === 'running',
-    refetchInterval: 10000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: 15000,
   });
 
   // Fetch current plan (refresh every 30s while running to catch replans)
@@ -126,7 +130,9 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-plan', selectedSessionId],
     queryFn: () => paperTradingAPI.getPlan(selectedSessionId!),
     enabled: !!selectedSessionId && session?.has_plan,
-    refetchInterval: session?.status === 'running' ? 30000 : false,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: session?.status === 'running' ? 60000 : false,
   });
 
   // Fetch live activity feed
@@ -134,7 +140,9 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-activity', selectedSessionId],
     queryFn: () => paperTradingAPI.getActivity(selectedSessionId!, 40),
     enabled: !!selectedSessionId,
-    refetchInterval: session?.status === 'running' ? 4000 : 15000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: session?.status === 'running' ? 8000 : 20000,
   });
   const activityEvents = activityData?.events ?? [];
 
@@ -147,7 +155,9 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-trades', selectedSessionId],
     queryFn: () => paperTradingAPI.getTrades(selectedSessionId!, 50),
     enabled: !!selectedSessionId,
-    refetchInterval: 15000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: 30000,
   });
 
   // Fetch trade sets (paired round-trip trades)
@@ -155,7 +165,9 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-trade-sets', selectedSessionId],
     queryFn: () => paperTradingAPI.getTradeSets(selectedSessionId!, 50),
     enabled: !!selectedSessionId,
-    refetchInterval: 15000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: 30000,
   });
   const tradeSets = tradeSetsData?.trade_sets ?? [];
 
@@ -164,7 +176,9 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-metrics', selectedSessionId],
     queryFn: () => paperTradingAPI.getMetrics(selectedSessionId!),
     enabled: !!selectedSessionId,
-    refetchInterval: session?.status === 'running' ? 30000 : false,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: session?.status === 'running' ? 60000 : false,
   });
 
   // R68: auto-fill indicator_timeframe from screener preflight (unless user has overridden it)
@@ -183,13 +197,12 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-candles', selectedSessionId, chartSymbol, chartTimeframe],
     queryFn: () => paperTradingAPI.getCandles(selectedSessionId!, chartSymbol, chartTimeframe, 120),
     enabled: !!selectedSessionId,
-    refetchInterval: session?.status === 'running' ? 30000 : false,
+    retry: false,
+    refetchOnWindowFocus: false,
+    placeholderData: (previous) => previous,
+    refetchInterval: session?.status === 'running' ? 45000 : false,
     staleTime: 25000,
   });
-
-  useEffect(() => {
-    setSelectedChartCandleTime(null);
-  }, [selectedSessionId, chartSymbol, chartTimeframe]);
 
   useEffect(() => {
     const candles = candlesData?.candles ?? [];
@@ -205,7 +218,10 @@ export function PaperTradingControl() {
     });
   }, [candlesData]);
 
-  const selectedStructureAsOf = selectedChartCandleTime != null
+  const chartCandles = candlesData?.candles ?? [];
+  const selectedCandleBoundToSeries = selectedChartCandleTime != null
+    && chartCandles.some((c) => c.time === selectedChartCandleTime);
+  const selectedStructureAsOf = selectedCandleBoundToSeries
     ? new Date(selectedChartCandleTime).toISOString()
     : undefined;
 
@@ -213,7 +229,10 @@ export function PaperTradingControl() {
     queryKey: ['paper-trading-structure', selectedSessionId, chartSymbol, selectedStructureAsOf],
     queryFn: () => paperTradingAPI.getStructure(selectedSessionId!, chartSymbol, selectedStructureAsOf),
     enabled: !!selectedSessionId,
-    refetchInterval: session?.status === 'running' ? 30000 : false,
+    retry: false,
+    refetchOnWindowFocus: false,
+    placeholderData: (previous) => previous,
+    refetchInterval: session?.status === 'running' ? 45000 : false,
     staleTime: 25000,
   });
 
@@ -323,6 +342,12 @@ export function PaperTradingControl() {
   const selectedEntryPrice = portfolio?.entry_prices?.[chartSymbol] ?? null;
   const selectedStructure = structureData?.indicators?.[chartSymbol] ?? null;
   const selectedStructureSnapshot = structureData?.structure_snapshots?.[chartSymbol] ?? null;
+  const indicatorAsOfTs = typeof selectedStructure?.as_of === 'string' ? selectedStructure.as_of : null;
+  const structureAsOfTs = typeof selectedStructureSnapshot?.as_of_ts === 'string' ? selectedStructureSnapshot.as_of_ts : null;
+  const indicatorStaleness = buildStalenessBadge('Indicator', indicatorAsOfTs);
+  const structureStaleness = buildStalenessBadge('Structure', structureAsOfTs);
+  const structureLookupMode = structureData?.lookup_mode ?? null;
+  const structureFallbackApplied = structureData?.fallback_to_latest === true;
   const selectedStructureRows = buildStructureRows(selectedStructure, {
     requestedAsOf: structureData?.requested_as_of ?? selectedStructureAsOf ?? null,
     resolvedAsOf: structureData?.resolved_as_of ?? null,
@@ -1224,7 +1249,7 @@ export function PaperTradingControl() {
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             <div className="xl:col-span-2">
               <CandlestickChart
-                candles={candlesData?.candles ?? []}
+                candles={chartCandles}
                 trades={trades.filter((t) => t.symbol === chartSymbol)}
                 executions={chartExecutions}
                 timeframe={chartTimeframe}
@@ -1302,6 +1327,36 @@ export function PaperTradingControl() {
                     Bound to selected candle: {formatDateTime(new Date(selectedChartCandleTime).toISOString())}
                   </p>
                 )}
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  <span
+                    className={cn(
+                      'text-[11px] px-1.5 py-0.5 rounded border',
+                      indicatorStaleness.className
+                    )}
+                    title={indicatorAsOfTs ?? 'No indicator snapshot timestamp'}
+                  >
+                    {indicatorStaleness.label}
+                  </span>
+                  <span
+                    className={cn(
+                      'text-[11px] px-1.5 py-0.5 rounded border',
+                      structureStaleness.className
+                    )}
+                    title={structureAsOfTs ?? 'No structure snapshot timestamp'}
+                  >
+                    {structureStaleness.label}
+                  </span>
+                  {structureLookupMode && (
+                    <span className="text-[11px] px-1.5 py-0.5 rounded border border-gray-200 dark:border-gray-700 text-gray-500">
+                      Lookup: {structureLookupMode}
+                    </span>
+                  )}
+                  {structureFallbackApplied && (
+                    <span className="text-[11px] px-1.5 py-0.5 rounded border border-amber-300 text-amber-700 dark:border-amber-700 dark:text-amber-400">
+                      Fallback to latest
+                    </span>
+                  )}
+                </div>
                 {selectedStructureRows.length === 0 ? (
                   <p className="text-xs text-gray-500">
                     No structure snapshot yet. It appears after the first plan cycle.
@@ -1723,6 +1778,39 @@ function formatNumber(value: number, digits = 2): string {
 
 function formatSigned(value: number, digits = 2): string {
   return `${value >= 0 ? '+' : ''}${formatNumber(value, digits)}`;
+}
+
+function buildStalenessBadge(kind: 'Indicator' | 'Structure', asOfTs: string | null): { label: string; className: string } {
+  if (!asOfTs) {
+    return {
+      label: `${kind}: N/A`,
+      className: 'border-gray-200 dark:border-gray-700 text-gray-500',
+    };
+  }
+  const asOfMs = Date.parse(asOfTs);
+  if (!Number.isFinite(asOfMs)) {
+    return {
+      label: `${kind}: invalid timestamp`,
+      className: 'border-red-200 dark:border-red-700 text-red-600 dark:text-red-400',
+    };
+  }
+  const ageMinutes = Math.max(0, (Date.now() - asOfMs) / 60000);
+  if (ageMinutes <= 5) {
+    return {
+      label: `${kind}: ${ageMinutes.toFixed(1)}m old`,
+      className: 'border-green-200 dark:border-green-700 text-green-700 dark:text-green-400',
+    };
+  }
+  if (ageMinutes <= 30) {
+    return {
+      label: `${kind}: ${ageMinutes.toFixed(1)}m old`,
+      className: 'border-amber-200 dark:border-amber-700 text-amber-700 dark:text-amber-400',
+    };
+  }
+  return {
+    label: `${kind}: ${ageMinutes.toFixed(1)}m old`,
+    className: 'border-red-200 dark:border-red-700 text-red-700 dark:text-red-400',
+  };
 }
 
 function deriveTrendLabel(snapshot: Record<string, any>): { label: string; className: string } {

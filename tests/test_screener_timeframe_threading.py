@@ -80,14 +80,23 @@ def test_session_state_roundtrips_indicator_timeframe():
 # ---------------------------------------------------------------------------
 
 def _make_plan_stub():
-    """Return a StrategyPlan-like stub (just needs model_dump() → dict)."""
-    stub = MagicMock()
-    stub.model_dump.return_value = {
-        "plan_id": "test-plan-id",
-        "triggers": [],
-        "max_trades_per_day": 2,
-    }
-    return stub
+    """Return a StrategyPlan-like stub used by patched LLMClient."""
+    class _PlanStub:
+        stance = "active"
+        min_trades_per_day = None
+        max_trades_per_day = 2
+        triggers = []
+
+        def model_dump(self):
+            return {
+                "plan_id": "test-plan-id",
+                "triggers": [],
+                "max_trades_per_day": self.max_trades_per_day,
+                "min_trades_per_day": self.min_trades_per_day,
+                "stance": self.stance,
+            }
+
+    return _PlanStub()
 
 
 @pytest.mark.asyncio
@@ -193,3 +202,49 @@ async def test_generate_plan_activity_defaults_to_1h_when_no_timeframe():
     assert len(captured_assets) == 1
     asset = captured_assets[0]
     assert asset.indicators[0].timeframe == "1h"
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_activity_injects_template_contract_and_context():
+    """Range regime context should inject template contract and pass global_context through."""
+    captured_prompts = []
+    captured_contexts = []
+
+    def fake_generate_plan(llm_input, prompt_template=None, run_id=None, plan_id=None):
+        captured_prompts.append(prompt_template or "")
+        captured_contexts.append(dict(llm_input.global_context or {}))
+        return _make_plan_stub()
+
+    fake_client = MagicMock()
+    fake_client.generate_plan.side_effect = fake_generate_plan
+    fake_client.last_generation_info = {}
+
+    with patch("tools.paper_trading.LLMClient", return_value=fake_client):
+        with patch("tools.paper_trading.PLAN_CACHE_DIR") as mock_cache_dir:
+            mock_cache_dir.mkdir = MagicMock()
+            mock_cache_file = MagicMock()
+            mock_cache_file.exists.return_value = False
+            mock_cache_file.write_text = MagicMock()
+            mock_cache_dir.__truediv__ = MagicMock(return_value=mock_cache_file)
+
+            await generate_strategy_plan_activity(
+                symbols=["BTC-USD"],
+                portfolio_state={"cash": 10000, "positions": {}, "total_equity": 10000},
+                strategy_prompt="",
+                market_context={
+                    "BTC-USD": {"price": 50000.0},
+                    "global_context": {"regime": "range", "htf_direction": "up"},
+                },
+                indicator_timeframe="5m",
+                direction_bias="neutral",
+            )
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "TEMPLATE_SELECTION_CONTRACT" in prompt
+    assert "range_long" in prompt
+    assert "range_short" in prompt
+    assert "mean_reversion" in prompt
+    assert "TRADE_ACTIVITY_CONTRACT" in prompt
+    assert captured_contexts[0].get("regime") == "range"
+    assert captured_contexts[0].get("htf_direction") == "up"

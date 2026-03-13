@@ -432,6 +432,20 @@ class StrategyPlanProvider:
         if any(trigger.category is None for trigger in plan.triggers):
             if "other" not in plan.allowed_trigger_categories:
                 plan.allowed_trigger_categories.append("other")
+
+        # Activity floor: avoid idle sessions when the plan actually has entry triggers.
+        # Can be disabled via STRATEGIST_PLAN_MIN_TRADES_FLOOR=0.
+        try:
+            min_trade_floor = max(0, int(os.environ.get("STRATEGIST_PLAN_MIN_TRADES_FLOOR", "1")))
+        except ValueError:
+            min_trade_floor = 1
+        has_entry_triggers = any(t.direction in {"long", "short"} for t in plan.triggers)
+        if plan.stance == "wait" or not has_entry_triggers:
+            plan.min_trades_per_day = 0
+        elif min_trade_floor > 0:
+            plan.min_trades_per_day = max(plan.min_trades_per_day or 0, min_trade_floor)
+            if plan.max_trades_per_day is not None and plan.max_trades_per_day < plan.min_trades_per_day:
+                plan.max_trades_per_day = plan.min_trades_per_day
         return plan
 
     def _llm_call_metadata(

@@ -403,6 +403,7 @@ class TriggerEngine:
             context["target_hit"] = False
 
         # Backward-compat aliases (same value as stop_hit / target_hit)
+        context["above_stop"] = context["stop_hit"]
         context["below_stop"] = context["stop_hit"]
         context["above_target"] = context["target_hit"]
         context["stop_price"] = active_stop or 0.0

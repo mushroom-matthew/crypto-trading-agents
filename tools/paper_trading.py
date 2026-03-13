@@ -1751,13 +1751,48 @@ class PaperTradingWorkflow:
             sym_filter,
             as_of=target_ts,
         )
+        fallback_symbols: List[str] = []
+        target_symbols = (
+            [sym_filter] if sym_filter else sorted(set(latest_source.keys()) | set(self._live_structure_snapshots.keys()))
+        )
+        for sym in target_symbols:
+            if not sym:
+                continue
+            fallback_used = False
+            if sym not in indicators:
+                latest_indicator = latest_source.get(sym)
+                if isinstance(latest_indicator, dict):
+                    indicators[sym] = dict(latest_indicator)
+                    resolved_ts = self._snapshot_as_of_str(latest_indicator)
+                    if resolved_ts:
+                        resolved_map[sym] = resolved_ts
+                    fallback_used = True
+            if sym not in structure_snapshots:
+                latest_ss_map, latest_ss_resolved = self._filter_structure_snapshot_dict(
+                    self._live_structure_snapshots,
+                    sym,
+                    as_of=None,
+                )
+                if latest_ss_map:
+                    structure_snapshots.update(latest_ss_map)
+                    structure_resolved_map.update(latest_ss_resolved)
+                    fallback_used = True
+            if fallback_used:
+                fallback_symbols.append(sym)
         payload = {
             "indicators": indicators,
-            "lookup_mode": "at_or_before",
+            "lookup_mode": "at_or_before_fallback_latest" if fallback_symbols else "at_or_before",
             "requested_as_of": as_of,
             "structure_snapshots": structure_snapshots,
-            "structure_lookup_mode": "latest_at_or_before",
+            "structure_lookup_mode": (
+                "latest_at_or_before_fallback_latest"
+                if fallback_symbols
+                else "latest_at_or_before"
+            ),
         }
+        if fallback_symbols:
+            payload["fallback_to_latest"] = True
+            payload["fallback_symbols"] = fallback_symbols
         if sym_filter:
             payload["resolved_as_of"] = resolved_map.get(sym_filter)
             payload["structure_resolved_as_of"] = structure_resolved_map.get(sym_filter)
@@ -2077,38 +2112,10 @@ class PaperTradingWorkflow:
                     "Regime detection failed (non-fatal): %s", _det_exc
                 )
 
-        # R68+: build real StructureSnapshot objects for all symbols from fetched
-        # IndicatorSnapshots. Pass intraday (ohlcv_df) and daily (daily_df) DataFrames
-        # so the structure engine can populate S2 swing levels in addition to S1 HTF anchors.
-        try:
-            from services.structure_engine import build_structure_snapshot as _build_ss
-            for _sym in self.symbols:
-                _snap_for_sym = indicator_snapshots.get(_sym)
-                if not _snap_for_sym:
-                    continue
-                try:
-                    _ind_for_ss = IndicatorSnapshot.model_validate(_snap_for_sym)
-                    _prior_ss = self._live_structure_snapshots.get(_sym)
-                    # Reconstruct DataFrames from raw rows returned by the activity.
-                    _sym_raw = _raw_ohlcv_data.get(_sym, {})
-                    _ohlcv_df = _ohlcv_rows_to_df(_sym_raw["intraday"]) if _sym_raw.get("intraday") else None
-                    _daily_df = _ohlcv_rows_to_df(_sym_raw["daily"]) if _sym_raw.get("daily") else None
-                    _computed_ss = _build_ss(
-                        _ind_for_ss,
-                        ohlcv_df=_ohlcv_df,
-                        daily_df=_daily_df,
-                        ohlcv_timeframe=self.indicator_timeframe or "1h",
-                        prior_snapshot=_prior_ss,
-                    )
-                    self._live_structure_snapshots[_sym] = _computed_ss
-                except Exception as _ss_sym_exc:
-                    workflow.logger.debug(
-                        "build_structure_snapshot failed for %s (non-fatal): %s",
-                        _sym,
-                        _ss_sym_exc,
-                    )
-        except Exception as _ss_exc:
-            workflow.logger.debug("build_structure_snapshot import/setup failed (non-fatal): %s", _ss_exc)
+        self._rebuild_live_structure_snapshots(
+            indicator_snapshots,
+            raw_ohlcv_data=_raw_ohlcv_data,
+        )
 
         _now_ts = workflow.now()
         if self._position_opened_since_last_eval:
@@ -2349,9 +2356,54 @@ class PaperTradingWorkflow:
             )
             if isinstance(live_snapshots, dict) and live_snapshots:
                 self.last_indicators_live = live_snapshots
+                raw_live_ohlcv = live_snapshots.get("_raw_ohlcv_data", {})
+                # Keep structure levels fresh between plan regeneration cycles.
+                self._rebuild_live_structure_snapshots(
+                    live_snapshots,
+                    raw_ohlcv_data=raw_live_ohlcv if isinstance(raw_live_ohlcv, dict) else {},
+                )
                 self._append_structure_history(live_snapshots, origin="live")
         except Exception as exc:
             workflow.logger.warning(f"Failed to refresh live indicators: {exc}")
+
+    def _rebuild_live_structure_snapshots(
+        self,
+        indicator_snapshots: Dict[str, Any],
+        *,
+        raw_ohlcv_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Rebuild structure snapshots from current indicators and optional OHLCV rows."""
+        try:
+            from services.structure_engine import build_structure_snapshot as _build_ss
+        except Exception as _ss_exc:
+            workflow.logger.debug("build_structure_snapshot import/setup failed (non-fatal): %s", _ss_exc)
+            return
+
+        raw_store = raw_ohlcv_data or {}
+        for _sym in self.symbols:
+            _snap_for_sym = indicator_snapshots.get(_sym)
+            if not _snap_for_sym:
+                continue
+            try:
+                _ind_for_ss = IndicatorSnapshot.model_validate(_snap_for_sym)
+                _prior_ss = self._live_structure_snapshots.get(_sym)
+                _sym_raw = raw_store.get(_sym, {})
+                _ohlcv_df = _ohlcv_rows_to_df(_sym_raw["intraday"]) if _sym_raw.get("intraday") else None
+                _daily_df = _ohlcv_rows_to_df(_sym_raw["daily"]) if _sym_raw.get("daily") else None
+                _computed_ss = _build_ss(
+                    _ind_for_ss,
+                    ohlcv_df=_ohlcv_df,
+                    daily_df=_daily_df,
+                    ohlcv_timeframe=self.indicator_timeframe or "1h",
+                    prior_snapshot=_prior_ss,
+                )
+                self._live_structure_snapshots[_sym] = _computed_ss
+            except Exception as _ss_sym_exc:
+                workflow.logger.debug(
+                    "build_structure_snapshot failed for %s (non-fatal): %s",
+                    _sym,
+                    _ss_sym_exc,
+                )
 
     @staticmethod
     def _candle_floor(dt: datetime, tf_minutes: int) -> str:

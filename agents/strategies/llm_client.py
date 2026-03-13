@@ -21,7 +21,13 @@ from agents.llm.client_factory import get_llm_client
 from agents.llm.model_utils import output_token_args, reasoning_args, temperature_args
 from ops_api.event_store import EventStore
 from ops_api.schemas import Event
-from schemas.llm_strategist import LLMInput, PositionSizingRule, RiskConstraint, StrategyPlan
+from schemas.llm_strategist import (
+    LLMInput,
+    PositionSizingRule,
+    RiskConstraint,
+    StrategyPlan,
+    TriggerCondition,
+)
 
 from .prompt_builder import build_prompt_context
 from .trigger_vector_store import get_trigger_vector_store
@@ -533,10 +539,44 @@ class LLMClient:
         )
 
     def _sanitize_plan_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        allowed_plan_keys = set(StrategyPlan.model_fields.keys())
+        allowed_trigger_keys = set(TriggerCondition.model_fields.keys())
+
+        # Drop unknown top-level keys to prevent strict-schema failures.
+        unknown_top = [k for k in data.keys() if k not in allowed_plan_keys]
+        if unknown_top:
+            logging.warning("Dropping unknown StrategyPlan keys: %s", sorted(unknown_top))
+        data = {k: v for k, v in data.items() if k in allowed_plan_keys}
+
+        data["regime"] = self._normalize_plan_regime(data.get("regime"))
+
         triggers = data.get("triggers", [])
+        if not isinstance(triggers, list):
+            logging.warning("Dropping invalid triggers payload (expected list, got %s)", type(triggers).__name__)
+            triggers = []
         cleaned: List[Dict[str, Any]] = []
         allowed = {"long", "short", "flat", "exit", "flat_exit"}
         for trig in triggers:
+            if not isinstance(trig, dict):
+                continue
+            trig = dict(trig)
+
+            # Promote common commentary-only keys into canonical rationale, then drop extras.
+            if not trig.get("rationale"):
+                if isinstance(trig.get("note"), str) and trig.get("note").strip():
+                    trig["rationale"] = trig["note"].strip()
+                elif isinstance(trig.get("confidence_detail"), str) and trig.get("confidence_detail").strip():
+                    trig["rationale"] = trig["confidence_detail"].strip()
+
+            unknown_trigger_keys = [k for k in trig.keys() if k not in allowed_trigger_keys]
+            if unknown_trigger_keys:
+                logging.warning(
+                    "Dropping unknown trigger keys for id=%s: %s",
+                    trig.get("id"),
+                    sorted(unknown_trigger_keys),
+                )
+            trig = {k: v for k, v in trig.items() if k in allowed_trigger_keys}
+
             direction = trig.get("direction")
             if direction not in allowed:
                 continue
@@ -561,6 +601,38 @@ class LLMClient:
             data,
         )
         return data
+
+    @staticmethod
+    def _normalize_plan_regime(value: Any) -> str:
+        allowed = {"bull", "bear", "range", "high_vol", "mixed"}
+        if isinstance(value, str):
+            norm = value.strip().lower().replace("-", "_").replace(" ", "_")
+            if norm in allowed:
+                return norm
+            aliases = {
+                "volatile": "high_vol",
+                "highvol": "high_vol",
+                "high_volatility": "high_vol",
+                "volatility": "high_vol",
+                "uncertain": "mixed",
+                "neutral": "mixed",
+                "sideways": "range",
+                "mean_reversion": "range",
+                "compression_breakout": "high_vol",
+            }
+            if norm in aliases:
+                return aliases[norm]
+            if "bull" in norm:
+                return "bull"
+            if "bear" in norm:
+                return "bear"
+            if "range" in norm or "sideways" in norm or "mean_reversion" in norm:
+                return "range"
+            if "vol" in norm or "breakout" in norm or "compression" in norm:
+                return "high_vol"
+            logging.warning("Unknown plan regime '%s'; coercing to 'mixed'", value)
+            return "mixed"
+        return "mixed"
 
     @staticmethod
     def _normalize_regime_alerts(value: Any) -> List[Dict[str, Any]]:

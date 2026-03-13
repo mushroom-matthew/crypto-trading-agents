@@ -115,3 +115,21 @@ def test_plan_provider_legacy_caps_apply_derivation(tmp_path, monkeypatch):
     assert enriched.max_trades_per_day == 10
     assert enriched.max_triggers_per_symbol_per_day == 10
     assert getattr(enriched, "_derived_trade_cap") == 10
+
+
+def test_plan_provider_applies_min_trade_floor_for_active_stance(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGIST_PLAN_MIN_TRADES_FLOOR", "2")
+    plan = _plan_without_limits().model_copy(update={"stance": "active", "min_trades_per_day": None})
+    provider = StrategyPlanProvider(DummyLLMClient(plan), cache_dir=tmp_path, llm_calls_per_day=1)
+    enriched = provider.get_plan("run-floor", datetime(2024, 1, 1, tzinfo=timezone.utc), _llm_input())
+    assert enriched.min_trades_per_day == 2
+    assert enriched.max_trades_per_day is not None
+    assert enriched.max_trades_per_day >= enriched.min_trades_per_day
+
+
+def test_plan_provider_wait_stance_sets_min_trades_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGIST_PLAN_MIN_TRADES_FLOOR", "3")
+    plan = _plan_without_limits().model_copy(update={"stance": "wait", "min_trades_per_day": 5})
+    provider = StrategyPlanProvider(DummyLLMClient(plan), cache_dir=tmp_path, llm_calls_per_day=1)
+    enriched = provider.get_plan("run-wait", datetime(2024, 1, 1, tzinfo=timezone.utc), _llm_input())
+    assert enriched.min_trades_per_day == 0

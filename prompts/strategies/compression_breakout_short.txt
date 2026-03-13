@@ -34,7 +34,7 @@ TARGET (MANDATORY — must specify for every entry trigger):
 - Scale out at 1:1 R downside; trail remainder until expansion_flag drops to 0
 
 FALSE BREAKOUT GUARD:
-- Exit rule: "not is_flat and above_stop" where stop is anchored at entry bar's donchian_upper_short.
+- Exit rule: "not is_flat and stop_hit" where stop is anchored at entry bar's donchian_upper_short.
 - Do NOT use rolling donchian_lower_short in the false-breakout exit rule.
 
 TRIGGER REQUIREMENTS:
@@ -58,5 +58,5 @@ VALID entry_rule EXAMPLES (SHORT only):
 COMMON MISTAKES TO AVOID:
 - Do NOT generate long entry triggers in a short template.
 - Do NOT enter without target_anchor_type or target_price_abs — missing target is a compiler error.
-- Do NOT use rolling donchian_lower_short in the false-breakout stop — use anchored above_stop.
+- Do NOT use rolling donchian_lower_short in the false-breakout stop — use anchored stop_hit.
 - Do NOT place emergency_exit inside the compression range.

@@ -890,6 +890,8 @@ export interface PaperTradingStructureSnapshot {
   count: number;
   indicators: Record<string, Record<string, any>>;
   lookup_mode?: string;
+  fallback_to_latest?: boolean;
+  fallback_symbols?: string[];
   requested_as_of?: string | null;
   resolved_as_of?: string | null;
   resolved_as_of_by_symbol?: Record<string, string>;

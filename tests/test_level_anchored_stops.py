@@ -715,6 +715,7 @@ def _make_engine_context_v2(
         context["target_hit"] = False
 
     context["below_stop"] = context["stop_hit"]
+    context["above_stop"] = context["stop_hit"]
     context["above_target"] = context["target_hit"]
     context["stop_price"] = stop_price_abs or 0.0
     context["target_price"] = target_price_abs or 0.0
@@ -761,6 +762,12 @@ def test_below_stop_is_alias_for_stop_hit():
     """below_stop is an alias for stop_hit (same value)."""
     ctx = _make_engine_context_v2(close=48000.0, stop_price_abs=48500.0, target_price_abs=None, pos_direction="long")
     assert ctx["below_stop"] == ctx["stop_hit"]
+
+
+def test_above_stop_is_alias_for_stop_hit():
+    """above_stop is a backward-compat alias for stop_hit (same value)."""
+    ctx = _make_engine_context_v2(close=52000.0, stop_price_abs=51500.0, target_price_abs=None, pos_direction="short")
+    assert ctx["above_stop"] == ctx["stop_hit"]
 
 
 def test_above_target_is_alias_for_target_hit():
