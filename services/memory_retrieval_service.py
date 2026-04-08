@@ -35,7 +35,7 @@ import math
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from schemas.episode_memory import (
@@ -104,16 +104,19 @@ def _days_since(ts: Optional[datetime]) -> float:
 def _score(
     record: EpisodeMemoryRecord,
     request: MemoryRetrievalRequest,
+    regime_trajectory: "Any | None" = None,
 ) -> float:
     """Compute a composite similarity score for a candidate record.
 
     Score = weighted_sum * recency_factor
 
     weighted_sum components:
-    - regime_score:         cosine similarity on regime_fingerprint
-    - playbook_score:       1.0 match, 0.5 both-None, 0.0 mismatch
-    - timeframe_score:      1.0 match, 0.5 both-None, 0.0 mismatch
-    - feature_vector_score: same as regime_score (fingerprint IS the feature vector)
+    - regime_score:              cosine similarity on regime_fingerprint
+    - playbook_score:            1.0 match, 0.5 both-None, 0.0 mismatch
+    - timeframe_score:           1.0 match, 0.5 both-None, 0.0 mismatch
+    - feature_vector_score:      same as regime_score (fingerprint IS the feature vector)
+    - trajectory_velocity_score: optional boost for records entered during similar
+                                 regime velocity conditions (R80)
 
     recency_factor = exp(-lambda * days_since_exit)   (multiplier)
     """
@@ -148,6 +151,30 @@ def _score(
         + request.timeframe_weight * timeframe_score
         + request.feature_vector_weight * feature_vector_score
     )
+
+    # --- R80: trajectory velocity score (optional boost) ---
+    # When RegimeTrajectory data is available, episodes that were entered during
+    # similar regime velocity conditions score slightly higher. This helps surface
+    # episodes from trend-acceleration phases vs. stable regimes, even if the
+    # fingerprint distance is similar.
+    # Weight is small (0.05) so it doesn't dominate the primary regime similarity.
+    if regime_trajectory is not None:
+        try:
+            current_velocity = float(getattr(regime_trajectory, "velocity_scalar", 0.0))
+            # Use record metadata to infer its regime velocity context.
+            # Records don't store velocity directly; use stability as a proxy:
+            # high stability → low velocity; low stability → high velocity.
+            record_stability = getattr(record, "regime_stability", None)
+            if record_stability is not None:
+                record_velocity_proxy = 1.0 - float(record_stability)
+            else:
+                record_velocity_proxy = 0.5  # neutral when unknown
+            current_velocity_norm = min(1.0, current_velocity)
+            # Velocity similarity: 1 - |current - record| (bounded [0, 1])
+            velocity_similarity = max(0.0, 1.0 - abs(current_velocity_norm - record_velocity_proxy))
+            weighted_sum += 0.05 * velocity_similarity
+        except Exception:
+            pass  # trajectory scoring is supplemental — never fatal
 
     # --- recency multiplier ---
     days = _days_since(record.exit_ts)
@@ -210,6 +237,7 @@ class MemoryRetrievalService:
         self,
         request: MemoryRetrievalRequest,
         prior_bundle: Optional[DiversifiedMemoryBundle] = None,
+        regime_trajectory: "Any | None" = None,
     ) -> DiversifiedMemoryBundle:
         """Retrieve a DiversifiedMemoryBundle for the given request.
 
@@ -217,6 +245,8 @@ class MemoryRetrievalService:
             request: Specifies symbol, regime fingerprint, quotas, and weights.
             prior_bundle: If provided, may be reused when the regime fingerprint
                           delta is below 0.05.
+            regime_trajectory: Optional RegimeTrajectory from WorldState (R80).
+                When provided, adds trajectory velocity component to scoring.
 
         Returns:
             A new (or reused) DiversifiedMemoryBundle.
@@ -255,7 +285,7 @@ class MemoryRetrievalService:
         candidate_pool_size = len(symbol_records)
 
         wins, losses, failure_modes, retrieval_scope, insufficient_buckets = (
-            self._fill_buckets(symbol_records, request, scope="symbol")
+            self._fill_buckets(symbol_records, request, scope="symbol", regime_trajectory=regime_trajectory)
         )
 
         # --- Global fallback when symbol-local is insufficient ---
@@ -279,6 +309,7 @@ class MemoryRetrievalService:
                         symbol_records + global_candidates,
                         request,
                         scope="global",
+                        regime_trajectory=regime_trajectory,
                     )
                 )
                 candidate_pool_size = len(symbol_records) + len(global_candidates)
@@ -323,6 +354,7 @@ class MemoryRetrievalService:
         records: List[EpisodeMemoryRecord],
         request: MemoryRetrievalRequest,
         scope: str,
+        regime_trajectory: "Any | None" = None,
     ) -> Tuple[
         List[EpisodeMemoryRecord],
         List[EpisodeMemoryRecord],
@@ -332,13 +364,17 @@ class MemoryRetrievalService:
     ]:
         """Score records and fill win/loss/failure_mode buckets.
 
+        Args:
+            regime_trajectory: Optional RegimeTrajectory from WorldState.
+                When provided, adds trajectory velocity component to scoring.
+
         Returns:
             (wins, losses, failure_modes, scope_used, insufficient_buckets)
         """
         # Score all candidates
         scored: List[Tuple[float, EpisodeMemoryRecord]] = []
         for record in records:
-            s = _score(record, request)
+            s = _score(record, request, regime_trajectory=regime_trajectory)
             scored.append((s, record))
 
         # Sort descending by score

@@ -1248,4 +1248,72 @@ export const researchAPI = {
   },
 };
 
+// ============================================================================
+// Scanner API (R74/R75)
+// ============================================================================
+
+export interface OpportunityCard {
+  symbol: string;
+  opportunity_score: number;
+  opportunity_score_norm: number;
+  vol_edge: number;
+  structure_edge: number;
+  trend_edge: number;
+  liquidity_score: number;
+  spread_penalty: number;
+  instability_penalty: number;
+  expected_hold_horizon: 'scalp' | 'intraday' | 'swing';
+  scored_at: string;
+  indicator_as_of: string;
+  component_explanation: Record<string, string>;
+  nearest_support?: number | null;
+  nearest_resistance?: number | null;
+  structure_levels_count: number;
+}
+
+export interface OpportunityRanking {
+  ranked_at: string;
+  cards: OpportunityCard[];
+  universe_size: number;
+  scan_duration_ms: number;
+  top_n: number;
+}
+
+export const scannerAPI = {
+  getOpportunities: async (): Promise<OpportunityRanking | null> => {
+    const response = await api.get('/scanner/opportunities');
+    return response.data;
+  },
+
+  getSymbolOpportunity: async (symbol: string): Promise<OpportunityCard> => {
+    const response = await api.get(`/scanner/opportunities/${encodeURIComponent(symbol)}`);
+    return response.data;
+  },
+
+  getHistory: async (limit = 20): Promise<Array<{
+    ranked_at: string;
+    universe_size: number;
+    top_n: number;
+    scan_duration_ms: number;
+    top_symbols: string[];
+    score_range: { max: number; min: number } | null;
+  }>> => {
+    const response = await api.get('/scanner/history', { params: { limit } });
+    return response.data;
+  },
+
+  runOnce: async (): Promise<{
+    status: string;
+    ranked_at?: string;
+    universe_size?: number;
+    top_n?: number;
+    scan_duration_ms?: number;
+    top_symbols?: string[];
+    message?: string;
+  }> => {
+    const response = await api.post('/scanner/run-once');
+    return response.data;
+  },
+};
+
 export default api;

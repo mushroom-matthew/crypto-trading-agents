@@ -24,7 +24,8 @@ from agents.llm.client_factory import get_llm_client
 from agents.llm.model_utils import output_token_args, reasoning_args
 from schemas.judge_feedback import (
     JudgeFeedback, JudgeConstraints, DisplayConstraints,
-    JudgeAttribution, AttributionEvidence, AttributionLayer, RecommendedAction
+    JudgeAttribution, AttributionEvidence, AttributionLayer, RecommendedAction,
+    JudgeGuidanceVector,
 )
 from trading_core.trade_quality import TradeMetrics
 
@@ -156,6 +157,7 @@ class JudgeFeedbackService:
         self.model = model or os.environ.get("OPENAI_MODEL", "gpt-5-mini")
         self._client = None
         self.last_generation_info: Dict[str, Any] = {}
+        self.last_guidance_vector: Optional[JudgeGuidanceVector] = None
 
     @property
     def client(self):
@@ -617,6 +619,78 @@ class JudgeFeedbackService:
 
         return False
 
+    def build_guidance_vector(
+        self,
+        heuristics: HeuristicAnalysis,
+        trade_metrics: TradeMetrics | None = None,
+    ) -> JudgeGuidanceVector:
+        """Build a JudgeGuidanceVector from heuristic analysis (R80).
+
+        Derives deterministic quantitative guidance from the final heuristic score:
+        - score < 40  → risk_multiplier=0.6 (reduce sizing 40%)
+        - score < 50  → risk_multiplier=0.8 (reduce sizing 20%)
+        - score >= 70 → risk_multiplier=1.2 (allow slightly larger sizing)
+        - else         → risk_multiplier=1.0 (neutral)
+
+        Playbook penalties are derived from category_stats: categories with
+        win_rate < 0.3 and count >= 3 receive a 0.5 penalty weight.
+        """
+        score = heuristics.final_score
+
+        # Risk multiplier from score bands
+        if score < 40.0:
+            risk_multiplier = 0.6
+        elif score < 50.0:
+            risk_multiplier = 0.8
+        elif score >= 70.0:
+            risk_multiplier = 1.2
+        else:
+            risk_multiplier = 1.0
+
+        # Playbook penalties from category win rates
+        playbook_penalties: Dict[str, float] = {}
+        if trade_metrics:
+            for cat, stats in (getattr(trade_metrics, "category_stats", None) or {}).items():
+                cat_wr = stats.get("win_rate", 0)
+                cat_count = stats.get("count", 0)
+                if cat_count >= 3 and cat_wr < 0.3:
+                    # Use category name as a proxy for playbook_id (best-effort)
+                    playbook_penalties[cat] = 0.5
+
+        # Confidence adjustments from red flags
+        confidence_adjustments: Dict[str, float] = {}
+        for flag in heuristics.red_flags:
+            if "win rate" in flag.lower():
+                confidence_adjustments["entry_timing"] = 0.7
+            if "consecutive losses" in flag.lower() or "regime" in flag.lower():
+                confidence_adjustments["regime_assessment"] = 0.7
+            if "stop" in flag.lower():
+                confidence_adjustments["stop_placement"] = 0.8
+
+        # Summary for UI
+        if score >= 70:
+            summary_text = f"Performance strong (score={score:.0f}). Slight sizing increase applied."
+        elif score < 40:
+            summary_text = f"Performance weak (score={score:.0f}). Significant sizing reduction applied."
+        elif score < 50:
+            summary_text = f"Performance below target (score={score:.0f}). Moderate sizing reduction applied."
+        else:
+            summary_text = f"Performance within acceptable range (score={score:.0f}). No sizing change."
+
+        # Hard constraints from must_fix items in strategist constraints
+        hard_constraints = [
+            f"STRUCTURAL: {item}"
+            for item in heuristics.suggested_strategist_constraints.get("must_fix", [])[:3]
+        ]
+
+        return JudgeGuidanceVector(
+            risk_multiplier=risk_multiplier,
+            playbook_penalties=playbook_penalties,
+            confidence_adjustments=confidence_adjustments,
+            summary=summary_text,
+            hard_constraints=hard_constraints,
+        )
+
     def generate_feedback(
         self,
         summary: Dict[str, Any],
@@ -627,6 +701,10 @@ class JudgeFeedbackService:
 
         # Always compute heuristics first
         heuristics = self.compute_heuristics(summary, trade_metrics)
+
+        # R80: Build JudgeGuidanceVector for WorldState update
+        guidance_vector = self.build_guidance_vector(heuristics, trade_metrics)
+        self.last_guidance_vector = guidance_vector
 
         # Build payload for transport/LLM
         payload = {

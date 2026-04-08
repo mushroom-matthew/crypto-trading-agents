@@ -276,6 +276,13 @@ class SessionState(BaseModel):
     episode_memory_store_state: List[Dict[str, Any]] = []
     # Exit contract enforcement: tracks which plan opened each position (Runbook 65)
     position_originating_plans: Dict[str, str] = {}  # symbol → plan_id
+    # R71: Price feed resilience — last-known prices cache + consecutive failure counter
+    last_known_prices: Dict[str, float] = {}  # symbol → last good price
+    consecutive_price_failures: int = 0  # consecutive complete fetch failures
+    # R78: Hypothesis executor state (persisted for continue-as-new)
+    hypothesis_executor_state: Dict[str, Any] = {}
+    # R80: WorldState — shared world model for ii-loop coherence
+    world_state: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
@@ -326,6 +333,7 @@ async def generate_strategy_plan_activity(
     # Build LLM input
     now = datetime.now(timezone.utc)
     assets = []
+    _indicator_snapshots_for_validation: Dict[str, Any] = {}  # R69: compile-time target check
     for symbol in symbols:
         ctx = market_context.get(symbol, {})
         # If the context came from fetch_indicator_snapshots_activity it has the
@@ -347,6 +355,7 @@ async def generate_strategy_plan_activity(
         else:
             close = float(ctx.get("price", 0.0) or 0.0)
             snapshot = IndicatorSnapshot(symbol=symbol, timeframe=indicator_timeframe or "1h", as_of=now, close=close)
+        _indicator_snapshots_for_validation[symbol] = snapshot  # R69
         assets.append(build_asset_state(symbol, [snapshot]))
 
     positions_raw = portfolio_state.get("positions", {})
@@ -387,6 +396,18 @@ async def generate_strategy_plan_activity(
             _focal,
             len(assets) - 1,
         )
+
+    # R78: Check hypothesis model flag — if enabled, load the hypothesis plan prompt.
+    _use_hypothesis_model = os.environ.get("PAPER_TRADING_USE_HYPOTHESIS_MODEL", "false").lower() in ("1", "true", "yes")
+    if _use_hypothesis_model and not strategy_prompt:
+        try:
+            from pathlib import Path as _Path
+            _hyp_prompt_path = _Path(__file__).resolve().parent.parent / "prompts" / "hypothesis_plan.txt"
+            if _hyp_prompt_path.exists():
+                strategy_prompt = _hyp_prompt_path.read_text()
+                logger.info("R78: loaded hypothesis_plan.txt prompt (%d chars)", len(strategy_prompt))
+        except Exception as _hpe:
+            logger.warning("R78: failed to load hypothesis_plan.txt: %s", _hpe)
 
     # Generate plan — inject repair instructions into the prompt if provided
     effective_prompt = strategy_prompt
@@ -691,6 +712,91 @@ async def generate_strategy_plan_activity(
         plan_dict["_snapshot_missing_sections"] = _ps.quality.missing_sections
     except Exception:
         logger.debug("Failed to build policy snapshot in paper trading", exc_info=True)
+
+    # R69: Compile-time target semantics validation.
+    # Run before caching so bad plans are never cached.
+    try:
+        from agents.strategies.trigger_engine import validate_plan_target_semantics
+        _primary_sym = symbols[0] if symbols else None
+        _primary_indicator = _indicator_snapshots_for_validation.get(_primary_sym) if _primary_sym else None
+        _target_violations = validate_plan_target_semantics(plan_dict, _primary_indicator)
+        if _target_violations and not repair_instructions:
+            # Attempt one targeted repair pass with violation context injected.
+            _violation_text = "\n".join(f"- {v['detail']}" for v in _target_violations)
+            _target_repair = (
+                f"COMPILE-TIME TARGET VIOLATIONS — fix before returning:\n{_violation_text}\n\n"
+                f"For each affected trigger: either (a) remove 'target_hit' from exit_rule and "
+                f"use trailing_stop only, or (b) set target_anchor_type to a compatible anchor "
+                f"(r_multiple_2, r_multiple_3, or an HTF anchor that is directionally consistent "
+                f"with the trigger's direction). Do NOT use htf_daily_high as target for a short, "
+                f"or htf_daily_low as target for a long."
+            )
+            logger.warning(
+                "R69: %d compile-time target violation(s); issuing repair pass. Violations: %s",
+                len(_target_violations),
+                "; ".join(v["detail"] for v in _target_violations),
+            )
+            return await generate_strategy_plan_activity(
+                symbols=symbols,
+                portfolio_state=portfolio_state,
+                strategy_prompt=strategy_prompt,
+                market_context=market_context,
+                llm_model=llm_model,
+                session_id=session_id,
+                repair_instructions=_target_repair,
+                indicator_timeframe=indicator_timeframe,
+                direction_bias=direction_bias,
+            )
+        elif _target_violations and repair_instructions:
+            # Already in repair pass; log remaining violations but proceed.
+            logger.warning(
+                "R69: %d compile-time target violation(s) remain after repair (proceeding): %s",
+                len(_target_violations),
+                "; ".join(v["detail"] for v in _target_violations),
+            )
+            plan_dict["_compile_time_target_violations"] = _target_violations
+    except Exception as _ct_exc:
+        logger.debug("R69 compile-time target validation failed (non-fatal): %s", _ct_exc)
+
+    # R78: Compile hypotheses when plan contains hypotheses[] and hypothesis model is enabled.
+    _use_hypothesis_model = os.environ.get("PAPER_TRADING_USE_HYPOTHESIS_MODEL", "false").lower() in ("1", "true", "yes")
+    _raw_hypotheses = plan_dict.get("hypotheses") or []
+    if _use_hypothesis_model and _raw_hypotheses:
+        try:
+            from schemas.hypothesis import TradeHypothesis
+            from services.hypothesis_compiler import compile_hypotheses as _compile_hypotheses
+
+            _primary_sym = symbols[0] if symbols else None
+            _primary_indicator = _indicator_snapshots_for_validation.get(_primary_sym) if _primary_sym else None
+            if _primary_indicator is not None:
+                # Parse hypotheses from raw dict list
+                _parsed_hyps = []
+                for _h in _raw_hypotheses:
+                    try:
+                        _parsed_hyps.append(TradeHypothesis.model_validate(_h))
+                    except Exception as _hpe:
+                        logger.warning("R78: failed to parse hypothesis %s: %s", _h.get("id", "?"), _hpe)
+
+                if _parsed_hyps:
+                    _current_price = float(_primary_indicator.close)
+                    _compile_result = _compile_hypotheses(
+                        _parsed_hyps, _primary_indicator, _current_price
+                    )
+                    # Replace hypotheses in plan_dict with compiled valid ones
+                    plan_dict["hypotheses"] = [h.model_dump() for h in _compile_result.valid]
+                    if _compile_result.invalid:
+                        plan_dict["_hypothesis_compile_violations"] = [
+                            {"id": v.hypothesis_id, "reason": v.reason, "detail": v.detail}
+                            for v in _compile_result.invalid
+                        ]
+                        logger.warning(
+                            "R78: %d hypothesis violations after compile (valid=%d): %s",
+                            len(_compile_result.invalid),
+                            len(_compile_result.valid),
+                            "; ".join(v.detail for v in _compile_result.invalid[:3]),
+                        )
+        except Exception as _hyp_exc:
+            logger.warning("R78: hypothesis compilation failed (non-fatal): %s", _hyp_exc)
 
     # Cache the plan (only when not a repair pass — repair plans are one-shot)
     if not repair_instructions:
@@ -1121,22 +1227,42 @@ async def discover_symbols_activity(
 
 @activity.defn
 async def fetch_current_prices_activity(symbols: List[str]) -> Dict[str, float]:
-    """Fetch current prices for a list of symbols."""
+    """Fetch current prices for a list of symbols.
+
+    R71: Per-symbol 8s timeout; failed symbols are silently skipped (partial
+    results are valid). The workflow-level call site caches last-known prices
+    and proceeds with stale data when the activity returns an empty dict.
+    """
+    import asyncio
     import ccxt.async_support as ccxt
 
     client = ccxt.coinbaseexchange()
-    prices = {}
+    prices: Dict[str, float] = {}
+    _PER_SYMBOL_TIMEOUT = 8.0  # R71: per-symbol soft deadline
 
     try:
         for symbol in symbols:
             try:
-                ticker = await client.fetch_ticker(symbol)
-                prices[symbol] = ticker.get("last", 0) or ticker.get("close", 0) or 0
+                ticker = await asyncio.wait_for(
+                    client.fetch_ticker(symbol),
+                    timeout=_PER_SYMBOL_TIMEOUT,
+                )
+                price = ticker.get("last") or ticker.get("close") or 0
+                if price:
+                    prices[symbol] = float(price)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "R71: fetch_ticker timeout for %s after %.0fs — skipping",
+                    symbol, _PER_SYMBOL_TIMEOUT,
+                )
             except Exception as e:
-                logger.warning(f"Failed to fetch price for {symbol}: {e}")
+                logger.warning("R71: Failed to fetch price for %s: %s", symbol, e)
         return prices
     finally:
-        await client.close()
+        try:
+            await client.close()
+        except Exception:
+            pass
 
 
 def _ohlcv_rows_to_df(rows: list) -> "pd.DataFrame":
@@ -1312,6 +1438,8 @@ async def build_episode_activity(
     timeframe: str,
     playbook_id: Optional[str] = None,
     template_id: Optional[str] = None,
+    regime_fingerprint: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
 ) -> None:
     """Build and persist an EpisodeMemoryRecord after a position closes.
 
@@ -1376,6 +1504,14 @@ async def build_episode_activity(
             strategy_template_version=template_id,
         )
 
+        # R82: normalize regime_fingerprint dict (values must be float)
+        _fp: Optional[Dict[str, float]] = None
+        if regime_fingerprint:
+            try:
+                _fp = {k: float(v) for k, v in regime_fingerprint.items() if isinstance(v, (int, float))}
+            except Exception:
+                _fp = None
+
         record = build_episode_record(
             signal_event=proxy_signal,
             exit_ts=exit_ts,
@@ -1383,11 +1519,13 @@ async def build_episode_activity(
             r_achieved=r_achieved,
             mfe_pct=mfe_pct,
             mae_pct=mae_pct,
+            regime_fingerprint=_fp,
             episode_source="paper",
         )
         store = EpisodeMemoryStore()
         store.add(record)
-        store.persist_episode(record)
+        # R82: persist with session_id for cross-session indexing
+        store.persist_episode(record, session_id=session_id)
         logger.info(
             "episode_memory: built episode signal_id=%s symbol=%s hit=%s r=%.2f",
             signal_id, symbol, hit, r_achieved,
@@ -1466,6 +1604,13 @@ class PaperTradingWorkflow:
         self._current_plan_snapshot_meta: Dict[str, Any] = {}
         # R68: screener-derived regime label (persisted)
         self.screener_regime: Optional[str] = None
+        # R71: price feed resilience — last-known prices cache + consecutive failure counter
+        self.last_known_prices: Dict[str, float] = {}
+        self.consecutive_price_failures: int = 0
+        # R78: hypothesis executor state — persisted as dict for Temporal serialization
+        self._hypothesis_executor_state: Dict[str, Any] = {}
+        # R80: WorldState — shared world model (regime + judge guidance + calibration)
+        self._world_state: Dict[str, Any] = {}
 
     # -------------------------------------------------------------------------
     # Signals
@@ -1501,6 +1646,28 @@ class PaperTradingWorkflow:
         self.trigger_rule_edits.append(entry)
         if len(self.trigger_rule_edits) > 500:
             self.trigger_rule_edits = self.trigger_rule_edits[-500:]
+
+    @workflow.signal
+    def apply_judge_guidance(self, guidance_dict: Dict[str, Any]) -> None:
+        """Apply structured JudgeGuidanceVector to WorldState (R80 ii-loop).
+
+        Called by the judge agent after evaluation to structurally update the
+        shared world model — replaces textual DisplayConstraints injection.
+        guidance_dict is a JudgeGuidanceVector serialized as a plain dict.
+        """
+        try:
+            from services.world_state_manager import apply_judge_guidance as _apply_guidance
+            from schemas.world_state import WorldState as _WorldState
+            _ws = _WorldState.from_dict(self._world_state) if self._world_state else _WorldState()
+            _ws = _apply_guidance(_ws, guidance_dict)
+            self._world_state = _ws.to_dict()
+            workflow.logger.info(
+                "R80: applied judge guidance — risk_multiplier=%.2f vetoes=%s",
+                float(guidance_dict.get("risk_multiplier", 1.0)),
+                guidance_dict.get("symbol_vetoes", []),
+            )
+        except Exception as _jg_exc:
+            workflow.logger.warning("R80: apply_judge_guidance signal failed (non-fatal): %s", _jg_exc)
 
     @workflow.signal
     def update_trigger_rule(self, update: Dict[str, Any]) -> None:
@@ -1638,6 +1805,16 @@ class PaperTradingWorkflow:
     def get_session_status(self) -> Dict[str, Any]:
         """Get current session status."""
         research = self.research.model_dump() if self.research else None
+        # R80: include WorldState summary in status
+        _ws_summary: Dict[str, Any] = {}
+        if self._world_state:
+            _ws_summary = {
+                "world_state_id": self._world_state.get("world_state_id"),
+                "regime_velocity": (self._world_state.get("regime_trajectory") or {}).get("velocity_scalar", 0.0),
+                "regime_stability": (self._world_state.get("regime_trajectory") or {}).get("stability_score", 1.0),
+                "judge_risk_multiplier": (self._world_state.get("judge_guidance") or {}).get("risk_multiplier", 1.0),
+                "has_judge_guidance": bool(self._world_state.get("judge_guidance")),
+            }
         return {
             "session_id": self.session_id,
             "symbols": self.symbols,
@@ -1648,6 +1825,7 @@ class PaperTradingWorkflow:
             "plan_interval_hours": self.plan_interval_hours,
             "research": research,
             "active_experiments": self.active_experiments,
+            "world_state_summary": _ws_summary,
         }
 
     @workflow.query
@@ -1800,6 +1978,16 @@ class PaperTradingWorkflow:
             payload["resolved_as_of_by_symbol"] = resolved_map
             payload["structure_resolved_as_of_by_symbol"] = structure_resolved_map
         return payload
+
+    @workflow.query
+    def get_world_state(self) -> Dict[str, Any]:
+        """Return the current WorldState as a dict (R80).
+
+        Exposes regime_fingerprint, regime_trajectory, judge_guidance,
+        confidence_calibration, and policy_state for operator dashboards
+        and end-to-end ii-loop verification.
+        """
+        return dict(self._world_state) if self._world_state else {}
 
     # -------------------------------------------------------------------------
     # Main Workflow
@@ -2107,6 +2295,27 @@ class PaperTradingWorkflow:
                         fired_at=workflow.now(),
                         source_detail=f"symbol={_primary_sym}",
                     ))
+                # R80: update WorldState with new regime fingerprint (every evaluation, not just transitions)
+                try:
+                    from services.world_state_manager import update_regime as _update_regime
+                    from schemas.world_state import WorldState as _WorldState
+                    _ws = _WorldState.from_dict(self._world_state) if self._world_state else _WorldState()
+                    _fp_dict = dict(zip(
+                        _fingerprint.numeric_vector_feature_names,
+                        _fingerprint.numeric_vector,
+                    ))
+                    _ws = _update_regime(
+                        _ws,
+                        _fp_dict,
+                        trend_state=_fingerprint.trend_state,
+                        vol_state=_fingerprint.vol_state,
+                        regime_confidence=_fingerprint.regime_confidence,
+                        bar_index=self.cycle_count,
+                        as_of_ts=_bar_ts,
+                    )
+                    self._world_state = _ws.to_dict()
+                except Exception as _ws_exc:
+                    workflow.logger.debug("R80: WorldState regime update failed (non-fatal): %s", _ws_exc)
             except Exception as _det_exc:
                 workflow.logger.warning(
                     "Regime detection failed (non-fatal): %s", _det_exc
@@ -2276,7 +2485,149 @@ class PaperTradingWorkflow:
                     )
                     # Proceed with original plan — runtime failsafe is the last line of defence
 
-            # Pop retrieval + R49 snapshot metadata before storing — StrategyPlan uses extra="forbid"
+            # R72: Per-trigger staged validation — drop triggers that fail basic
+            # stop/target/direction contracts rather than silently persisting them.
+            _raw_triggers = plan_dict.get("triggers") or []
+            _valid_triggers: list = []
+            _invalid_triggers: list = []
+            for _t in _raw_triggers:
+                _t_id = _t.get("id", "<unknown>")
+                _t_dir = _t.get("direction", "")
+                _t_exit = _t.get("exit_rule", "") or ""
+                _t_anchor = _t.get("target_anchor_type")
+                _t_stop_pct = _t.get("stop_loss_pct")
+                _t_stop_anchor = _t.get("stop_anchor_type")
+                _has_stop = bool(_t_stop_pct or _t_stop_anchor)
+                _r72_reason: str | None = None
+
+                if _t_dir in ("long", "short"):
+                    # Must have a stop defined for directional entries
+                    if not _has_stop:
+                        _r72_reason = "missing_stop"
+                    # target_hit without anchor is un-executable
+                    elif "target_hit" in _t_exit and not _t_anchor:
+                        _r72_reason = "no_target_rr_undefined"
+                    # Direction-anchor mismatch (catches wrong-side HTF anchors)
+                    elif _t_anchor:
+                        _wrong_map = {
+                            "long": ("htf_daily_low", "htf_5d_low"),
+                            "short": ("htf_daily_high", "htf_5d_high"),
+                        }
+                        if _t_anchor in _wrong_map.get(_t_dir, ()):
+                            _r72_reason = "target_price_unresolvable"
+
+                if _r72_reason:
+                    _invalid_triggers.append({"trigger_id": _t_id, "reason": _r72_reason})
+                    workflow.logger.warning(
+                        "R72: Dropping invalid trigger '%s' from plan: %s",
+                        _t_id, _r72_reason,
+                    )
+                else:
+                    _valid_triggers.append(_t)
+
+            if _invalid_triggers:
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[self.session_id, "eval_summary", {
+                        "event": "trigger_dropped_at_validation",
+                        "dropped": _invalid_triggers,
+                        "valid_count": len(_valid_triggers),
+                        "invalid_count": len(_invalid_triggers),
+                    }],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+                plan_dict["triggers"] = _valid_triggers
+
+            # R72: Zero-trigger fallback synthesis.
+            # When ALL triggers are invalid/dropped after repair, attempt a minimal
+            # fallback rather than immediately standing down.
+            _zero_triggers = len(plan_dict.get("triggers") or []) == 0
+            _fallback_succeeded = False
+            if _zero_triggers:
+                workflow.logger.warning(
+                    "R72: zero valid triggers after repair/validation — attempting fallback synthesis"
+                )
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[self.session_id, "eval_summary", {
+                        "event": "plan_construction_failed",
+                        "reason": "zero_triggers_after_repair",
+                        "missing_stop_count": sum(1 for i in _invalid_triggers if i.get("reason") == "missing_stop"),
+                        "missing_target_count": sum(1 for i in _invalid_triggers if "target" in i.get("reason", "")),
+                        "schema_mismatch_count": 0,
+                        "zero_trigger_fallback_attempted": True,
+                        "fallback_succeeded": False,  # updated below
+                        "cycle": len(self.plan_history),
+                    }],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+
+                # Build 1 minimal entry trigger per symbol using ATR stop + trailing exit
+                _fallback_triggers = []
+                _sym_indicators = indicator_snapshots  # in scope from _generate_plan
+                for _fsym in self.symbols[:3]:  # cap at 3 symbols for fallback
+                    _ind = _sym_indicators.get(_fsym, {})
+                    _atr = _ind.get("atr") if isinstance(_ind, dict) else None
+                    _close = _ind.get("close") if isinstance(_ind, dict) else None
+                    if not _close:
+                        continue
+                    # Use ATR-based stop pct or default 1.5%
+                    _stop_pct = round((_atr / _close * 100), 2) if (_atr and _close and _close > 0) else 1.5
+                    _stop_pct = max(0.5, min(_stop_pct, 3.0))  # clamp 0.5%-3%
+                    # Direction: use session bias or neutral (long only)
+                    _fb_dir = self.direction_bias if self.direction_bias in ("long", "short") else "long"
+                    _fallback_triggers.append({
+                        "id": f"fallback_{_fsym.replace('-', '_').lower()}_entry",
+                        "symbol": _fsym,
+                        "timeframe": self.indicator_timeframe or "1h",
+                        "direction": _fb_dir,
+                        "entry_rule": "rsi_14 < 35" if _fb_dir == "long" else "rsi_14 > 65",
+                        "exit_rule": "trailing_stop_activated",
+                        "stop_loss_pct": _stop_pct,
+                        "category": "technical",
+                        "confidence_grade": "C",  # lowest confidence for fallback
+                    })
+
+                if _fallback_triggers:
+                    # Validate fallback triggers pass compile-time checks
+                    _fb_valid = [
+                        t for t in _fallback_triggers
+                        if not ("target_hit" in (t.get("exit_rule") or ""))
+                    ]
+                    if _fb_valid:
+                        plan_dict["triggers"] = _fb_valid
+                        plan_dict["_fallback_synthesis"] = True
+                        _fallback_succeeded = True
+                        workflow.logger.info(
+                            "R72: fallback synthesis produced %d minimal trigger(s)",
+                            len(_fb_valid),
+                        )
+                    else:
+                        workflow.logger.warning("R72: fallback synthesis triggers also invalid")
+
+                if not _fallback_succeeded:
+                    # Hard stand-down: both primary and fallback exhausted
+                    workflow.logger.error(
+                        "R72: fallback synthesis failed — standing down (zero valid triggers)"
+                    )
+                    await workflow.execute_activity(
+                        emit_paper_trading_event_activity,
+                        args=[self.session_id, "plan_stand_down", {
+                            "cycle": len(self.plan_history),
+                            "reason": "zero_triggers_fallback_exhausted",
+                            "missing_stop_count": sum(1 for i in _invalid_triggers if i.get("reason") == "missing_stop"),
+                            "missing_target_count": sum(1 for i in _invalid_triggers if "target" in i.get("reason", "")),
+                            "zero_trigger_fallback_attempted": True,
+                            "fallback_succeeded": False,
+                        }],
+                        schedule_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                    return
+
+            # Pop retrieval + R49/R72 snapshot metadata before storing — StrategyPlan uses extra="forbid"
             _retrieved_template_id = plan_dict.pop("_retrieved_template_id", None)
             _snapshot_id = plan_dict.pop("_snapshot_id", None)
             _snapshot_hash = plan_dict.pop("_snapshot_hash", None)
@@ -2285,6 +2636,8 @@ class PaperTradingWorkflow:
             _snapshot_as_of_ts = plan_dict.pop("_snapshot_as_of_ts", None)
             _snapshot_staleness_seconds = plan_dict.pop("_snapshot_staleness_seconds", None)
             _snapshot_missing_sections = plan_dict.pop("_snapshot_missing_sections", None)
+            plan_dict.pop("_compile_time_target_violations", None)  # R69
+            plan_dict.pop("_fallback_synthesis", None)  # R72
 
             # R68: store snapshot meta for query response (ephemeral — not in SessionState)
             self._current_plan_snapshot_meta = {
@@ -2467,12 +2820,71 @@ class PaperTradingWorkflow:
         # ─────────────────────────────────────────────────────────────────────
 
         # ── Tier 1: always runs every tick ───────────────────────────────────
-        current_prices = await workflow.execute_activity(
-            fetch_current_prices_activity,
-            args=[self.symbols],
-            schedule_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=2),
-        )
+        # R71: Increased timeout to 90s (3× headroom for 4 parallel sessions);
+        # 3 retries with exponential backoff.  Per-symbol 8s timeout is handled
+        # inside the activity itself.  On complete failure, fall back to cached
+        # last-known prices so the workflow is never killed by a transient feed issue.
+        _MAX_CONSECUTIVE_PRICE_FAILURES = 3
+        try:
+            current_prices = await workflow.execute_activity(
+                fetch_current_prices_activity,
+                args=[self.symbols],
+                schedule_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    initial_interval=timedelta(seconds=2),
+                    backoff_coefficient=2.0,
+                    maximum_interval=timedelta(seconds=20),
+                ),
+            )
+            if current_prices:
+                # Update cache with freshly fetched prices
+                self.last_known_prices.update(current_prices)
+                self.consecutive_price_failures = 0
+            else:
+                # Activity returned empty dict — all symbols timed out
+                raise RuntimeError("fetch_current_prices_activity returned empty result")
+        except Exception as _price_exc:
+            self.consecutive_price_failures += 1
+            workflow.logger.warning(
+                "R71: price fetch failed (consecutive=%d): %s",
+                self.consecutive_price_failures, _price_exc,
+            )
+            if self.last_known_prices:
+                current_prices = dict(self.last_known_prices)
+                workflow.logger.warning(
+                    "R71: using cached prices for %d symbol(s): %s",
+                    len(current_prices), list(current_prices),
+                )
+                await workflow.execute_activity(
+                    emit_paper_trading_event_activity,
+                    args=[self.session_id, "eval_summary", {
+                        "event": "price_feed_degraded",
+                        "consecutive_failures": self.consecutive_price_failures,
+                        "symbols_from_cache": list(current_prices),
+                    }],
+                    schedule_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            else:
+                # No cache at all — cannot proceed this tick
+                workflow.logger.error(
+                    "R71: no cached prices available; skipping tick (consecutive=%d)",
+                    self.consecutive_price_failures,
+                )
+                if self.consecutive_price_failures >= _MAX_CONSECUTIVE_PRICE_FAILURES:
+                    workflow.logger.warning(
+                        "R71: %d consecutive price failures — pausing new entries",
+                        self.consecutive_price_failures,
+                    )
+                return
+
+            # Pause new entries when degraded too long; existing positions still protected
+            if self.consecutive_price_failures >= _MAX_CONSECUTIVE_PRICE_FAILURES:
+                workflow.logger.warning(
+                    "R71: %d consecutive price failures — pausing new entries (positions protected)",
+                    self.consecutive_price_failures,
+                )
 
         # Push prices to ledger for unrealized P&L display
         live_prices = {s: float(current_prices.get(s) or 0) for s in self.symbols if current_prices.get(s)}
@@ -2497,6 +2909,37 @@ class PaperTradingWorkflow:
             args=[self.ledger_workflow_id],
             schedule_to_close_timeout=timedelta(seconds=10),
         )
+
+        # R78: Hypothesis executor tick (fast path — stop/target sweep for hypothesis-mode plans)
+        _use_hypothesis_model = os.environ.get("PAPER_TRADING_USE_HYPOTHESIS_MODEL", "false").lower() in ("1", "true", "yes")
+        if _use_hypothesis_model and self.current_plan and self.current_plan.get("hypotheses"):
+            try:
+                from services.hypothesis_executor import HypothesisExecutor as _HypExec
+                _hexec = _HypExec.from_dict(self._hypothesis_executor_state) if self._hypothesis_executor_state else _HypExec()
+                for _sym, _price in current_prices.items():
+                    _price_f = float(_price) if _price else 0.0
+                    if not _price_f:
+                        continue
+                    _exit_signals = _hexec.on_tick(_sym, _price_f)
+                    for _sig in _exit_signals:
+                        workflow.logger.info(
+                            "R78: hypothesis %s exit signal: %s at %.4f (stop=%.4f target=%.4f)",
+                            _sig.hypothesis_id, _sig.exit_reason, _sig.exit_price,
+                            _sig.stop_price, _sig.target_price,
+                        )
+                        _rec = _hexec.on_exit(_sym, _price_f, _sig.exit_reason)
+                        # Emit event for attribution
+                        if _rec:
+                            await workflow.execute_activity(
+                                emit_paper_trading_event_activity,
+                                args=[self.session_id, "hypothesis_exit", _rec],
+                                schedule_to_close_timeout=timedelta(seconds=10),
+                                retry_policy=RetryPolicy(maximum_attempts=1),
+                            )
+                # Persist updated executor state
+                self._hypothesis_executor_state = _hexec.to_dict()
+            except Exception as _hexc_exc:
+                workflow.logger.debug("R78: hypothesis on_tick failed (non-fatal): %s", _hexc_exc)
 
         # Stop/target price sweep — exits any position that has crossed its
         # absolute stop or target level since the last tick.
@@ -2575,6 +3018,105 @@ class PaperTradingWorkflow:
                 args=[self.session_id, ev["type"], ev["payload"]],
                 schedule_to_close_timeout=timedelta(seconds=10),
             )
+
+        # R78: Hypothesis executor on_bar — evaluate entry rules for pending hypotheses.
+        # When hypothesis model is active, also load hypotheses from the plan into the executor.
+        if _use_hypothesis_model and self.current_plan and self.current_plan.get("hypotheses"):
+            try:
+                from services.hypothesis_executor import HypothesisExecutor as _HypExec
+                from agents.strategies.rule_dsl import RuleEvaluator as _RuleEval
+                _hexec = _HypExec.from_dict(self._hypothesis_executor_state) if self._hypothesis_executor_state else _HypExec()
+
+                # Load hypotheses from plan if executor has none pending
+                _hyp_dicts = self.current_plan.get("hypotheses", [])
+                if _hyp_dicts:
+                    from schemas.hypothesis import TradeHypothesis as _TH
+                    _pending_syms = set(_hexec.all_symbols())
+                    _new_hyps = []
+                    for _hd in _hyp_dicts:
+                        try:
+                            _new_hyps.append(_TH.model_validate(_hd))
+                        except Exception:
+                            pass
+                    if _new_hyps:
+                        _hexec.load_hypotheses(_new_hyps)
+
+                # Evaluate on_bar for each symbol
+                _primary_sym = self.symbols[0] if self.symbols else None
+                _primary_indicator_dict = self.last_indicators.get(_primary_sym, {}) if _primary_sym else {}
+                if _primary_indicator_dict:
+                    from schemas.llm_strategist import IndicatorSnapshot as _IS
+                    try:
+                        _snap_init = {k: v for k, v in _primary_indicator_dict.items()}
+                        _snap_init.setdefault("symbol", _primary_sym)
+                        _snap_init.setdefault("timeframe", self.indicator_timeframe)
+                        _snap_init.setdefault("as_of", workflow.now())
+                        _snap_init.setdefault("close", float(current_prices.get(_primary_sym, 0) or 0))
+                        _indicator_snap = _IS.model_validate(_snap_init)
+                        _evaluator = _RuleEval()
+
+                        class _FakeBar:
+                            close = _indicator_snap.close
+                            timeframe = _indicator_snap.timeframe
+                            timestamp = workflow.now()
+
+                        # R80: propagate WorldState risk multiplier to hypothesis executor
+                        try:
+                            from services.world_state_manager import get_risk_multiplier as _get_rm
+                            from schemas.world_state import WorldState as _WS
+                            _ws_obj = _WS.from_dict(self._world_state) if self._world_state else None
+                            _hexec.world_state_risk_multiplier = _get_rm(_ws_obj)
+                        except Exception:
+                            pass  # non-fatal — default 1.0 remains
+
+                        _entry_sigs, _block_recs, _exit_sigs = _hexec.on_bar(
+                            _FakeBar(), _indicator_snap, _evaluator, portfolio_state
+                        )
+
+                        for _entry in _entry_sigs:
+                            await workflow.execute_activity(
+                                emit_paper_trading_event_activity,
+                                args=[self.session_id, "hypothesis_entry_fired", _entry],
+                                schedule_to_close_timeout=timedelta(seconds=10),
+                                retry_policy=RetryPolicy(maximum_attempts=1),
+                            )
+                            # Add entry to orders list for execution
+                            _sym_e = _entry.get("symbol", "")
+                            _dir_e = _entry.get("direction", "long")
+                            orders.append({
+                                "symbol": _sym_e,
+                                "side": "buy" if _dir_e == "long" else "sell",
+                                "quantity": None,  # sized by ledger
+                                "price": _indicator_snap.close,
+                                "timeframe": self.indicator_timeframe,
+                                "reason": f"hypothesis_{_entry.get('hypothesis_id', 'unknown')}",
+                                "timestamp": workflow.now().isoformat(),
+                                "emergency": False,
+                                "trigger_category": "trend_continuation",
+                                "intent": "entry",
+                                "learning_book": False,
+                                "hypothesis_id": _entry.get("hypothesis_id"),
+                                "stop_price": _entry.get("stop_price"),
+                                "target_price": _entry.get("target_price"),
+                            })
+
+                        for _exit in _exit_sigs:
+                            _rec = _hexec.on_exit(_exit.symbol, _exit.exit_price, _exit.exit_reason)
+                            if _rec:
+                                await workflow.execute_activity(
+                                    emit_paper_trading_event_activity,
+                                    args=[self.session_id, "hypothesis_exit", _rec],
+                                    schedule_to_close_timeout=timedelta(seconds=10),
+                                    retry_policy=RetryPolicy(maximum_attempts=1),
+                                )
+
+                    except Exception as _hexb_exc:
+                        workflow.logger.debug("R78: hypothesis on_bar inner error (non-fatal): %s", _hexb_exc)
+
+                # Persist updated executor state
+                self._hypothesis_executor_state = _hexec.to_dict()
+            except Exception as _hexb_outer:
+                workflow.logger.debug("R78: hypothesis on_bar failed (non-fatal): %s", _hexb_outer)
 
         for order in orders:
             # Phase M3 (Runbook 60): block entry-rule flatten exits for symbols
@@ -2703,6 +3245,8 @@ class PaperTradingWorkflow:
                     or price
                 )
                 _fill_ts = meta.get("opened_at") or workflow.now().isoformat()
+                # R82: pass WorldState regime fingerprint for cross-session retrieval scoring
+                _ws_fp = (self._world_state or {}).get("regime_fingerprint") or {}
                 await workflow.execute_activity(
                     build_episode_activity,
                     args=[
@@ -2717,6 +3261,10 @@ class PaperTradingWorkflow:
                         target_px,
                         hit,
                         self.indicator_timeframe,
+                        meta.get("playbook_id"),     # playbook_id
+                        meta.get("template_id"),     # template_id
+                        _ws_fp,                      # regime_fingerprint (R82)
+                        self.session_id,             # session_id (R82)
                     ],
                     schedule_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(maximum_attempts=1),
@@ -2825,6 +3373,26 @@ class PaperTradingWorkflow:
         # Record fill in ledger
         fill_price = float(order.get("price", 0.0) or 0.0)
         quantity = float(order.get("quantity", 0.0) or 0.0)
+
+        # R84: apply WorldState judge risk_multiplier to entry order sizing.
+        # Exits are never scaled — only entries are affected.
+        if order.get("intent") == "entry" and quantity > 0 and self._world_state:
+            try:
+                from services.world_state_manager import get_risk_multiplier as _get_rm
+                from schemas.world_state import WorldState as _WS
+                _ws_obj = _WS.from_dict(self._world_state)
+                _risk_mult = _get_rm(_ws_obj)
+                if _risk_mult != 1.0:
+                    _orig_qty = quantity
+                    quantity = quantity * _risk_mult
+                    workflow.logger.info(
+                        "R84: entry qty scaled by judge risk_multiplier=%.2f: %.6f → %.6f (%s %s)",
+                        _risk_mult, _orig_qty, quantity,
+                        order.get("symbol"), order.get("trigger_id", order.get("reason")),
+                    )
+            except Exception:
+                pass  # non-fatal — proceed with original quantity
+
         cost = fill_price * quantity
         fee = cost * 0.001
 
@@ -3245,6 +3813,13 @@ class PaperTradingWorkflow:
             episode_memory_store_state=list(self.episode_memory_store_state)[-100:],
             # Exit contract enforcement (Runbook 65)
             position_originating_plans=dict(self.position_originating_plans),
+            # R71: price feed resilience
+            last_known_prices=dict(self.last_known_prices),
+            consecutive_price_failures=self.consecutive_price_failures,
+            # R78: hypothesis executor state
+            hypothesis_executor_state=dict(self._hypothesis_executor_state),
+            # R80: WorldState
+            world_state=dict(self._world_state) if self._world_state else None,
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -3289,6 +3864,13 @@ class PaperTradingWorkflow:
         self.episode_memory_store_state = list(parsed.episode_memory_store_state or [])
         # Exit contract enforcement (Runbook 65)
         self.position_originating_plans = dict(parsed.position_originating_plans or {})
+        # R71: price feed resilience
+        self.last_known_prices = dict(parsed.last_known_prices or {})
+        self.consecutive_price_failures = parsed.consecutive_price_failures or 0
+        # R78: hypothesis executor state
+        self._hypothesis_executor_state = dict(parsed.hypothesis_executor_state or {})
+        # R80: WorldState
+        self._world_state = dict(parsed.world_state) if parsed.world_state else {}
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)

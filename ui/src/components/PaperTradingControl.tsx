@@ -24,6 +24,7 @@ import { PromptEditor } from './PromptEditor';
 import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSettingsPanel';
 import { PlanningSettingsPanel, type PlanningSettings } from './PlanningSettingsPanel';
 import { ResearchBudgetPanel } from './ResearchBudgetPanel';
+import { ScannerPanel } from './ScannerPanel';
 
 export function PaperTradingControl() {
   const queryClient = useQueryClient();
@@ -733,6 +734,11 @@ export function PaperTradingControl() {
               disabled={isRunning}
               sessionId={selectedSessionId ?? undefined}
             />
+
+            {/* R75: Opportunity Scanner Panel */}
+            <div className="border border-gray-700/50 rounded-lg p-4">
+              <ScannerPanel />
+            </div>
 
             {/* Action Buttons */}
             <div className="flex gap-3 pt-4">
@@ -1684,12 +1690,15 @@ function buildStructureRows(
         })
         .filter((lvl: LevelCandidate) => Number.isFinite(lvl.price));
 
+      // Neutral levels sit inside the ±0.05% dead zone around current price.
+      // Use strict inequality so a level exactly at close can't appear in both
+      // lists simultaneously (the original duplicate bug).
       supports = structureLevels
-        .filter((lvl) => lvl.source === 'support' || (lvl.source === 'neutral' && lvl.price <= close))
+        .filter((lvl) => lvl.source === 'support' || (lvl.source === 'neutral' && lvl.price < close))
         .sort((a, b) => b.price - a.price)
         .slice(0, 3);
       resistances = structureLevels
-        .filter((lvl) => lvl.source === 'resistance' || (lvl.source === 'neutral' && lvl.price >= close))
+        .filter((lvl) => lvl.source === 'resistance' || (lvl.source === 'neutral' && lvl.price > close))
         .sort((a, b) => a.price - b.price)
         .slice(0, 3);
     } else {

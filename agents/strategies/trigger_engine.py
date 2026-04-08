@@ -16,6 +16,7 @@ from schemas.llm_strategist import AssetState, IndicatorSnapshot, PortfolioState
 from schemas.judge_feedback import JudgeConstraints
 from schemas.learning_gate import LearningGateStatus
 from schemas.position_exit_contract import PositionExitContract  # R67: exit contract enforcement
+from schemas.block_taxonomy import classify_block_reason  # R73: block class annotation
 from trading_core.execution_engine import BlockReason
 
 from .risk_engine import RiskEngine
@@ -51,6 +52,84 @@ def _try_select_structural_targets(indicator: IndicatorSnapshot, direction: str)
 
 ExitBindingMode = Literal["none", "category"]
 ConflictResolution = Literal["ignore", "exit", "reverse", "defer"]
+
+
+# ── R69: module-level compile-time target semantics validator ─────────────────
+
+def validate_plan_target_semantics(
+    plan_dict: dict,
+    indicator: "IndicatorSnapshot | None",
+) -> list[dict]:
+    """Return a list of compile-time violation dicts for all triggers in plan_dict.
+
+    Each dict has keys: trigger_id, reason, detail.
+    Empty list → no violations.
+
+    Called from generate_strategy_plan_activity before persisting the plan.
+    Safe to call with indicator=None (direction/anchor checks still run;
+    HTF-level presence checks are skipped).
+    """
+    violations: list[dict] = []
+    triggers = plan_dict.get("triggers") or []
+    for t in triggers:
+        trigger_id = t.get("id", "<unknown>")
+        direction = t.get("direction", "")
+        if direction not in ("long", "short"):
+            continue
+        exit_rule = t.get("exit_rule", "") or ""
+        if "target_hit" not in exit_rule:
+            continue
+        anchor = t.get("target_anchor_type")
+        if not anchor:
+            violations.append({
+                "trigger_id": trigger_id,
+                "reason": "compile_time_target_violation",
+                "detail": (
+                    f"exit_rule references 'target_hit' but target_anchor_type "
+                    f"is not set on trigger '{trigger_id}'"
+                ),
+            })
+            continue
+        # Direction-anchor compatibility check
+        wrong_direction_anchors = {
+            "long": ("htf_daily_low", "htf_5d_low"),
+            "short": ("htf_daily_high", "htf_5d_high"),
+        }
+        wrong_for_direction = wrong_direction_anchors.get(direction, ())
+        if anchor in wrong_for_direction:
+            violations.append({
+                "trigger_id": trigger_id,
+                "reason": "compile_time_target_violation",
+                "detail": (
+                    f"anchor '{anchor}' is incompatible with direction '{direction}' "
+                    f"on trigger '{trigger_id}' — target would be on wrong side of entry"
+                ),
+            })
+            continue
+        # HTF field presence check (only when indicator is available)
+        if indicator is not None:
+            htf_field_map = {
+                "htf_daily_high": "htf_daily_high",
+                "htf_daily_low": "htf_daily_low",
+                "htf_daily_extreme": "htf_daily_high" if direction == "long" else "htf_daily_low",
+                "htf_5d_high": "htf_5d_high",
+                "htf_5d_low": "htf_5d_low",
+                "htf_5d_extreme": "htf_5d_high" if direction == "long" else "htf_5d_low",
+            }
+            field_name = htf_field_map.get(anchor)
+            if field_name:
+                level = getattr(indicator, field_name, None)
+                if level is None:
+                    violations.append({
+                        "trigger_id": trigger_id,
+                        "reason": "compile_time_target_violation",
+                        "detail": (
+                            f"anchor '{anchor}' maps to indicator field '{field_name}' "
+                            f"which is None on trigger '{trigger_id}' — "
+                            f"target_price_unresolvable at runtime"
+                        ),
+                    })
+    return violations
 
 
 @dataclass
@@ -247,6 +326,7 @@ class TriggerEngine:
         portfolio: PortfolioState | None = None,
         position_meta: Mapping[str, dict[str, Any]] | None = None,
         tick_snapshot: "Any | None" = None,
+        world_state: "Any | None" = None,
     ) -> dict[str, float | str | None]:
         """Build evaluation context, including cross-timeframe aliases."""
 
@@ -442,6 +522,32 @@ class TriggerEngine:
             context.setdefault("snapshot_hash", None)
             context.setdefault("snapshot_staleness_s", None)
 
+        # R80: Inject WorldState-derived keys for DSL rule expressions
+        # judge_risk_multiplier: current risk scaling factor from judge guidance
+        # regime_velocity: how fast the regime is changing (from trajectory)
+        if world_state is not None:
+            try:
+                guidance = getattr(world_state, "judge_guidance", None)
+                if guidance is not None:
+                    context["judge_risk_multiplier"] = float(guidance.get("risk_multiplier", 1.0))
+                else:
+                    context["judge_risk_multiplier"] = 1.0
+                trajectory = getattr(world_state, "regime_trajectory", None)
+                if trajectory is not None:
+                    context["regime_velocity"] = float(getattr(trajectory, "velocity_scalar", 0.0))
+                    context["regime_stability"] = float(getattr(trajectory, "stability_score", 1.0))
+                else:
+                    context["regime_velocity"] = 0.0
+                    context["regime_stability"] = 1.0
+            except Exception:
+                context.setdefault("judge_risk_multiplier", 1.0)
+                context.setdefault("regime_velocity", 0.0)
+                context.setdefault("regime_stability", 1.0)
+        else:
+            context.setdefault("judge_risk_multiplier", 1.0)
+            context.setdefault("regime_velocity", 0.0)
+            context.setdefault("regime_stability", 1.0)
+
         return context
 
     def _trend_state_from_snapshot(self, snapshot: IndicatorSnapshot) -> str:
@@ -625,6 +731,7 @@ class TriggerEngine:
             "reason": reason,
             "detail": detail,
             "price": bar.close,
+            "block_class": classify_block_reason(reason).value,  # R73
         }
         if extra:
             payload.update(extra)
@@ -661,6 +768,74 @@ class TriggerEngine:
 
     def _emergency_cooldown_bars(self) -> int:
         return max(1, self.trade_cooldown_bars, self.min_hold_bars)
+
+    # ── R69: compile-time target semantics validator ──────────────────────
+
+    def _validate_trigger_target_semantics(
+        self,
+        trigger: "TriggerCondition",
+        indicator: "IndicatorSnapshot",
+    ) -> list[str]:
+        """Return a list of violation strings for this trigger's target semantics.
+
+        Called at plan-compile time (not at entry-fire time) so bad plans are
+        caught before the evaluation window expires.
+
+        Checks:
+        1. If exit_rule references 'target_hit', target_anchor_type must be set.
+        2. For HTF anchors: anchor must be resolvable given current direction
+           (long needs above-entry target; short needs below-entry target).
+        """
+        violations: list[str] = []
+        if trigger.direction not in ("long", "short"):
+            return violations
+
+        exit_rule = getattr(trigger, "exit_rule", "") or ""
+        if "target_hit" not in exit_rule:
+            return violations
+
+        anchor = getattr(trigger, "target_anchor_type", None)
+        if not anchor:
+            violations.append(
+                f"trigger '{trigger.id}': exit_rule references 'target_hit' "
+                f"but target_anchor_type is not set — R:R is undefined"
+            )
+            return violations
+
+        # Direction-anchor compatibility
+        direction = trigger.direction
+        wrong_direction_anchors = {
+            "long": ("htf_daily_low", "htf_5d_low"),
+            "short": ("htf_daily_high", "htf_5d_high"),
+        }
+        wrong_for_direction = wrong_direction_anchors.get(direction, ())
+        if anchor in wrong_for_direction:
+            violations.append(
+                f"trigger '{trigger.id}': anchor '{anchor}' is incompatible with "
+                f"direction '{direction}' — target would be on wrong side of entry"
+            )
+            return violations
+
+        # For HTF anchors that require the level to be present in indicator data,
+        # check that the field resolves to a non-None value.
+        htf_field_map = {
+            "htf_daily_high": "htf_daily_high",
+            "htf_daily_low": "htf_daily_low",
+            "htf_daily_extreme": "htf_daily_high" if direction == "long" else "htf_daily_low",
+            "htf_5d_high": "htf_5d_high",
+            "htf_5d_low": "htf_5d_low",
+            "htf_5d_extreme": "htf_5d_high" if direction == "long" else "htf_5d_low",
+        }
+        field_name = htf_field_map.get(anchor)
+        if field_name:
+            level = getattr(indicator, field_name, None)
+            if level is None:
+                violations.append(
+                    f"trigger '{trigger.id}': anchor '{anchor}' maps to indicator "
+                    f"field '{field_name}' which is None — target_price_unresolvable"
+                )
+
+        return violations
 
     def _compute_target_distance(
         self,
@@ -924,9 +1099,21 @@ class TriggerEngine:
                 is_emergency = trigger.category == "emergency_exit"
                 is_risk_off_with_priority = trigger.category == "risk_off" and self._risk_off_has_priority()
                 if not is_emergency and not is_risk_off_with_priority and not self._priority_skip_bypass(trigger.confidence_grade):
-                    # Log that we're skipping lower-confidence triggers
                     detail = f"Max triggers ({self.max_triggers_per_symbol_per_bar}) already fired for {bar.symbol}"
-                    self._record_block(block_entries, trigger, "priority_skip", detail, bar)
+                    # R70: Distinguish invalid candidates from valid ones that were suppressed.
+                    # If this trigger would have failed stop/target validation anyway, use the
+                    # more specific block reason so Phase 0 telemetry can separate signal quality
+                    # issues from legitimate priority management.
+                    _pre_valid, _pre_invalid_reason = self._pre_validate_entry_candidate(
+                        trigger, indicator, bar
+                    )
+                    if not _pre_valid:
+                        self._record_block(
+                            block_entries, trigger, "priority_skip_invalid_candidate", detail, bar,
+                            extra={"pre_invalid_reason": _pre_invalid_reason},
+                        )
+                    else:
+                        self._record_block(block_entries, trigger, "priority_skip", detail, bar)
                     continue
 
             current_position = self._position_direction(bar.symbol, portfolio_for_eval)
@@ -1239,6 +1426,58 @@ class TriggerEngine:
         threshold_priority = self.CONFIDENCE_PRIORITY.get(self.priority_skip_confidence_threshold, 0)
         confidence_priority = self.CONFIDENCE_PRIORITY.get(confidence, 0)
         return confidence_priority >= threshold_priority
+
+    # ── R70: pre-validation for two-pass priority selection ───────────────
+
+    def _pre_validate_entry_candidate(
+        self,
+        trigger: "TriggerCondition",
+        indicator: "IndicatorSnapshot",
+        bar: "Bar",
+    ) -> tuple[bool, str | None]:
+        """Quickly check whether an entry trigger is likely to produce a valid order.
+
+        Returns (is_pre_valid, disqualifying_reason_or_None).
+
+        This is a lightweight check — intentionally conservative.  It only
+        catches the two most common disqualifying conditions observed in the
+        Phase 0 audit (no_target_rr_undefined, target_price_unresolvable) so
+        we can distinguish 'slot consumed by invalid candidate' from
+        'slot consumed by valid candidate'.  Full risk evaluation still runs
+        in _entry_order().
+        """
+        if trigger.direction not in ("long", "short"):
+            return True, None  # exits are handled separately
+
+        exit_rule = getattr(trigger, "exit_rule", "") or ""
+        if "target_hit" in exit_rule:
+            anchor = getattr(trigger, "target_anchor_type", None)
+            if not anchor:
+                return False, "no_target_rr_undefined"
+
+            # Direction-anchor compatibility
+            direction = trigger.direction
+            wrong_direction_anchors = {
+                "long": ("htf_daily_low", "htf_5d_low"),
+                "short": ("htf_daily_high", "htf_5d_high"),
+            }
+            if anchor in wrong_direction_anchors.get(direction, ()):
+                return False, "target_price_unresolvable"
+
+            # HTF field presence
+            htf_field_map = {
+                "htf_daily_high": "htf_daily_high",
+                "htf_daily_low": "htf_daily_low",
+                "htf_daily_extreme": "htf_daily_high" if direction == "long" else "htf_daily_low",
+                "htf_5d_high": "htf_5d_high",
+                "htf_5d_low": "htf_5d_low",
+                "htf_5d_extreme": "htf_5d_high" if direction == "long" else "htf_5d_low",
+            }
+            field_name = htf_field_map.get(anchor)
+            if field_name and getattr(indicator, field_name, None) is None:
+                return False, "target_price_unresolvable"
+
+        return True, None
 
     def _apply_order_to_portfolio(self, portfolio: PortfolioState, order: Order) -> PortfolioState:
         if order.quantity <= 0:

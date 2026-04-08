@@ -1297,6 +1297,53 @@ async def get_session_activity(session_id: str, limit: int = 40):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/sessions/{session_id}/block-summary")
+async def get_block_summary(session_id: str, limit: int = 500):
+    """Get Phase 0 block reason summary for a paper trading session (R73).
+
+    Returns counts of trade_blocked events broken down by block_class
+    (risk_valid / quality_gate / infra / unknown) to support Phase 0 exit criteria.
+    """
+    from ops_api.event_store import EventStore
+    from schemas.block_taxonomy import classify_block_reason, BlockClass
+
+    try:
+        store = EventStore()
+        events = store.list_events_filtered(
+            limit=limit,
+            run_id=session_id,
+            order="desc",
+        )
+
+        block_events = [e for e in events if e.type == "trade_blocked"]
+        reason_counts: Dict[str, int] = {}
+        class_counts: Dict[str, int] = {c.value: 0 for c in BlockClass}
+
+        for e in block_events:
+            reason = e.payload.get("reason", "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            # Use stored block_class if present (R73), else classify on the fly
+            block_class = e.payload.get("block_class") or classify_block_reason(reason).value
+            class_counts[block_class] = class_counts.get(block_class, 0) + 1
+
+        return {
+            "session_id": session_id,
+            "total_blocks": len(block_events),
+            "block_class_counts": class_counts,
+            "block_reason_counts": dict(sorted(reason_counts.items(), key=lambda x: -x[1])),
+            # Phase 0 exit criteria fields
+            "phase0_quality_gate_count": class_counts.get(BlockClass.QUALITY_GATE.value, 0),
+            "phase0_infra_count": class_counts.get(BlockClass.INFRA.value, 0),
+            "phase0_pass": (
+                class_counts.get(BlockClass.QUALITY_GATE.value, 0) == 0
+                and class_counts.get(BlockClass.INFRA.value, 0) == 0
+            ),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get block summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/sessions/{session_id}/structure")
 async def get_structure_snapshot(
     session_id: str,
@@ -1700,4 +1747,75 @@ async def update_strategy(session_id: str, request: UpdateStrategyRequest):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to update strategy: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sessions/{session_id}/world-state")
+async def get_world_state(session_id: str):
+    """Return the current WorldState for a paper trading session (R80).
+
+    WorldState is the shared world model across Strategist, Judge, and Execution.
+    Contains:
+    - regime_fingerprint: current normalized regime vector
+    - regime_trajectory: rolling history (velocity_scalar, stability_score)
+    - judge_guidance: structured JudgeGuidanceVector (risk_multiplier, playbook_penalties, etc.)
+    - confidence_calibration: per-dimension trust weights
+    - policy_state: current FSM state
+    """
+    from ops_api.temporal_client import get_temporal_client
+    from temporalio.service import RPCError
+    from tools.paper_trading import PaperTradingWorkflow
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(session_id)
+        world_state = await handle.query(PaperTradingWorkflow.get_world_state)
+        return {
+            "session_id": session_id,
+            "world_state": world_state,
+            "has_judge_guidance": bool(world_state.get("judge_guidance")),
+            "has_regime_fingerprint": bool(world_state.get("regime_fingerprint")),
+        }
+    except RPCError as e:
+        if _is_not_found(e):
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get world state: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/judge-guidance")
+async def apply_judge_guidance(session_id: str, guidance: Dict[str, Any]):
+    """Apply structured JudgeGuidanceVector to the WorldState (R80 ii-loop).
+
+    Posts a JudgeGuidanceVector as a signal to the paper trading workflow.
+    The guidance is applied deterministically — no LLM interpretation needed.
+
+    Example payload:
+      {
+        "risk_multiplier": 0.7,
+        "playbook_penalties": {"donchian_breakout": 0.0},
+        "symbol_vetoes": ["ETH-USD"],
+        "confidence_adjustments": {"regime_assessment": 0.6}
+      }
+    """
+    from ops_api.temporal_client import get_temporal_client
+    from temporalio.service import RPCError
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(session_id)
+        await handle.signal("apply_judge_guidance", guidance)
+        return {
+            "session_id": session_id,
+            "status": "applied",
+            "risk_multiplier": guidance.get("risk_multiplier", 1.0),
+        }
+    except RPCError as e:
+        if _is_not_found(e):
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to apply judge guidance: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

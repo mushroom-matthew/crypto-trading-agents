@@ -7,6 +7,7 @@ import json as _json
 import logging
 import math
 import os
+from typing import Any
 from uuid import uuid4
 from datetime import timezone
 from collections import defaultdict
@@ -225,6 +226,7 @@ class StrategyPlanProvider:
         event_ts: datetime | None = None,
         emit_events: bool = True,
         policy_snapshot: "PolicySnapshot | None" = None,
+        world_state: "Any | None" = None,
     ) -> StrategyPlan:
         cache_path = self._cache_path(run_id, plan_date, llm_input)
         emit_ts = event_ts or plan_date
@@ -265,6 +267,27 @@ class StrategyPlanProvider:
         metadata = self._llm_call_metadata(llm_input, plan_date, prompt_template=resolved_prompt)
         # R62: resolve eligible playbooks for current regime + HTF direction
         eligible_playbooks = _get_eligible_playbooks(llm_input)
+        # R80: apply WorldState judge guidance — filter playbooks by penalties/bonuses
+        if world_state is not None and eligible_playbooks:
+            try:
+                from services.world_state_manager import get_playbook_penalties, get_playbook_bonuses
+                penalties = get_playbook_penalties(world_state)
+                bonuses = get_playbook_bonuses(world_state)
+                if penalties or bonuses:
+                    filtered = []
+                    for pb in eligible_playbooks:
+                        pid = getattr(pb, "playbook_id", None)
+                        penalty = penalties.get(pid, 1.0) if pid else 1.0
+                        if penalty <= 0.0:
+                            logger.info("R80: blocking playbook %s (penalty=0.0 from judge guidance)", pid)
+                            continue
+                        filtered.append(pb)
+                    if filtered:
+                        eligible_playbooks = filtered
+                    else:
+                        logger.warning("R80: all playbooks penalized — retaining original eligible set")
+            except Exception:
+                logger.debug("R80: WorldState playbook filtering failed (non-fatal)", exc_info=True)
         plan = self.llm_client.generate_plan(
             llm_input,
             prompt_template=resolved_prompt,

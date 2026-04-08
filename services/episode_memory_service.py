@@ -45,28 +45,38 @@ CREATE TABLE IF NOT EXISTS episode_memory (
     mae_pct         REAL,
     hold_bars       INTEGER,
     regime_fingerprint_hash TEXT,
+    regime_fingerprint_json TEXT,
     failure_modes_json      TEXT,
     entry_ts        TIMESTAMP WITH TIME ZONE,
     exit_ts         TIMESTAMP WITH TIME ZONE,
     episode_source  TEXT DEFAULT 'live',
+    session_id      TEXT,
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 )
 """
 
-# Add episode_source to existing tables that pre-date this column.
+# Add columns to existing tables that pre-date them.
 _MIGRATE_EPISODE_SOURCE_SQL = """
 ALTER TABLE episode_memory ADD COLUMN IF NOT EXISTS episode_source TEXT DEFAULT 'live'
+"""
+_MIGRATE_REGIME_FP_JSON_SQL = """
+ALTER TABLE episode_memory ADD COLUMN IF NOT EXISTS regime_fingerprint_json TEXT
+"""
+_MIGRATE_SESSION_ID_SQL = """
+ALTER TABLE episode_memory ADD COLUMN IF NOT EXISTS session_id TEXT
 """
 
 _INSERT_EPISODE_SQL = """
 INSERT INTO episode_memory (
     episode_id, signal_id, symbol, timeframe, playbook_id, template_id,
     direction, outcome_class, r_achieved, mfe_pct, mae_pct, hold_bars,
-    regime_fingerprint_hash, failure_modes_json, entry_ts, exit_ts, episode_source
+    regime_fingerprint_hash, regime_fingerprint_json, failure_modes_json,
+    entry_ts, exit_ts, episode_source, session_id
 ) VALUES (
     :episode_id, :signal_id, :symbol, :timeframe, :playbook_id, :template_id,
     :direction, :outcome_class, :r_achieved, :mfe_pct, :mae_pct, :hold_bars,
-    :regime_fingerprint_hash, :failure_modes_json, :entry_ts, :exit_ts, :episode_source
+    :regime_fingerprint_hash, :regime_fingerprint_json, :failure_modes_json,
+    :entry_ts, :exit_ts, :episode_source, :session_id
 )
 ON CONFLICT (episode_id) DO NOTHING
 """
@@ -292,8 +302,10 @@ class EpisodeMemoryStore:
         try:
             with self._engine.begin() as conn:
                 conn.execute(sa.text(_CREATE_TABLE_SQL))
-                # Add episode_source to tables created before this column existed.
+                # Apply column migrations for tables created before these columns existed.
                 conn.execute(sa.text(_MIGRATE_EPISODE_SOURCE_SQL))
+                conn.execute(sa.text(_MIGRATE_REGIME_FP_JSON_SQL))
+                conn.execute(sa.text(_MIGRATE_SESSION_ID_SQL))
             self._table_ensured = True
         except Exception as exc:
             logger.warning("episode_memory: table creation failed (non-fatal): %s", exc)
@@ -302,18 +314,29 @@ class EpisodeMemoryStore:
         """Insert or overwrite a record by episode_id."""
         self._records[record.episode_id] = record
 
-    def persist_episode(self, record: EpisodeMemoryRecord) -> None:
-        """Write an episode record to the DB (non-fatal if DB unavailable)."""
+    def persist_episode(
+        self,
+        record: EpisodeMemoryRecord,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Write an episode record to the DB (non-fatal if DB unavailable).
+
+        R82: accepts session_id for cross-session indexing.
+        Also stores regime_fingerprint_json so retrieval service can score
+        episodes by regime distance across sessions.
+        """
         if self._engine is None:
             return
         self._ensure_table()
         try:
+            import hashlib
             # Compute a short hash of regime_fingerprint for indexed lookup
             fp_hash: Optional[str] = None
+            fp_json: Optional[str] = None
             if record.regime_fingerprint:
-                import hashlib
                 canonical = json.dumps(record.regime_fingerprint, sort_keys=True, default=str)
                 fp_hash = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+                fp_json = canonical  # store full JSON for retrieval scoring
 
             with self._engine.begin() as conn:
                 conn.execute(
@@ -332,10 +355,12 @@ class EpisodeMemoryStore:
                         "mae_pct": float(record.mae_pct) if record.mae_pct is not None else None,
                         "hold_bars": record.hold_bars,
                         "regime_fingerprint_hash": fp_hash,
+                        "regime_fingerprint_json": fp_json,
                         "failure_modes_json": json.dumps(record.failure_modes) if record.failure_modes else None,
                         "entry_ts": record.entry_ts,
                         "exit_ts": record.exit_ts,
                         "episode_source": record.episode_source,
+                        "session_id": session_id,
                     },
                 )
             logger.info(
@@ -364,6 +389,7 @@ class EpisodeMemoryStore:
                         SELECT episode_id, signal_id, symbol, timeframe, playbook_id,
                                template_id, direction, outcome_class, r_achieved,
                                mfe_pct, mae_pct, hold_bars, failure_modes_json,
+                               regime_fingerprint_json,
                                entry_ts, exit_ts,
                                COALESCE(episode_source, 'live') AS episode_source
                         FROM episode_memory
@@ -381,6 +407,14 @@ class EpisodeMemoryStore:
         for row in rows:
             try:
                 failure_modes = json.loads(row.failure_modes_json) if row.failure_modes_json else []
+                # R82: restore regime_fingerprint from JSON for retrieval scoring
+                regime_fp: Optional[Dict[str, float]] = None
+                _fp_json = getattr(row, "regime_fingerprint_json", None)
+                if _fp_json:
+                    try:
+                        regime_fp = {k: float(v) for k, v in json.loads(_fp_json).items()}
+                    except Exception:
+                        regime_fp = None
                 records.append(EpisodeMemoryRecord(
                     episode_id=row.episode_id,
                     signal_id=row.signal_id,
@@ -395,6 +429,7 @@ class EpisodeMemoryStore:
                     mae_pct=float(row.mae_pct) if row.mae_pct is not None else None,
                     hold_bars=row.hold_bars,
                     failure_modes=failure_modes,
+                    regime_fingerprint=regime_fp,
                     entry_ts=row.entry_ts,
                     exit_ts=row.exit_ts,
                     episode_source=getattr(row, "episode_source", None) or "live",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Optional
+from uuid import uuid4
 
 from pydantic import Field, field_validator, model_validator
 
@@ -325,6 +326,79 @@ class RevisionLoopResult(SerializableModel):
     stand_down_reason: Optional[str] = None
     # plan_id of the final plan accepted (or None if stand_down)
     accepted_plan_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# R80 — JudgeGuidanceVector: structured judge output that closes the ii loop
+# ---------------------------------------------------------------------------
+
+
+class JudgeGuidanceVector(SerializableModel):
+    """Structured judge output that updates WorldState (closes the ii loop).
+
+    Replaces textual DisplayConstraints injection. These fields are applied
+    deterministically before the LLM call — the LLM doesn't need to 'interpret' them.
+
+    - risk_multiplier: applied to max_position_risk in next plan generation
+    - playbook_penalties: removes penalized playbooks from eligible list
+    - playbook_bonuses: up-weights playbooks in eligible list
+    - symbol_vetoes: hard-blocks symbols
+    - confidence_adjustments: updates ConfidenceCalibration in WorldState
+
+    summary and hard_constraints are supplemental for UI display.
+    """
+
+    guidance_id: str = Field(default_factory=lambda: str(uuid4()))
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at_eval: int = Field(
+        default=3,
+        ge=1,
+        description="TTL: expire after N judge evaluations (consistent with JudgeAction pattern)",
+    )
+
+    # Quantitative updates (not text — applied deterministically)
+    risk_multiplier: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=2.0,
+        description="Multiply max_position_risk by this factor. 0.7 = reduce sizing 30%.",
+    )
+    playbook_penalties: Dict[str, float] = Field(
+        default_factory=dict,
+        description="playbook_id → penalty weight. 0.0 = block, 1.0 = neutral, 0.5 = half-weight.",
+    )
+    playbook_bonuses: Dict[str, float] = Field(
+        default_factory=dict,
+        description="playbook_id → bonus weight. >1.0 = preferred.",
+    )
+    symbol_vetoes: List[str] = Field(
+        default_factory=list,
+        description="Hard-blocked symbols for the TTL duration.",
+    )
+    direction_bias: Optional[Literal["long_only", "short_only", "neutral"]] = Field(
+        default=None,
+        description="Override direction bias for plan generation.",
+    )
+
+    # Confidence calibration updates → applied to WorldState.confidence_calibration
+    confidence_adjustments: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Which plan dimensions to trust less. "
+            "Keys: regime_assessment, stop_placement, target_placement, "
+            "entry_timing, hypothesis_model. Values: [0.0, 2.0]."
+        ),
+    )
+
+    # Supplemental text (for UI display only — not injected into LLM prompt)
+    summary: str = Field(
+        default="",
+        description="1-2 sentence human-readable summary for UI display.",
+    )
+    hard_constraints: List[str] = Field(
+        default_factory=list,
+        description="STRUCTURAL: violations — hard rejects from judge validation.",
+    )
 
 
 def apply_trigger_floor(

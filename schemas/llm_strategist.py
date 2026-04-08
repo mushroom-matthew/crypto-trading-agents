@@ -457,6 +457,15 @@ class StrategyPlan(SerializableModel):
         description="Version of the selected playbook definition at decision time.",
     )
     triggers: List[TriggerCondition] = Field(default_factory=list)
+    # R78: New round-trip hypothesis model. When non-empty, HypothesisExecutor is used
+    # instead of TriggerEngine for exit management. Backward-compatible: sessions without
+    # PAPER_TRADING_USE_HYPOTHESIS_MODEL=true will have an empty list here.
+    hypotheses: List[Any] = Field(
+        default_factory=list,
+        description="TradeHypothesis objects (R78). When non-empty, hypothesis executor "
+        "manages entries and exits; exit trigger categories are suppressed. "
+        "Type is Any to avoid circular import with schemas.hypothesis.",
+    )
     risk_constraints: RiskConstraint | None = None
     sizing_rules: List[PositionSizingRule] = Field(default_factory=list)
     regime_assessment: RegimeAssessment | None = None

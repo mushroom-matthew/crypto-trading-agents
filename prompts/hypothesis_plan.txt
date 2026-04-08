@@ -1,0 +1,161 @@
+HYPOTHESIS PLAN MODE
+
+You are generating a HYPOTHESIS-based trading plan. This is fundamentally different from trigger mode.
+
+CORE CONCEPT: A TradeHypothesis is a complete round-trip trade specification.
+Instead of generating 4-8 disconnected triggers per symbol, you generate ONE hypothesis per symbol.
+Each hypothesis contains:
+  - A thesis (WHY you expect price to move)
+  - An entry_rule (WHEN to enter — same DSL as trigger mode)
+  - stop_price and target_price (REQUIRED absolute price levels at plan time)
+  - Structure basis (WHAT levels justify the stop and target)
+
+You MUST NOT output exit triggers. The hypothesis executor owns all exits.
+You MUST NOT output emergency_exit, risk_off, or risk_reduce triggers.
+The only trigger direction values allowed are "long" and "short" for entries.
+
+---
+
+REQUIRED OUTPUT STRUCTURE:
+
+{
+  "generated_at": "<ISO 8601>",
+  "valid_until": "<ISO 8601>",
+  "regime": "bull|bear|range|high_vol|mixed",
+  "global_view": "<1 sentence summary of overall market state>",
+  "risk_constraints": {
+    "max_position_risk_pct": 1.0,
+    "max_symbol_exposure_pct": 5.0,
+    "max_portfolio_exposure_pct": 15.0,
+    "max_daily_loss_pct": 3.0
+  },
+  "sizing_rules": [...],
+  "triggers": [],
+  "hypotheses": [
+    {
+      "id": "hyp_<8 chars>",
+      "symbol": "SYMBOL/USDT",
+      "timeframe": "1h",
+      "direction": "long|short",
+      "confidence_grade": "A|B|C",
+      "playbook_id": null,
+      "thesis": "<plain text: what structural or indicator context motivates this trade>",
+      "regime_context": "<current regime for this symbol>",
+      "indicator_basis": "<which specific indicator values motivated this: RSI=42, ATR contracting>",
+      "structure": {
+        "key_support": <float or null>,
+        "key_resistance": <float or null>,
+        "stop_anchor_level": <float — REQUIRED: absolute price for stop>,
+        "target_anchor_level": <float — REQUIRED: absolute price for target>,
+        "stop_anchor_source": "<source description: swing_low_2026-03-12, htf_daily_low, atr_1.5x>",
+        "target_anchor_source": "<source description: swing_high_2026-03-10, htf_daily_high, r_multiple_2>",
+        "structure_notes": "<optional plain text description of the structure>"
+      },
+      "entry_rule": "<DSL expression — same syntax as trigger entry_rule>",
+      "entry_notes": "<optional rationale for entry timing>",
+      "stop_price": <float — REQUIRED: same as structure.stop_anchor_level>,
+      "target_price": <float — REQUIRED: same as structure.target_anchor_level>,
+      "stop_loss_pct": <float or null — fallback only>,
+      "trailing_stop_activation_r": <float or null — set to 1.5 for swing trades>,
+      "invalidation_rule": "<optional DSL expression: conditions that make setup stale>",
+      "invalidation_horizon_bars": 12,
+      "estimated_bars_to_resolution": <int — your forecast for how many bars until resolution>
+    }
+  ]
+}
+
+---
+
+STOP AND TARGET RULES (COMPILER ENFORCES THESE):
+
+For LONG hypotheses:
+  - stop_price MUST be strictly below current price
+  - target_price MUST be strictly above current price
+  - stop_price and target_price MUST equal structure.stop_anchor_level and structure.target_anchor_level
+
+For SHORT hypotheses:
+  - stop_price MUST be strictly above current price
+  - target_price MUST be strictly below current price
+  - Absolute R:R: abs(target_price - current_price) / abs(current_price - stop_price) >= 1.2
+
+The compiler will REJECT hypotheses where:
+  - stop_price or target_price is 0, missing, or on the wrong side of current price
+  - R:R < 1.2
+  - Long: stop >= current price or target <= current price
+  - Short: stop <= current price or target >= current price
+
+---
+
+STOP ANCHOR SOURCES (use these exact strings):
+  Long stops (below entry):
+    "htf_daily_low"          — prior session low
+    "htf_prev_daily_low"     — session-before-prior low
+    "donchian_lower_short"   — short-period Donchian lower band
+    "candle_low"             — current candle low
+    "atr_1.5x"               — entry - 1.5 * ATR(14)
+    "atr_2.0x"               — entry - 2.0 * ATR(14)
+    "pct"                    — use stop_loss_pct field
+
+  Short stops (above entry):
+    "htf_daily_high"         — prior session high
+    "htf_prev_daily_high"    — session-before-prior high
+    "donchian_upper_short"   — short-period Donchian upper band
+    "candle_high"            — current candle high
+    "atr_1.5x"               — entry + 1.5 * ATR(14)
+
+TARGET ANCHOR SOURCES:
+  Long targets (above entry):
+    "htf_daily_high"         — prior session high
+    "htf_5d_high"            — 5-day rolling high
+    "htf_prev_daily_high"    — session-before-prior high
+    "donchian_upper_short"   — Donchian upper band
+    "r_multiple_2"           — entry + 2 * stop_distance
+    "r_multiple_3"           — entry + 3 * stop_distance
+    "measured_move"          — Donchian range height projected from entry
+
+  Short targets (below entry):
+    "htf_daily_low"          — prior session low
+    "htf_5d_low"             — 5-day rolling low
+    "htf_prev_daily_low"     — session-before-prior low
+    "donchian_lower_short"   — Donchian lower band
+    "r_multiple_2"           — entry - 2 * stop_distance
+    "r_multiple_3"           — entry - 3 * stop_distance
+
+---
+
+ENTRY RULE IDENTIFIERS (same as trigger mode):
+- Base: close, volume, volume_multiple, sma_short, sma_medium, sma_long, ema_short, ema_medium, ema_long,
+  rsi_14 (alias: rsi), atr_14 (alias: atr), macd, macd_signal, macd_hist, adx_14 (alias: adx),
+  roc_short, roc_medium, donchian_upper_short, donchian_lower_short, bollinger_upper, bollinger_lower,
+  bollinger_middle, vol_burst, vwap, vwap_distance_pct, compression_flag, expansion_flag, breakout_confirmed
+- HTF anchors: htf_daily_high, htf_daily_low, htf_daily_close, htf_daily_open, htf_daily_atr,
+  htf_prev_daily_high, htf_prev_daily_low, htf_5d_high, htf_5d_low, htf_price_vs_daily_mid
+- Candlestick: is_bullish, is_bearish, is_hammer, is_pin_bar, is_bullish_engulfing, is_bearish_engulfing,
+  is_impulse_candle, candle_strength, candle_body_pct
+- Position context: is_flat, is_long, is_short, position_qty
+- Cross-timeframe: tf_<timeframe>_<field> for available timeframes
+
+INVALIDATION RULE (optional — use for setup staleness, not price protection):
+  Use when: regime shift, key level reclaimed from wrong side, pattern structure breaks.
+  Example: "close < htf_daily_low" (for long: if price falls below daily low before entry, setup is stale)
+  Do NOT duplicate the stop condition — stop_price handles price execution independently.
+
+---
+
+CONFIDENCE GRADES:
+  A = high conviction — multiple confirming factors, clear structure, strong R:R (>2.0)
+  B = normal conviction — 2-3 confirming factors, moderate R:R (1.2–2.0)
+  C = speculative — single signal, weak structure, minimum R:R
+
+Aim for 1 hypothesis per symbol. 2 hypotheses per symbol only when setups are on different timeframes
+or opposite directions (e.g., one for breakout long, one for breakdown short).
+
+---
+
+WHAT NOT TO DO:
+- Do NOT output exit triggers (emergency_exit, risk_off, risk_reduce, risk_on, flat, exit)
+- Do NOT set stop_price = 0 or target_price = 0
+- Do NOT use HTF anchor as both stop AND target for the same symbol (they'd be on opposite sides anyway)
+- Do NOT write entry_rule that references stop_price or target_price (those are executor fields)
+- Do NOT use subscript syntax like indicator[-1] anywhere
+- Do NOT generate hypotheses for symbols not in the AVAILABLE SYMBOLS block
