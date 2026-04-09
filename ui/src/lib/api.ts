@@ -773,6 +773,9 @@ export interface PaperTradingSession {
   has_plan: boolean;
   last_plan_time: string | null;
   plan_interval_hours: number;
+  indicator_timeframe?: string | null;
+  direction_bias?: string | null;
+  enable_symbol_discovery?: boolean | null;
 }
 
 export interface CandleBar {
@@ -795,6 +798,7 @@ export interface PositionMeta {
 
 export interface PaperTradingPortfolio {
   cash: number;
+  initial_cash?: number | null;
   positions: Record<string, number>;
   entry_prices: Record<string, number>;
   last_prices: Record<string, number>;
@@ -928,9 +932,16 @@ export interface PaperTradingTradeSet {
   exit_trigger: string | null;
   category: string | null;
   winner: boolean;
-  // R68: risk metrics
+  // Risk / R-tracking
   stop_price_abs?: number | null;
+  target_price_abs?: number | null;
+  r_achieved?: number | null;
+  r_planned?: number | null;
   r_per_hour?: number | null;
+  target_source?: string | null;
+  target_structural_kind?: string | null;
+  stop_source?: string | null;
+  estimated_bars_to_resolution?: number | null;
 }
 
 export interface PaperTradingMetrics {

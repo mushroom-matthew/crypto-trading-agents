@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react';
+import { Component, type ErrorInfo, type ReactNode, lazy, Suspense, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BarChart3, Activity, Wallet, Brain, PlayCircle } from 'lucide-react';
 import { cn } from './lib/utils';
@@ -36,6 +36,50 @@ const AgentInspector = lazy(() =>
 const WalletReconciliation = lazy(() => import('./components/WalletReconciliation'));
 
 type Tab = 'backtest' | 'paper' | 'live' | 'wallets' | 'agents';
+
+class TabErrorBoundary extends Component<
+  { children: ReactNode; tabLabel: string },
+  { hasError: boolean; message: string | null }
+> {
+  constructor(props: { children: ReactNode; tabLabel: string }) {
+    super(props);
+    this.state = { hasError: false, message: null };
+  }
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : 'Unknown render error',
+    };
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo) {
+    // Keep details in console for debugging while still rendering a fallback.
+    console.error('Tab render error', { error, info, tab: this.props.tabLabel });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+          <p className="font-semibold">{this.props.tabLabel} failed to render.</p>
+          <p className="mt-1">
+            {this.state.message ?? 'Unexpected UI error. Check browser console for details.'}
+          </p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const TAB_LABELS: Record<Tab, string> = {
+  backtest: 'Backtest Control',
+  paper: 'Paper Trading',
+  live: 'Live Trading Monitor',
+  wallets: 'Wallet Reconciliation',
+  agents: 'Agent Inspector',
+};
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('backtest');
@@ -114,11 +158,13 @@ function App() {
         {/* Tab Content */}
         <div className="max-w-7xl mx-auto px-6 py-6">
           <Suspense fallback={<div className="text-sm text-gray-500">Loading...</div>}>
-            {activeTab === 'backtest' && <BacktestControl />}
-            {activeTab === 'paper' && <PaperTradingControl />}
-            {activeTab === 'live' && <LiveTradingMonitor />}
-            {activeTab === 'agents' && <AgentInspector />}
-            {activeTab === 'wallets' && <WalletReconciliation />}
+            <TabErrorBoundary key={activeTab} tabLabel={TAB_LABELS[activeTab]}>
+              {activeTab === 'backtest' && <BacktestControl />}
+              {activeTab === 'paper' && <PaperTradingControl />}
+              {activeTab === 'live' && <LiveTradingMonitor />}
+              {activeTab === 'agents' && <AgentInspector />}
+              {activeTab === 'wallets' && <WalletReconciliation />}
+            </TabErrorBoundary>
           </Suspense>
         </div>
       </div>

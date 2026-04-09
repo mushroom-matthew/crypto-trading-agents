@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -40,6 +40,7 @@ export function PaperTradingControl() {
   const [directionBias, setDirectionBias] = useState<string>('neutral');
   const [enableDiscovery, setEnableDiscovery] = useState(false);
   const [annotateScreenerShortlist, setAnnotateScreenerShortlist] = useState(false);
+  const [showConfigPanel, setShowConfigPanel] = useState(true);
 
   // Aggressive settings state (defaults match conservative settings)
   const [aggressiveSettings, setAggressiveSettings] = useState<AggressiveSettings>({
@@ -72,7 +73,11 @@ export function PaperTradingControl() {
 
   // Selected session
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
-    return localStorage.getItem('selectedPaperTradingSessionId');
+    try {
+      return localStorage.getItem('selectedPaperTradingSessionId');
+    } catch {
+      return null;
+    }
   });
 
   // Fetch strategies
@@ -90,6 +95,9 @@ export function PaperTradingControl() {
     retry: false,
   });
   const screenerPreflight = screenerPreflightQuery.data;
+  const screenerGroups = screenerPreflight?.shortlist?.groups ?? [];
+  const screenerMaxPerGroup = Number(screenerPreflight?.shortlist?.max_per_group ?? 0);
+  const screenerAnnotationApplied = screenerPreflight?.shortlist?.annotation_meta?.applied === true;
   const runScreenerNow = useMutation({
     mutationFn: () => screenerAPI.runOnce({ timeframes: ['1m', '5m', '15m', '1h', '6h'], lookback_bars: 50 }),
     onSuccess: async () => {
@@ -120,10 +128,10 @@ export function PaperTradingControl() {
   const { data: portfolio } = useQuery({
     queryKey: ['paper-trading-portfolio', selectedSessionId],
     queryFn: () => paperTradingAPI.getPortfolio(selectedSessionId!),
-    enabled: !!selectedSessionId && session?.status === 'running',
+    enabled: !!selectedSessionId,
     retry: false,
     refetchOnWindowFocus: false,
-    refetchInterval: 15000,
+    refetchInterval: session?.status === 'running' ? 15000 : false,
   });
 
   // Fetch current plan (refresh every 30s while running to catch replans)
@@ -145,7 +153,7 @@ export function PaperTradingControl() {
     refetchOnWindowFocus: false,
     refetchInterval: session?.status === 'running' ? 8000 : 20000,
   });
-  const activityEvents = activityData?.events ?? [];
+  const activityEvents = useMemo(() => activityData?.events ?? [], [activityData?.events]);
 
   // Track expanded trigger list
   const [showTriggers, setShowTriggers] = useState(false);
@@ -181,14 +189,61 @@ export function PaperTradingControl() {
     refetchOnWindowFocus: false,
     refetchInterval: session?.status === 'running' ? 60000 : false,
   });
+  const metricsSummary = sessionMetrics
+    ? {
+        totalTrades: Number(sessionMetrics.total_trades ?? 0),
+        winRatePct: Number(sessionMetrics.win_rate_pct ?? 0),
+        profitFactor: Number(sessionMetrics.profit_factor ?? 0),
+        avgRPerTrade: Number(sessionMetrics.avg_r_per_trade ?? 0),
+        maxDrawdownPct: Number(sessionMetrics.max_drawdown_pct ?? 0),
+        equityReturnPct: Number(sessionMetrics.equity_return_pct ?? 0),
+        policySkips: Number(sessionMetrics.policy_skips ?? 0),
+      }
+    : null;
+  const tradeSetSummary = tradeSetsData
+    ? {
+        totalCompletedTrades: Number(tradeSetsData.total_completed_trades ?? 0),
+        winRatePct: Number(tradeSetsData.win_rate_pct ?? 0),
+        totalNetPnl: Number(tradeSetsData.total_net_pnl ?? 0),
+      }
+    : null;
 
   // R68: auto-fill indicator_timeframe from screener preflight (unless user has overridden it)
   useEffect(() => {
     const suggested = screenerPreflight?.suggested_default_indicator_timeframe;
-    if (suggested && !userOverrodeTf) {
+    if (suggested && !userOverrodeTf && !selectedSessionId) {
       setIndicatorTimeframe(suggested);
     }
-  }, [screenerPreflight?.suggested_default_indicator_timeframe, userOverrodeTf]);
+  }, [screenerPreflight?.suggested_default_indicator_timeframe, selectedSessionId, userOverrodeTf]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !session) {
+      return;
+    }
+
+    if (session.symbols?.length) {
+      setSymbolsInput(session.symbols.join(', '));
+    }
+    if (typeof portfolio?.initial_cash === 'number' && Number.isFinite(portfolio.initial_cash)) {
+      setInitialCash(portfolio.initial_cash);
+    }
+    if (typeof session.plan_interval_hours === 'number' && Number.isFinite(session.plan_interval_hours) && session.plan_interval_hours > 0) {
+      setPlanIntervalHours(session.plan_interval_hours);
+    }
+    if (typeof session.indicator_timeframe === 'string' && session.indicator_timeframe) {
+      setIndicatorTimeframe(session.indicator_timeframe);
+    }
+    if (typeof session.direction_bias === 'string' && session.direction_bias) {
+      setDirectionBias(session.direction_bias);
+    }
+    if (typeof session.enable_symbol_discovery === 'boolean') {
+      setEnableDiscovery(session.enable_symbol_discovery);
+    }
+  }, [
+    selectedSessionId,
+    session,
+    portfolio?.initial_cash,
+  ]);
 
   // Chart state
   const [chartSymbol, setChartSymbol] = useState('BTC-USD');
@@ -272,7 +327,7 @@ export function PaperTradingControl() {
       }
 
       // R68: derive screener_regime from the top candidate's group in the preflight
-      const screenerRegime = screenerPreflight?.shortlist?.groups?.[0]?.hypothesis ?? null;
+      const screenerRegime = screenerGroups[0]?.hypothesis ?? null;
 
       const config: PaperTradingSessionConfig = {
         symbols,
@@ -322,6 +377,14 @@ export function PaperTradingControl() {
   const isStarting = startSession.isPending;
   const isLiteralFalseRule = (rule?: string | null) => (rule || '').trim().toLowerCase() === 'false';
   const screenerErrorStatus = (screenerPreflightQuery.error as any)?.response?.status as number | undefined;
+  const summarySymbols = session?.symbols?.length
+    ? session.symbols
+    : symbolsInput.split(',').map((s) => s.trim()).filter(Boolean);
+  const summaryInitialCash = portfolio?.initial_cash ?? initialCash;
+  const summaryTimeframe = session?.indicator_timeframe ?? indicatorTimeframe;
+  const summaryDirection = session?.direction_bias ?? directionBias;
+  const summaryPlanInterval = session?.plan_interval_hours ?? planIntervalHours;
+  const summaryDiscovery = session?.enable_symbol_discovery ?? enableDiscovery;
   const applyScreenerCandidateToForm = (item: ScreenerRecommendationItem) => {
     setSymbolsInput((prev) => mergePrimarySymbol(prev, item.symbol));
     const strategyId = mapScreenerHypothesisToStrategyId(item.template_id || item.hypothesis, strategies);
@@ -354,16 +417,29 @@ export function PaperTradingControl() {
     resolvedAsOf: structureData?.resolved_as_of ?? null,
     lookupMode: structureData?.lookup_mode ?? null,
   }, selectedStructureSnapshot);
-  const chartExecutions = activityEvents
-    .filter((ev) => ev.type === 'order_executed' && ev.payload?.symbol === chartSymbol)
-    .map((ev) => ({
-      ts: ev.ts,
-      side: String(ev.payload?.side ?? '').toLowerCase(),
-      intent: String(ev.payload?.intent ?? ''),
-      price: Number(ev.payload?.price ?? 0),
-      triggerId: String(ev.payload?.trigger_id ?? ev.payload?.reason ?? ''),
-    }))
-    .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+  const chartExecutions = useMemo(() => (
+    activityEvents
+      .filter((ev) => ev.type === 'order_executed' && ev.payload?.symbol === chartSymbol)
+      .map((ev) => ({
+        ts: ev.ts,
+        side: String(ev.payload?.side ?? '').toLowerCase(),
+        intent: String(ev.payload?.intent ?? ''),
+        price: Number(ev.payload?.price ?? 0),
+        triggerId: String(ev.payload?.trigger_id ?? ev.payload?.reason ?? ''),
+      }))
+      .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
+  ), [activityEvents, chartSymbol]);
+  const chartTrades = useMemo(
+    () => trades.filter((t) => t.symbol === chartSymbol),
+    [trades, chartSymbol],
+  );
+  const chartOpenPosition = useMemo(() => (
+    selectedPositionQty !== 0 ? {
+      openedAt: selectedPositionMeta?.opened_at ?? null,
+      entrySide: selectedPositionMeta?.entry_side ?? null,
+      entryPrice: selectedEntryPrice,
+    } : null
+  ), [selectedEntryPrice, selectedPositionMeta?.entry_side, selectedPositionMeta?.opened_at, selectedPositionQty]);
 
   return (
     <div className="space-y-6">
@@ -383,8 +459,61 @@ export function PaperTradingControl() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Configuration Form */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-          <h2 className="text-xl font-semibold mb-4">Session Configuration</h2>
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold">Session Configuration</h2>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                {selectedSessionId && (
+                  <>
+                    <span className={cn(
+                      'px-2 py-1 rounded-full border font-mono',
+                      isRunning
+                        ? 'bg-green-100 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-800'
+                        : 'bg-gray-100 text-gray-600 border-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:border-gray-600'
+                    )}>
+                      {session?.status?.toUpperCase() ?? 'LOADING'}
+                    </span>
+                    <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 font-mono bg-white/90 dark:bg-gray-900/40">
+                      {selectedSessionId}
+                    </span>
+                  </>
+                )}
+                {summarySymbols.length > 0 && (
+                  <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-900/40">
+                    {summarySymbols.join(', ')}
+                  </span>
+                )}
+                <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-900/40">
+                  {formatCurrency(summaryInitialCash)}
+                </span>
+                <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-900/40 font-mono">
+                  {summaryTimeframe}
+                </span>
+                <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-900/40">
+                  Every {summaryPlanInterval}h
+                </span>
+                <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-900/40">
+                  {summaryDirection}
+                </span>
+                {summaryDiscovery && (
+                  <span className="px-2 py-1 rounded-full border border-sky-200 text-sky-700 dark:border-sky-800 dark:text-sky-300 bg-sky-50 dark:bg-sky-900/20">
+                    Discovery on
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowConfigPanel((prev) => !prev)}
+              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 text-sm hover:bg-gray-50 dark:hover:bg-gray-700/50"
+              aria-expanded={showConfigPanel}
+            >
+              {showConfigPanel ? 'Collapse' : 'Expand'}
+              {showConfigPanel ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+          </div>
 
+          {showConfigPanel && (
           <div className="space-y-4">
             {/* Session Selector */}
             <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
@@ -394,7 +523,11 @@ export function PaperTradingControl() {
                 onChange={(e) => {
                   const id = e.target.value || null;
                   setSelectedSessionId(id);
-                  if (id) localStorage.setItem('selectedPaperTradingSessionId', id);
+                  if (id) {
+                    localStorage.setItem('selectedPaperTradingSessionId', id);
+                  } else {
+                    localStorage.removeItem('selectedPaperTradingSessionId');
+                  }
                 }}
                 className="w-full px-3 py-2 border border-green-300 dark:border-green-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-green-500 focus:border-transparent"
               >
@@ -487,25 +620,25 @@ export function PaperTradingControl() {
                 </p>
               )}
 
-              {screenerPreflight && screenerPreflight.shortlist.groups.length > 0 && (
+              {screenerPreflight && screenerGroups.length > 0 && (
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="px-2 py-1 rounded-full bg-white/90 dark:bg-gray-800 border border-sky-200 dark:border-sky-700 font-mono">
                       {formatDateTime(screenerPreflight.as_of)}
                     </span>
                     <span className="px-2 py-1 rounded-full bg-white/90 dark:bg-gray-800 border border-sky-200 dark:border-sky-700">
-                      {screenerPreflight.shortlist.groups.length} groups
+                      {screenerGroups.length} groups
                     </span>
                     <span className="px-2 py-1 rounded-full bg-white/90 dark:bg-gray-800 border border-sky-200 dark:border-sky-700">
-                      up to {screenerPreflight.shortlist.max_per_group}/group
+                      up to {screenerMaxPerGroup}/group
                     </span>
                     <span className={cn(
                       'px-2 py-1 rounded-full border text-[11px]',
-                      screenerPreflight.shortlist.annotation_meta?.applied
+                      screenerAnnotationApplied
                         ? 'bg-violet-100 text-violet-700 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-800'
                         : 'bg-white/90 dark:bg-gray-800 border-sky-200 dark:border-sky-700 text-gray-600 dark:text-gray-300'
                     )}>
-                      {screenerPreflight.shortlist.annotation_meta?.applied ? 'LLM annotated' : 'Deterministic'}
+                      {screenerAnnotationApplied ? 'LLM annotated' : 'Deterministic'}
                     </span>
                     {screenerPreflight.suggested_default_symbol && (
                       <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
@@ -515,7 +648,7 @@ export function PaperTradingControl() {
                   </div>
 
                   <div className="grid grid-cols-1 gap-3 max-h-96 overflow-y-auto pr-1">
-                    {screenerPreflight.shortlist.groups.map((group) => (
+                    {screenerGroups.map((group) => (
                       <div
                         key={`${group.hypothesis}:${group.direction_bias ?? 'neutral'}:${group.timeframe}`}
                         className="rounded-lg border border-sky-200/80 dark:border-sky-800 p-3 bg-white/70 dark:bg-gray-900/30"
@@ -568,7 +701,7 @@ export function PaperTradingControl() {
                                       {item.confidence}
                                     </span>
                                     <span className="text-[11px] text-gray-500 font-mono">
-                                      score {item.composite_score.toFixed(2)} · #{item.rank_global}
+                                      score {Number(item.composite_score ?? 0).toFixed(2)} · #{item.rank_global}
                                     </span>
                                   </div>
                                   <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">
@@ -786,6 +919,7 @@ export function PaperTradingControl() {
               <p className="text-red-500 text-sm">{(startSession.error as Error).message}</p>
             )}
           </div>
+          )}
         </div>
 
         {/* Status & Portfolio */}
@@ -831,16 +965,16 @@ export function PaperTradingControl() {
           )}
 
           {/* R68: Session Metrics Bar */}
-          {sessionMetrics && sessionMetrics.total_trades > 0 && (
+          {metricsSummary && metricsSummary.totalTrades > 0 && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow px-4 py-2 flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
-              <span><strong className="text-gray-900 dark:text-gray-100">{sessionMetrics.total_trades}</strong> trades</span>
-              <span><strong className={sessionMetrics.win_rate_pct >= 50 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.win_rate_pct.toFixed(0)}%</strong> win</span>
-              <span>P-factor: <strong className={sessionMetrics.profit_factor >= 1 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.profit_factor.toFixed(2)}</strong></span>
-              <span>Avg R: <strong className={sessionMetrics.avg_r_per_trade >= 0 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.avg_r_per_trade >= 0 ? '+' : ''}{sessionMetrics.avg_r_per_trade.toFixed(2)}R</strong></span>
-              <span>Max DD: <strong className="text-amber-600">-{sessionMetrics.max_drawdown_pct.toFixed(1)}%</strong></span>
-              <span>Return: <strong className={sessionMetrics.equity_return_pct >= 0 ? 'text-green-600' : 'text-red-600'}>{sessionMetrics.equity_return_pct >= 0 ? '+' : ''}{sessionMetrics.equity_return_pct.toFixed(1)}%</strong></span>
-              {sessionMetrics.policy_skips > 0 && (
-                <span className="text-gray-400">⏭ {sessionMetrics.policy_skips} gate skips</span>
+              <span><strong className="text-gray-900 dark:text-gray-100">{metricsSummary.totalTrades}</strong> trades</span>
+              <span><strong className={metricsSummary.winRatePct >= 50 ? 'text-green-600' : 'text-red-600'}>{metricsSummary.winRatePct.toFixed(0)}%</strong> win</span>
+              <span>P-factor: <strong className={metricsSummary.profitFactor >= 1 ? 'text-green-600' : 'text-red-600'}>{metricsSummary.profitFactor.toFixed(2)}</strong></span>
+              <span>Avg R: <strong className={metricsSummary.avgRPerTrade >= 0 ? 'text-green-600' : 'text-red-600'}>{metricsSummary.avgRPerTrade >= 0 ? '+' : ''}{metricsSummary.avgRPerTrade.toFixed(2)}R</strong></span>
+              <span>Max DD: <strong className="text-amber-600">-{metricsSummary.maxDrawdownPct.toFixed(1)}%</strong></span>
+              <span>Return: <strong className={metricsSummary.equityReturnPct >= 0 ? 'text-green-600' : 'text-red-600'}>{metricsSummary.equityReturnPct >= 0 ? '+' : ''}{metricsSummary.equityReturnPct.toFixed(1)}%</strong></span>
+              {metricsSummary.policySkips > 0 && (
+                <span className="text-gray-400">⏭ {metricsSummary.policySkips} gate skips</span>
               )}
             </div>
           )}
@@ -882,10 +1016,21 @@ export function PaperTradingControl() {
                   const entryPx = portfolio.entry_prices[symbol] || 0;
                   const lastPx = portfolio.last_prices[symbol] || entryPx;
                   const meta = portfolio.position_meta?.[symbol];
+                  const openedAt = meta?.opened_at ?? null;
                   const stopPx = meta?.stop_price_abs ?? null;
                   const targetPx = meta?.target_price_abs ?? null;
                   const side = meta?.entry_side ?? 'long';
                   const category = meta?.entry_category ?? null;
+                  // R-tracking from merged live state (updated per bar by workflow)
+                  const liveCurrentR: number | null = meta?.current_R ?? null;
+                  const mfeR: number | null = meta?.mfe_r ?? null;
+                  const tradeState: string | null = meta?.trade_state ?? null;
+                  const r1Reached: boolean = meta?.r1_reached ?? false;
+                  const r2Reached: boolean = meta?.r2_reached ?? false;
+                  const r3Reached: boolean = meta?.r3_reached ?? false;
+                  const positionFraction: number = meta?.position_fraction ?? 1.0;
+                  const targetSource: string | null = meta?.target_source ?? null;
+                  const targetKind: string | null = meta?.target_structural_kind ?? null;
                   const absQty = Math.abs(qty);
                   const notional = entryPx * absQty;
                   const pnlAbs = (lastPx - entryPx) * absQty * (side === 'short' ? -1 : 1);
@@ -894,9 +1039,12 @@ export function PaperTradingControl() {
                   const stopDistPct = stopPx !== null && lastPx > 0 ? Math.abs(lastPx - stopPx) / lastPx * 100 : null;
                   const tgtDistPct = targetPx !== null && lastPx > 0 ? Math.abs(targetPx - lastPx) / lastPx * 100 : null;
                   const stopSpan = stopPx !== null ? Math.abs(entryPx - stopPx) : null;
-                  const currentR = stopSpan && stopSpan > 0
-                    ? (side === 'short' ? (entryPx - lastPx) : (lastPx - entryPx)) / stopSpan
-                    : null;
+                  // Use backend current_R if available, else compute from price
+                  const currentR: number | null = liveCurrentR !== null ? liveCurrentR : (
+                    stopSpan && stopSpan > 0
+                      ? (side === 'short' ? (entryPx - lastPx) : (lastPx - entryPx)) / stopSpan
+                      : null
+                  );
                   const rrRatio = stopSpan && stopSpan > 0 && targetPx !== null
                     ? Math.abs(targetPx - entryPx) / stopSpan
                     : null;
@@ -908,7 +1056,7 @@ export function PaperTradingControl() {
                   if (riskAbs !== null) totalAtRisk += riskAbs;
                   if (stopPx === null) positionsWithoutStop++;
 
-                  return { symbol, qty: absQty, entryPx, lastPx, meta, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio };
+                  return { symbol, qty: absQty, entryPx, lastPx, meta, openedAt, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio, mfeR, tradeState, r1Reached, r2Reached, r3Reached, positionFraction, targetSource, targetKind };
                 });
 
                 const exposurePct = portfolio.total_equity > 0 ? totalExposure / portfolio.total_equity * 100 : 0;
@@ -918,7 +1066,7 @@ export function PaperTradingControl() {
                   <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
                     <p className="text-sm font-medium mb-3">Open Positions</p>
                     <div className="space-y-3">
-                      {posData.map(({ symbol, qty, entryPx, lastPx, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio }) => (
+                      {posData.map(({ symbol, qty, entryPx, lastPx, openedAt, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio, mfeR, tradeState, r1Reached, r2Reached, r3Reached, positionFraction, targetSource, targetKind }) => (
                         <div key={symbol} className="text-sm rounded-md border border-gray-200 dark:border-gray-700 p-2.5 space-y-1.5">
                           {/* Header row: symbol + badges */}
                           <div className="flex items-center gap-2 flex-wrap">
@@ -934,6 +1082,33 @@ export function PaperTradingControl() {
                             {category && (
                               <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400">
                                 {category}
+                              </span>
+                            )}
+                            {/* Trade state badge */}
+                            {tradeState && tradeState !== 'EARLY' && (
+                              <span className={cn(
+                                'text-xs font-semibold px-1.5 py-0.5 rounded',
+                                tradeState === 'TRAIL' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' :
+                                tradeState === 'EXTENDED' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' :
+                                'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                              )}>
+                                {tradeState}
+                              </span>
+                            )}
+                            {/* R-milestone badges */}
+                            {r3Reached && <span className="text-xs font-bold px-1 py-0.5 rounded bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300">3R✓</span>}
+                            {r2Reached && !r3Reached && <span className="text-xs font-bold px-1 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">2R✓</span>}
+                            {r1Reached && !r2Reached && <span className="text-xs font-bold px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">1R✓</span>}
+                            {/* Partial exit indicator */}
+                            {positionFraction < 1.0 && (
+                              <span className="text-xs text-gray-500">({(positionFraction * 100).toFixed(0)}% remaining)</span>
+                            )}
+                            {openedAt && (
+                              <span
+                                className="text-xs px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                                title={`Opened ${formatDateTime(openedAt)}`}
+                              >
+                                Open {formatOpenDuration(openedAt)}
                               </span>
                             )}
                           </div>
@@ -974,7 +1149,9 @@ export function PaperTradingControl() {
                           {targetPx !== null && (
                             <div className="flex items-center gap-2 text-xs text-green-600 dark:text-green-400 font-mono">
                               <span>↑ Target</span>
-                              <span className="font-semibold">{formatCurrency(targetPx)}</span>
+                              <span className="font-semibold" title={targetSource === 'structural' ? `Structural level (${targetKind})` : 'Arithmetic target'}>
+                                {formatCurrency(targetPx)}{targetSource === 'structural' && <span className="ml-0.5 text-sky-500 text-xs">⬡</span>}
+                              </span>
                               {tgtDistPct !== null && (
                                 <span className="text-gray-500">({tgtDistPct.toFixed(1)}% away)</span>
                               )}
@@ -984,9 +1161,23 @@ export function PaperTradingControl() {
                               {currentR !== null && (
                                 <span className={cn(
                                   'ml-auto font-semibold',
-                                  currentR >= 0 ? 'text-green-600' : 'text-red-500'
+                                  currentR >= 2.0 ? 'text-yellow-500' : currentR >= 0 ? 'text-green-600' : 'text-red-500'
                                 )}>
-                                  {currentR >= 0 ? '+' : ''}{currentR.toFixed(2)}r
+                                  {currentR >= 0 ? '+' : ''}{currentR.toFixed(2)}R
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {/* MFE row — only show when we have backend R-tracking data */}
+                          {mfeR !== null && mfeR > 0 && (
+                            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                              <span>Peak MFE</span>
+                              <span className={cn('font-mono font-semibold', mfeR >= 2.0 ? 'text-yellow-500' : 'text-green-500')}>
+                                +{mfeR.toFixed(2)}R
+                              </span>
+                              {currentR !== null && mfeR > 0 && mfeR !== currentR && (
+                                <span className="text-gray-400 text-xs">
+                                  (now {currentR >= 0 ? '+' : ''}{currentR.toFixed(2)}R)
                                 </span>
                               )}
                             </div>
@@ -994,8 +1185,8 @@ export function PaperTradingControl() {
                           {/* Current R when target not set but stop is */}
                           {targetPx === null && currentR !== null && (
                             <div className="text-xs text-gray-500 dark:text-gray-400">
-                              Current R: <span className={cn('font-semibold', currentR >= 0 ? 'text-green-600' : 'text-red-500')}>
-                                {currentR >= 0 ? '+' : ''}{currentR.toFixed(2)}r
+                              Current R: <span className={cn('font-semibold', currentR >= 2.0 ? 'text-yellow-500' : currentR >= 0 ? 'text-green-600' : 'text-red-500')}>
+                                {currentR >= 0 ? '+' : ''}{currentR.toFixed(2)}R
                               </span>
                             </div>
                           )}
@@ -1256,18 +1447,14 @@ export function PaperTradingControl() {
             <div className="xl:col-span-2">
               <CandlestickChart
                 candles={chartCandles}
-                trades={trades.filter((t) => t.symbol === chartSymbol)}
+                trades={chartTrades}
                 executions={chartExecutions}
                 timeframe={chartTimeframe}
                 selectedCandleTime={selectedChartCandleTime}
                 onSelectCandle={setSelectedChartCandleTime}
                 stopPrice={selectedPositionMeta?.stop_price_abs ?? null}
                 targetPrice={selectedPositionMeta?.target_price_abs ?? null}
-                openPosition={selectedPositionQty !== 0 ? {
-                  openedAt: selectedPositionMeta?.opened_at ?? null,
-                  entrySide: selectedPositionMeta?.entry_side ?? null,
-                  entryPrice: selectedEntryPrice,
-                } : null}
+                openPosition={chartOpenPosition}
               />
             </div>
             <div className="space-y-3">
@@ -1415,19 +1602,19 @@ export function PaperTradingControl() {
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold">Trade Sets</h2>
-            {tradeSetsData && (
+            {tradeSetSummary && (
               <div className="flex gap-4 text-sm">
                 <span className="text-gray-500">
-                  <span className="font-semibold text-gray-800 dark:text-gray-200">{tradeSetsData.total_completed_trades}</span> trades
+                  <span className="font-semibold text-gray-800 dark:text-gray-200">{tradeSetSummary.totalCompletedTrades}</span> trades
                 </span>
                 <span className="text-gray-500">
-                  Win rate: <span className={cn('font-semibold', tradeSetsData.win_rate_pct >= 50 ? 'text-green-600' : 'text-red-600')}>
-                    {tradeSetsData.win_rate_pct.toFixed(1)}%
+                  Win rate: <span className={cn('font-semibold', tradeSetSummary.winRatePct >= 50 ? 'text-green-600' : 'text-red-600')}>
+                    {tradeSetSummary.winRatePct.toFixed(1)}%
                   </span>
                 </span>
                 <span className="text-gray-500">
-                  Net P&L: <span className={cn('font-semibold', tradeSetsData.total_net_pnl >= 0 ? 'text-green-600' : 'text-red-600')}>
-                    {formatCurrency(tradeSetsData.total_net_pnl)}
+                  Net P&L: <span className={cn('font-semibold', tradeSetSummary.totalNetPnl >= 0 ? 'text-green-600' : 'text-red-600')}>
+                    {formatCurrency(tradeSetSummary.totalNetPnl)}
                   </span>
                 </span>
               </div>
@@ -1439,16 +1626,14 @@ export function PaperTradingControl() {
                 <tr className="border-b border-gray-200 dark:border-gray-700 text-xs text-gray-500">
                   <th className="text-left py-2 px-2">Symbol</th>
                   <th className="text-left py-2 px-2">Entry</th>
-                  <th className="text-left py-2 px-2">Exit</th>
                   <th className="text-right py-2 px-2">Hold</th>
                   <th className="text-right py-2 px-2">Entry Px</th>
                   <th className="text-right py-2 px-2">Exit Px</th>
-                  <th className="text-right py-2 px-2">Qty</th>
-                  <th className="text-right py-2 px-2">Fee</th>
-                  <th className="text-right py-2 px-2">Net P&L</th>
-                  <th className="text-right py-2 px-2">%</th>
-                  <th className="text-right py-2 px-2">R/hr</th>
                   <th className="text-right py-2 px-2">Stop</th>
+                  <th className="text-right py-2 px-2">Target</th>
+                  <th className="text-right py-2 px-2">R</th>
+                  <th className="text-right py-2 px-2">Plan R:R</th>
+                  <th className="text-right py-2 px-2">Net P&L</th>
                   <th className="text-left py-2 px-2">Setup</th>
                 </tr>
               </thead>
@@ -1457,35 +1642,39 @@ export function PaperTradingControl() {
                   const holdStr = ts.hold_minutes >= 60
                     ? `${(ts.hold_minutes / 60).toFixed(1)}h`
                     : `${ts.hold_minutes.toFixed(0)}m`;
-                  const rph = ts.r_per_hour;
-                  const rphStr = rph != null ? `${rph >= 0 ? '+' : ''}${rph.toFixed(2)}` : '—';
-                  const rphClass = rph == null ? 'text-gray-400' : rph >= 0 ? 'text-green-600' : 'text-red-600';
+                  const rAchieved = ts.r_achieved;
+                  const rAchievedStr = rAchieved != null ? `${rAchieved >= 0 ? '+' : ''}${rAchieved.toFixed(2)}R` : '—';
+                  const rAchievedClass = rAchieved == null ? 'text-gray-400' : rAchieved >= 1.0 ? 'text-green-600 font-bold' : rAchieved >= 0 ? 'text-green-500' : 'text-red-600';
+                  const rPlanned = ts.r_planned;
+                  const isStructuralTarget = ts.target_source === 'structural';
                   return (
                     <tr key={idx} className={cn(
                       'border-b border-gray-100 dark:border-gray-700/50 text-xs',
                       ts.winner ? 'bg-green-50/30 dark:bg-green-900/10' : 'bg-red-50/30 dark:bg-red-900/10'
                     )}>
                       <td className="py-2 px-2 font-mono font-medium">{ts.symbol.replace('-USD', '')}</td>
-                      <td className="py-2 px-2 text-gray-500">{formatDateTime(ts.entry_time)}</td>
-                      <td className="py-2 px-2 text-gray-500">{formatDateTime(ts.exit_time)}</td>
-                      <td className="py-2 px-2 text-right font-mono">{holdStr}</td>
+                      <td className="py-2 px-2 text-gray-500">{formatDateTime(ts.entry_time)}<span className="ml-1 text-gray-400">{holdStr}</span></td>
+                      <td className="py-2 px-2 text-right font-mono text-gray-400">{holdStr}</td>
                       <td className="py-2 px-2 text-right font-mono">{formatCurrency(ts.entry_price)}</td>
-                      <td className="py-2 px-2 text-right font-mono">{formatCurrency(ts.exit_price)}</td>
-                      <td className="py-2 px-2 text-right font-mono">{ts.qty.toFixed(4)}</td>
-                      <td className="py-2 px-2 text-right text-gray-500">{formatCurrency(ts.fee)}</td>
+                      <td className={cn('py-2 px-2 text-right font-mono', ts.winner ? 'text-green-600' : 'text-red-600')}>{formatCurrency(ts.exit_price)}</td>
+                      <td className="py-2 px-2 text-right font-mono text-red-500 text-xs">
+                        {ts.stop_price_abs != null ? formatCurrency(ts.stop_price_abs) : '—'}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono text-green-600 text-xs" title={isStructuralTarget ? `Structural (${ts.target_structural_kind})` : 'Arithmetic'}>
+                        {ts.target_price_abs != null ? (
+                          <span>{formatCurrency(ts.target_price_abs)}{isStructuralTarget && <span className="ml-0.5 text-sky-500">⬡</span>}</span>
+                        ) : '—'}
+                      </td>
+                      <td className={cn('py-2 px-2 text-right font-mono', rAchievedClass)}>
+                        {rAchievedStr}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono text-gray-400">
+                        {rPlanned != null ? `1:${rPlanned.toFixed(1)}` : '—'}
+                      </td>
                       <td className={cn('py-2 px-2 text-right font-semibold', ts.winner ? 'text-green-600' : 'text-red-600')}>
                         {formatCurrency(ts.net_pnl)}
                       </td>
-                      <td className={cn('py-2 px-2 text-right font-semibold', ts.winner ? 'text-green-600' : 'text-red-600')}>
-                        {ts.pnl_pct >= 0 ? '+' : ''}{ts.pnl_pct.toFixed(2)}%
-                      </td>
-                      <td className={cn('py-2 px-2 text-right font-mono font-semibold', rphClass)}>
-                        {rphStr}
-                      </td>
-                      <td className="py-2 px-2 text-right font-mono text-gray-500">
-                        {ts.stop_price_abs != null ? formatCurrency(ts.stop_price_abs) : '—'}
-                      </td>
-                      <td className="py-2 px-2 text-gray-500 font-mono truncate max-w-32" title={ts.entry_trigger ?? ''}>
+                      <td className="py-2 px-2 text-gray-500 font-mono truncate max-w-28" title={ts.entry_trigger ?? ''}>
                         {ts.category ?? ts.entry_trigger ?? '-'}
                       </td>
                     </tr>
@@ -1497,8 +1686,8 @@ export function PaperTradingControl() {
         </div>
       )}
 
-      {/* Trade History */}
-      {trades.length > 0 && (
+      {/* Trade History fallback when no grouped trade sets are available */}
+      {tradeSets.length === 0 && trades.length > 0 && (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
           <h2 className="text-xl font-semibold mb-4">Trade History</h2>
           <div className="overflow-x-auto">
@@ -1542,6 +1731,33 @@ export function PaperTradingControl() {
       <PromptEditor />
     </div>
   );
+}
+
+function formatOpenDuration(openedAt: string): string {
+  const openedTs = new Date(openedAt).getTime();
+  if (!Number.isFinite(openedTs)) {
+    return 'N/A';
+  }
+
+  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - openedTs) / 60000));
+  if (elapsedMinutes < 1) {
+    return '<1m';
+  }
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes}m`;
+  }
+
+  const days = Math.floor(elapsedMinutes / 1440);
+  const hours = Math.floor((elapsedMinutes % 1440) / 60);
+  const minutes = elapsedMinutes % 60;
+
+  if (days > 0) {
+    return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  }
+  if (minutes === 0) {
+    return `${hours}h`;
+  }
+  return `${hours}h ${minutes}m`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1858,6 +2074,17 @@ interface CandlestickChartProps {
   } | null;
 }
 
+interface PaperCandlestickTooltipDatum {
+  payload?: {
+    time: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume?: number;
+  };
+}
+
 function inferPriceDecimals(min: number, max: number): number {
   const span = Math.abs(max - min);
   if (!Number.isFinite(span) || span <= 0) return 2;
@@ -1932,7 +2159,37 @@ function recommendedPlanIntervalHours(timeframe: string): number | null {
   return null;
 }
 
-function CandlestickChart({
+function PaperCandlestickTooltip({
+  active,
+  payload,
+  axisDecimals,
+}: {
+  active?: boolean;
+  payload?: PaperCandlestickTooltipDatum[];
+  axisDecimals: number;
+}) {
+  if (!active || !payload?.length) return null;
+  const datum = payload[0]?.payload;
+  if (!datum) return null;
+
+  return (
+    <div className="bg-gray-900 text-white text-xs rounded px-3 py-2 shadow-lg">
+      <p className="font-semibold mb-1">
+        {new Date(datum.time).toLocaleString([], {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })}
+      </p>
+      <p>O: {formatPriceWithDecimals(Number(datum.open), axisDecimals)}  H: {formatPriceWithDecimals(Number(datum.high), axisDecimals)}</p>
+      <p>L: {formatPriceWithDecimals(Number(datum.low), axisDecimals)}  C: {formatPriceWithDecimals(Number(datum.close), axisDecimals)}</p>
+      <p className="text-gray-400">Vol: {datum.volume?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+    </div>
+  );
+}
+
+const CandlestickChart = memo(function CandlestickChart({
   candles,
   trades,
   executions = [],
@@ -1943,16 +2200,8 @@ function CandlestickChart({
   targetPrice,
   openPosition,
 }: CandlestickChartProps) {
-  if (candles.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
-        Loading candles…
-      </div>
-    );
-  }
-
   // Build chart data with OHLCV + computed bar range for Recharts Bar
-  const data = candles.map((c) => {
+  const data = useMemo(() => candles.map((c) => {
     const isUp = c.close >= c.open;
     const bodyLow = Math.min(c.open, c.close);
     const bodyHigh = Math.max(c.open, c.close);
@@ -1962,81 +2211,98 @@ function CandlestickChart({
       bodyRange: [bodyLow, bodyHigh] as [number, number],
       wickRange: [c.low, c.high] as [number, number],
     };
-  });
+  }), [candles]);
+  const openPositionOpenedAt = openPosition?.openedAt ?? null;
+  const openPositionEntryPrice = openPosition?.entryPrice ?? null;
+  const openPositionEntrySide = openPosition?.entrySide ?? null;
 
   const firstCandleMs = data[0]?.time ?? 0;
   const lastCandleMs = data[data.length - 1]?.time ?? 0;
 
   // Build execution markers for trades in visible range.
-  const markerInputs = executions.length > 0
-    ? executions.map((e) => ({ ts: e.ts, side: e.side, intent: (e.intent || '').toLowerCase() }))
-    : trades.map((t) => ({ ts: t.timestamp, side: (t.side || '').toLowerCase(), intent: '' }));
-  const executionMarkers: { time: number; side: string; intent: string }[] = [];
-  for (const m of markerInputs) {
-    const markMs = new Date(m.ts).getTime();
-    if (!Number.isFinite(markMs) || markMs < firstCandleMs || markMs > lastCandleMs) {
-      continue;
-    }
-    let closestIdx = 0;
-    let minDiff = Infinity;
-    data.forEach((d, i) => {
-      const diff = Math.abs(d.time - markMs);
-      if (diff < minDiff) { minDiff = diff; closestIdx = i; }
-    });
-    executionMarkers.push({
-      time: data[closestIdx]?.time,
-      side: m.side,
-      intent: m.intent,
-    });
-  }
+  const executionMarkers = useMemo(() => {
+    const markerInputs = executions.length > 0
+      ? executions.map((e) => ({ ts: e.ts, side: e.side, intent: (e.intent || '').toLowerCase() }))
+      : trades.map((t) => ({ ts: t.timestamp, side: (t.side || '').toLowerCase(), intent: '' }));
+    const markers: { time: number; side: string; intent: string }[] = [];
 
-  let openEntryMarkerTime: number | null = null;
-  if (openPosition?.openedAt) {
-    const openedMs = new Date(openPosition.openedAt).getTime();
-    if (Number.isFinite(openedMs) && openedMs >= firstCandleMs && openedMs <= lastCandleMs) {
+    for (const m of markerInputs) {
+      const markMs = new Date(m.ts).getTime();
+      if (!Number.isFinite(markMs) || markMs < firstCandleMs || markMs > lastCandleMs) {
+        continue;
+      }
       let closestIdx = 0;
       let minDiff = Infinity;
-      data.forEach((d, i) => {
-        const diff = Math.abs(d.time - openedMs);
-        if (diff < minDiff) { minDiff = diff; closestIdx = i; }
+      for (let i = 0; i < data.length; i += 1) {
+        const diff = Math.abs(data[i].time - markMs);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = i;
+        }
+      }
+      markers.push({
+        time: data[closestIdx]?.time,
+        side: m.side,
+        intent: m.intent,
       });
-      openEntryMarkerTime = data[closestIdx]?.time ?? null;
     }
-  }
 
-  const levelValues = [
-    openPosition?.entryPrice,
-    stopPrice,
-    targetPrice,
-  ].filter((v): v is number => v != null && Number.isFinite(v));
-  const rawMin = Math.min(...candles.map((c) => c.low), ...(levelValues.length ? levelValues : [Infinity]));
-  const rawMax = Math.max(...candles.map((c) => c.high), ...(levelValues.length ? levelValues : [-Infinity]));
-  const baseSpan = Math.max(rawMax - rawMin, Math.abs(rawMax) * 0.002, 1e-9);
-  const yPad = baseSpan * 0.03;
-  const yMin = rawMin >= 0 ? Math.max(0, rawMin - yPad) : rawMin - yPad;
-  const yMax = rawMax + yPad;
-  const axisDecimals = inferPriceDecimals(yMin, yMax);
+    return markers;
+  }, [data, executions, firstCandleMs, lastCandleMs, trades]);
 
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (!active || !payload?.length) return null;
-    const d = payload[0]?.payload;
-    if (!d) return null;
+  const openEntryMarkerTime = useMemo(() => {
+    if (!openPositionOpenedAt) {
+      return null;
+    }
+    const openedMs = new Date(openPositionOpenedAt).getTime();
+    if (!Number.isFinite(openedMs) || openedMs < firstCandleMs || openedMs > lastCandleMs) {
+      return null;
+    }
+
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < data.length; i += 1) {
+      const diff = Math.abs(data[i].time - openedMs);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIdx = i;
+      }
+    }
+    return data[closestIdx]?.time ?? null;
+  }, [data, firstCandleMs, lastCandleMs, openPositionOpenedAt]);
+
+  const { yMin, yMax, axisDecimals } = useMemo(() => {
+    const levelValues = [
+      openPositionEntryPrice,
+      stopPrice,
+      targetPrice,
+    ].filter((v): v is number => v != null && Number.isFinite(v));
+    const rawMin = Math.min(...candles.map((c) => c.low), ...(levelValues.length ? levelValues : [Infinity]));
+    const rawMax = Math.max(...candles.map((c) => c.high), ...(levelValues.length ? levelValues : [-Infinity]));
+    const baseSpan = Math.max(rawMax - rawMin, Math.abs(rawMax) * 0.002, 1e-9);
+    const yPad = baseSpan * 0.03;
+    const nextYMin = rawMin >= 0 ? Math.max(0, rawMin - yPad) : rawMin - yPad;
+    const nextYMax = rawMax + yPad;
+    return {
+      yMin: nextYMin,
+      yMax: nextYMax,
+      axisDecimals: inferPriceDecimals(nextYMin, nextYMax),
+    };
+  }, [candles, openPositionEntryPrice, stopPrice, targetPrice]);
+  const renderTooltip = useMemo(
+    () => (props: { active?: boolean; payload?: PaperCandlestickTooltipDatum[] }) => (
+      <PaperCandlestickTooltip {...props} axisDecimals={axisDecimals} />
+    ),
+    [axisDecimals],
+  );
+
+  if (candles.length === 0) {
     return (
-      <div className="bg-gray-900 text-white text-xs rounded px-3 py-2 shadow-lg">
-        <p className="font-semibold mb-1">
-          {new Date(d.time).toLocaleString([], {
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          })}
-        </p>
-        <p>O: {formatPriceWithDecimals(Number(d.open), axisDecimals)}  H: {formatPriceWithDecimals(Number(d.high), axisDecimals)}</p>
-        <p>L: {formatPriceWithDecimals(Number(d.low), axisDecimals)}  C: {formatPriceWithDecimals(Number(d.close), axisDecimals)}</p>
-        <p className="text-gray-400">Vol: {d.volume?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+      <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
+        Loading candles…
       </div>
     );
-  };
+  }
 
   return (
     <div className="space-y-2">
@@ -2086,7 +2352,7 @@ function CandlestickChart({
           width={80}
           tickLine={false}
         />
-        <Tooltip content={<CustomTooltip />} />
+        <Tooltip content={renderTooltip} />
 
         {selectedCandleTime != null && (
           <ReferenceLine
@@ -2151,25 +2417,25 @@ function CandlestickChart({
         {openEntryMarkerTime != null && (
           <ReferenceLine
             x={openEntryMarkerTime}
-            stroke={openPosition?.entrySide === 'short' ? '#dc2626' : '#16a34a'}
+            stroke={openPositionEntrySide === 'short' ? '#dc2626' : '#16a34a'}
             strokeWidth={1.5}
             strokeDasharray="2 2"
             label={{
-              value: openPosition?.entrySide === 'short' ? 'entry ▼' : 'entry ▲',
-              fill: openPosition?.entrySide === 'short' ? '#dc2626' : '#16a34a',
+              value: openPositionEntrySide === 'short' ? 'entry ▼' : 'entry ▲',
+              fill: openPositionEntrySide === 'short' ? '#dc2626' : '#16a34a',
               fontSize: 10,
             }}
           />
         )}
 
         {/* Entry price reference line for active position */}
-        {openPosition?.entryPrice != null && (
+        {openPositionEntryPrice != null && (
           <ReferenceLine
-            y={openPosition.entryPrice}
+            y={openPositionEntryPrice}
             stroke="#3b82f6"
             strokeWidth={1}
             strokeDasharray="4 3"
-            label={{ value: `entry ${formatPriceWithDecimals(openPosition.entryPrice, axisDecimals)}`, fill: '#3b82f6', fontSize: 10, position: 'right' }}
+            label={{ value: `entry ${formatPriceWithDecimals(openPositionEntryPrice, axisDecimals)}`, fill: '#3b82f6', fontSize: 10, position: 'right' }}
           />
         )}
 
@@ -2198,7 +2464,7 @@ function CandlestickChart({
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Activity Feed Row

@@ -1737,6 +1737,8 @@ class PaperTradingWorkflow:
         self._hypothesis_executor_state: Dict[str, Any] = {}
         # R80: WorldState — shared world model (regime + judge guidance + calibration)
         self._world_state: Dict[str, Any] = {}
+        # Live per-symbol R-tracking (current_R, mfe_r, trade_state) — updated per bar
+        self._live_r_tracking: Dict[str, Dict[str, Any]] = {}
         # R76: AI-led portfolio planner
         self.use_ai_planner: bool = False
         self._session_intent: Optional[Dict[str, Any]] = None
@@ -1971,7 +1973,17 @@ class PaperTradingWorkflow:
             "cadence_summary": _cadence_summary,
             "session_intent_symbols": (self._session_intent or {}).get("selected_symbols"),
             "session_intent": self._session_intent,
+            "live_r_tracking": dict(self._live_r_tracking),
         }
+
+    @workflow.query
+    def get_live_r_tracking(self) -> Dict[str, Any]:
+        """Return per-symbol live R-tracking data (current_R, mfe_r, trade_state, r-milestones).
+
+        Updated each bar in the Tier 2 AdaptiveTradeManagement loop.
+        Returns {} when no positions are open.
+        """
+        return dict(self._live_r_tracking)
 
     @workflow.query
     def get_current_plan(self) -> Optional[Dict[str, Any]]:
@@ -3308,12 +3320,25 @@ class PaperTradingWorkflow:
                         )
                 _peak_r = max(_mgmt.peak_r_achieved, _current_r)
 
+                _pos_frac = _meta.get("position_fraction", 1.0)
+
                 # Inject R-tracking into market_data so trigger engine sees live values
                 if _sym in market_data:
                     market_data[_sym]["current_R"] = round(_current_r, 4)
                     market_data[_sym]["mfe_r"] = round(_peak_r, 4)
                     market_data[_sym]["trade_state"] = _mgmt.phase
-                    market_data[_sym]["position_fraction"] = _meta.get("position_fraction", 1.0)
+                    market_data[_sym]["position_fraction"] = _pos_frac
+
+                # Persist R-tracking per-symbol so get_live_r_tracking() can surface it to UI
+                self._live_r_tracking[_sym] = {
+                    "current_R": round(_current_r, 4),
+                    "mfe_r": round(_peak_r, 4),
+                    "trade_state": _mgmt.phase,
+                    "r1_reached": _peak_r >= 1.0,
+                    "r2_reached": _peak_r >= 2.0,
+                    "r3_reached": _peak_r >= 3.0,
+                    "position_fraction": _pos_frac,
+                }
         except Exception as _amt_exc:
             workflow.logger.debug("AdaptiveTradeManagement tick failed (non-fatal): %s", _amt_exc)
 
@@ -3744,8 +3769,12 @@ class PaperTradingWorkflow:
         target_anchor_type = (trigger_dict or {}).get("target_anchor_type")
         stop_anchor_type = (trigger_dict or {}).get("stop_anchor_type")
 
-        # R64: structural stop/target candidate selection at entry (supplementary logging).
-        # Only applied when the trigger has no explicit anchor type; never overrides explicit anchors.
+        # R64: structural stop/target override at entry.
+        # - Stop override: if stop_anchor_type is None (arithmetic pct-stop), try structural.
+        # - Target override: if target_anchor_type is None or is an arithmetic R-multiple,
+        #   replace with the nearest structural resistance/support that gives R >= 1.0.
+        # Explicit structural anchors (htf_daily_extreme, donchian_extreme, etc.) are left alone.
+        _structural_fill_meta: Dict[str, Any] = {}
         if order.get("intent") == "entry":
             _sym = order.get("symbol", "")
             _direction = "long" if order.get("side", "buy").lower() == "buy" else "short"
@@ -3756,34 +3785,69 @@ class PaperTradingWorkflow:
                         select_stop_candidates as _select_stop_candidates,
                         select_target_candidates as _select_target_candidates,
                     )
-                    if stop_anchor_type is None:
-                        _stop_candidates = _select_stop_candidates(
-                            _structure_snap,
-                            direction=_direction,
-                            max_distance_atr=3.0,
+
+                    # --- Stop override (only when stop was not anchored structurally) ---
+                    if stop_anchor_type is None and stop_price_abs is None:
+                        _stop_cands = _select_stop_candidates(
+                            _structure_snap, direction=_direction, max_distance_atr=3.0
                         )
-                        if _stop_candidates:
-                            _nearest_stop = _stop_candidates[0]
-                            workflow.logger.info(
-                                "Structural stop candidate: %s @ %.4f (kind=%s)",
-                                _nearest_stop.role_now,
-                                _nearest_stop.price,
-                                _nearest_stop.kind,
-                            )
-                    if target_anchor_type is None:
-                        _target_candidates = _select_target_candidates(
-                            _structure_snap,
-                            direction=_direction,
-                            max_distance_atr=10.0,
+                        for _sc in _stop_cands:
+                            _sp = _sc.price
+                            if _direction == "long" and _sp < fill_price:
+                                stop_price_abs = _sp
+                                _structural_fill_meta["stop_source"] = "structural"
+                                _structural_fill_meta["stop_structural_kind"] = _sc.kind
+                                workflow.logger.info(
+                                    "R64: structural stop override @ %.4f (kind=%s, was None)",
+                                    _sp, _sc.kind,
+                                )
+                                break
+                            elif _direction == "short" and _sp > fill_price:
+                                stop_price_abs = _sp
+                                _structural_fill_meta["stop_source"] = "structural"
+                                _structural_fill_meta["stop_structural_kind"] = _sc.kind
+                                workflow.logger.info(
+                                    "R64: structural stop override @ %.4f (kind=%s, was None)",
+                                    _sp, _sc.kind,
+                                )
+                                break
+
+                    # --- Target override (arithmetic anchors → structural level) ---
+                    _arithmetic_anchors = {"r_multiple_2", "r_multiple_3", "measured_move", None}
+                    if target_anchor_type in _arithmetic_anchors:
+                        _tgt_cands = _select_target_candidates(
+                            _structure_snap, direction=_direction, max_distance_atr=15.0
                         )
-                        if _target_candidates:
-                            _nearest_target = _target_candidates[0]
-                            workflow.logger.info(
-                                "Structural target candidate: %s @ %.4f (kind=%s)",
-                                _nearest_target.role_now,
-                                _nearest_target.price,
-                                _nearest_target.kind,
-                            )
+                        # Use stop for R computation; fall back to 2% if stop unknown
+                        _ref_stop = stop_price_abs or (
+                            fill_price * (1 - 0.02) if _direction == "long" else fill_price * (1 + 0.02)
+                        )
+                        _risk_abs = abs(fill_price - _ref_stop)
+                        for _tc in _tgt_cands:
+                            _tp = _tc.price
+                            if _direction == "long" and _tp <= fill_price:
+                                continue
+                            if _direction == "short" and _tp >= fill_price:
+                                continue
+                            _cand_r = abs(_tp - fill_price) / _risk_abs if _risk_abs > 0 else 0.0
+                            if _cand_r >= 1.0:
+                                old_target = target_price_abs
+                                target_price_abs = _tp
+                                _structural_fill_meta["target_source"] = "structural"
+                                _structural_fill_meta["target_structural_kind"] = _tc.kind
+                                workflow.logger.info(
+                                    "R64: structural target override @ %.4f (kind=%s, R=%.2f, was %s)",
+                                    _tp, _tc.kind, _cand_r, old_target,
+                                )
+                                break
+                        else:
+                            # No R>=1.0 candidate; log and keep arithmetic target
+                            if _tgt_cands:
+                                workflow.logger.debug(
+                                    "R64: no structural target with R>=1.0 for %s %s — keeping arithmetic %s",
+                                    _direction, _sym, target_price_abs,
+                                )
+
                 except Exception as _struct_exc:
                     workflow.logger.warning(
                         "Structural candidate selection failed (non-fatal): %s", _struct_exc
@@ -3886,6 +3950,9 @@ class PaperTradingWorkflow:
             fill_payload["stop_price_abs"] = stop_price_abs
         if target_price_abs is not None:
             fill_payload["target_price_abs"] = target_price_abs
+        # R64: structural source metadata (target_source, stop_source, etc.)
+        if _structural_fill_meta:
+            fill_payload.update(_structural_fill_meta)
         # A2: thread signal_id + signal metadata through fill payload for position_meta.
         _signal_id = order.get("signal_id")
         _signal_ts = order.get("signal_ts")

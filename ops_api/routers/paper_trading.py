@@ -787,6 +787,21 @@ async def get_portfolio(session_id: str):
             legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
             portfolio = await legacy_ledger_handle.query("get_portfolio_status")
 
+        # Merge live R-tracking from the paper trading workflow into position_meta.
+        # This adds current_R, mfe_r, trade_state, r1_reached, r2_reached, r3_reached
+        # for each open position so the frontend can show live trade state.
+        position_meta = dict(portfolio.get("position_meta") or {})
+        try:
+            pt_handle = client.get_workflow_handle(session_id)
+            r_tracking = await pt_handle.query("get_live_r_tracking")
+            for sym, r_data in (r_tracking or {}).items():
+                if sym in position_meta:
+                    position_meta[sym] = {**position_meta[sym], **r_data}
+                else:
+                    position_meta[sym] = r_data
+        except Exception:
+            pass  # R-tracking is best-effort; don't fail the portfolio call
+
         return PortfolioStatus(
             cash=float(portfolio.get("cash", 0)),
             initial_cash=float(portfolio.get("initial_cash", 0)) if portfolio.get("initial_cash") is not None else None,
@@ -796,7 +811,7 @@ async def get_portfolio(session_id: str):
             total_equity=float(portfolio.get("total_equity", 0)),
             unrealized_pnl=float(portfolio.get("unrealized_pnl", 0)),
             realized_pnl=float(portfolio.get("realized_pnl", 0)),
-            position_meta=portfolio.get("position_meta") or {},
+            position_meta=position_meta,
         )
 
     except HTTPException:
@@ -1173,14 +1188,22 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                 if symbol_overrides and pair_idx < len(symbol_overrides):
                     hold_minutes = symbol_overrides[pair_idx]
 
-                # R-per-hour: net_pnl / initial_risk / hold_hours
+                # R-per-hour and R-achieved: net_pnl / initial_risk
                 stop_px = entry.get("stop_price_abs")
+                target_px = entry.get("target_price_abs")
+                r_achieved = None
                 r_per_hour = None
-                if stop_px and entry_price > 0 and hold_minutes > 0:
-                    initial_risk = abs(entry_price - float(stop_px)) * used_qty
-                    if initial_risk > 0:
-                        r_return = net_pnl / initial_risk
-                        r_per_hour = round(r_return / (hold_minutes / 60.0), 4)
+                r_planned = None
+                if stop_px and entry_price > 0:
+                    initial_risk_per_unit = abs(entry_price - float(stop_px))
+                    if initial_risk_per_unit > 0:
+                        initial_risk = initial_risk_per_unit * used_qty
+                        r_achieved = round(net_pnl / initial_risk, 3)
+                        if hold_minutes > 0:
+                            r_per_hour = round(r_achieved / (hold_minutes / 60.0), 4)
+                        # Planned R:R from target vs stop
+                        if target_px:
+                            r_planned = round(abs(float(target_px) - entry_price) / initial_risk_per_unit, 2)
 
                 ts_rec: Dict[str, Any] = {
                     "symbol": symbol,
@@ -1200,7 +1223,13 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                     "category": entry.get("trigger_category"),
                     "winner": net_pnl > 0,
                     "stop_price_abs": stop_px,
+                    "target_price_abs": target_px,
+                    "r_achieved": r_achieved,
+                    "r_planned": r_planned,
                     "r_per_hour": r_per_hour,
+                    "target_source": entry.get("target_source"),
+                    "target_structural_kind": entry.get("target_structural_kind"),
+                    "stop_source": entry.get("stop_source"),
                     "estimated_bars_to_resolution": entry.get("estimated_bars_to_resolution"),
                 }
                 trade_sets.append(ts_rec)

@@ -57,17 +57,43 @@ class ExecutionLedgerWorkflow:
 
     def _format_fill_timestamp(self, value: Any) -> str:
         if isinstance(value, (int, float)):
-            ts = datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+            raw = float(value)
+            if raw > 1e12:
+                ts = datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+            else:
+                ts = datetime.fromtimestamp(raw, tz=timezone.utc)
             return ts.isoformat()
         if isinstance(value, str):
+            if value.isdigit():
+                return self._format_fill_timestamp(float(value))
             try:
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
                 if parsed.tzinfo is None:
                     parsed = parsed.replace(tzinfo=timezone.utc)
                 return parsed.isoformat()
             except ValueError:
-                return datetime.now(timezone.utc).isoformat()
-        return datetime.now(timezone.utc).isoformat()
+                return self._utc_now().isoformat()
+        return self._utc_now().isoformat()
+
+    def _utc_now(self) -> datetime:
+        """Return deterministic workflow time when available, fallback for unit tests."""
+        try:
+            return workflow.now()
+        except Exception:
+            return datetime.now(timezone.utc)
+
+    def _fill_timestamp_ms(self, fill: Dict[str, Any]) -> int:
+        """Return fill timestamp in milliseconds, preferring upstream deterministic payload."""
+        raw = fill.get("timestamp")
+        if isinstance(raw, str) and raw.isdigit():
+            raw = float(raw)
+        if isinstance(raw, (int, float)):
+            value = float(raw)
+            if value > 1e12:
+                return int(value)
+            # Treat smaller numeric values as epoch seconds.
+            return int(value * 1000.0)
+        return int(self._utc_now().timestamp() * 1000)
 
     @workflow.signal
     def set_user_preferences(self, preferences: Dict[str, Any]) -> None:
@@ -134,7 +160,7 @@ class ExecutionLedgerWorkflow:
                 if symbol in prices:
                     self.entry_price[symbol] = Decimal(str(prices[symbol]))
                     self.last_price[symbol] = self.entry_price[symbol]
-                    self.last_price_timestamp[symbol] = int(datetime.now(timezone.utc).timestamp() * 1000)
+                    self.last_price_timestamp[symbol] = int(self._utc_now().timestamp())
                 workflow.logger.info(f"Initialized position: {symbol} = {qty_decimal} @ {self.entry_price.get(symbol, 'unknown')}")
 
         # Reset P&L tracking
@@ -171,7 +197,7 @@ class ExecutionLedgerWorkflow:
     @workflow.signal
     def update_last_prices(self, prices: Dict[str, float]) -> None:
         """Update mark prices for all symbols (called on each tick cycle)."""
-        ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+        ts = int(self._utc_now().timestamp())
         for symbol, price in prices.items():
             self.last_price[symbol] = Decimal(str(price))
             self.last_price_timestamp[symbol] = ts
@@ -192,7 +218,7 @@ class ExecutionLedgerWorkflow:
                     "fill": dict(fill),
                     "workflow_id": info.workflow_id,
                     "sequence": sequence,
-                    "recorded_at": datetime.now(timezone.utc).timestamp(),
+                    "recorded_at": self._utc_now().timestamp(),
                     "trading_wallet_id": self.trading_wallet_id,
                     "trading_wallet_name": self.trading_wallet_name,
                     "equity_wallet_name": self.equity_wallet_name,
@@ -216,9 +242,11 @@ class ExecutionLedgerWorkflow:
             _fee = Decimal(str(fill.get("fee", 0) or 0))
             trade_pnl = float((price - _entry_px) * qty - _fee)
 
-        # Add transaction to history with timestamp
+        fill_ts_ms = self._fill_timestamp_ms(fill)
+
+        # Add transaction to history with deterministic timestamp from fill payload.
         transaction = {
-            "timestamp": int(datetime.now(timezone.utc).timestamp()),
+            "timestamp": int(fill_ts_ms // 1000),
             "side": side,
             "symbol": symbol,
             "qty": float(qty),
@@ -235,7 +263,7 @@ class ExecutionLedgerWorkflow:
         self.transaction_history.append(transaction)
         
         # Update price and timestamp
-        current_timestamp = int(datetime.now(timezone.utc).timestamp())
+        current_timestamp = int(fill_ts_ms // 1000)
         self.last_price[symbol] = price
         self.last_price_timestamp[symbol] = current_timestamp
         current_qty = self.positions.get(symbol, Decimal("0"))
@@ -494,6 +522,7 @@ class ExecutionLedgerWorkflow:
             total_equity += float(qty) * float(price)
         return {
             "cash": float(self.cash),
+            "initial_cash": float(self.initial_cash),
             "positions": positions,
             "entry_prices": entry_prices,
             "last_prices": last_prices,

@@ -155,7 +155,7 @@ function CardRow({ card, rank }: { card: OpportunityCard; rank: number }) {
 
           {/* Component explanations */}
           <div className="space-y-1">
-            {Object.entries(card.component_explanation).map(([key, desc]) => (
+            {Object.entries(card.component_explanation ?? {}).map(([key, desc]) => (
               <div key={key} className="flex gap-2 text-xs">
                 <span className="text-gray-500 w-24 shrink-0">{key}:</span>
                 <span className="text-gray-300">{desc}</span>
@@ -196,6 +196,10 @@ function ScannerPanelInner({ className }: ScannerPanelProps) {
       queryClient.invalidateQueries({ queryKey: ['scanner-opportunities'] });
     },
   });
+  const cards = Array.isArray(ranking?.cards) ? ranking.cards : [];
+  const topN = Number(ranking?.top_n ?? 0);
+  const universeSize = Number(ranking?.universe_size ?? 0);
+  const scanDurationMs = Number(ranking?.scan_duration_ms ?? 0);
 
   return (
     <div className={cn('space-y-3', className)}>
@@ -206,7 +210,7 @@ function ScannerPanelInner({ className }: ScannerPanelProps) {
           <h3 className="text-sm font-semibold text-gray-200">Opportunity Scanner</h3>
           {ranking && (
             <span className="text-xs text-gray-500">
-              ({ranking.top_n}/{ranking.universe_size} symbols · {ranking.scan_duration_ms}ms)
+              ({topN}/{universeSize} symbols · {scanDurationMs}ms)
             </span>
           )}
         </div>
@@ -271,15 +275,15 @@ function ScannerPanelInner({ className }: ScannerPanelProps) {
       )}
 
       {/* Ranking cards */}
-      {ranking && ranking.cards.length > 0 && (
+      {ranking && cards.length > 0 && (
         <div className="space-y-1.5">
-          {ranking.cards.map((card, i) => (
+          {cards.map((card, i) => (
             <CardRow key={card.symbol} card={card} rank={i + 1} />
           ))}
         </div>
       )}
 
-      {ranking && ranking.cards.length === 0 && (
+      {ranking && cards.length === 0 && (
         <div className="text-center text-gray-500 py-4 text-sm">
           Scan completed — no symbols scored.
         </div>

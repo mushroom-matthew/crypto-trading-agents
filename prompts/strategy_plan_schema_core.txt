@@ -213,20 +213,28 @@ LEVEL-ANCHORED STOP/TARGET FIELDS (Runbook 42):
     Controls how the profit target is computed at fill time.
     Target must be above entry for longs, below entry for shorts.
 
-    Long-only anchors (target at resistance):
-      'htf_daily_high' — 0.2% below prior session high
-      'htf_5d_high'    — 0.2% below 5-day rolling high
-    Short-only anchors (target at support):
-      'htf_daily_low'  — 0.2% above prior session low
-      'htf_5d_low'     — 0.2% above 5-day rolling low
-    Direction-auto family:
-      'htf_daily_extreme' — high for longs, low for shorts
-      'htf_5d_extreme'    — 5d high/low
-    Both directions (computed):
+    STRONGLY PREFERRED — structural anchors (aligned with S/R display):
+      'htf_daily_extreme' — daily high for longs, daily low for shorts [BEST DEFAULT]
+      'htf_5d_extreme'    — 5-day high for longs, 5-day low for shorts [use for breakouts]
+
+    Other structural anchors:
+      'htf_daily_high' — 0.2% below prior session high (longs only)
+      'htf_5d_high'    — 0.2% below 5-day rolling high (longs only)
+      'htf_daily_low'  — 0.2% above prior session low (shorts only)
+      'htf_5d_low'     — 0.2% above 5-day rolling low (shorts only)
+
+    Fallback computed (use ONLY when structural anchors are unavailable):
       'measured_move' — Donchian range height projected from entry
-      'r_multiple_2'  — 2R from entry (requires stop_price_abs)
-      'r_multiple_3'  — 3R from entry
-    Default (null): no stored target, exits via exit_rule only.
+      'r_multiple_2'  — 2R from entry (arithmetic, not structural)
+      'r_multiple_3'  — 3R from entry (arithmetic, not structural)
+
+    Default (null): system will attempt structural override automatically; exits via exit_rule as backup.
+
+    PREFERRED targets by regime:
+      Trend continuation → 'htf_5d_extreme' (ride toward weekly high/low)
+      Range / mean-reversion → 'htf_daily_extreme' (snap to prior session extreme)
+      Breakout → 'htf_5d_extreme' with confirmation
+      Avoid r_multiple_2/3 when structural anchors exist — structural levels align with displayed S/R.
 
   estimated_bars_to_resolution (optional integer on TriggerCondition):
     Your forecast for how many candles until this trade reaches its target OR stop.
