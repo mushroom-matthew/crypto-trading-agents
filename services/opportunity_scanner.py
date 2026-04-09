@@ -215,6 +215,9 @@ def score_symbol(
     structure: Optional[StructureSnapshot] = None,
     ticker: Optional[Dict[str, Any]] = None,
     consecutive_price_failures: int = 0,
+    playbook_win_rate: Optional[float] = None,
+    playbook_r_expectancy: Optional[float] = None,
+    attribution_sample_size: int = 0,
 ) -> OpportunityCard:
     """Score a single symbol and return its OpportunityCard.
 
@@ -243,6 +246,11 @@ def score_symbol(
         - _W_SPREAD_PENALTY * spread_penalty
         - _W_INSTABILITY_PENALTY * instability_penalty
     )
+    # R79: attribution bonus — +0.05 * clamp(r_expectancy, 0, 2) / 2
+    # Only applied when sufficient prior data exists.
+    if playbook_r_expectancy is not None and attribution_sample_size >= 5:
+        _attr_bonus = 0.05 * _clamp(playbook_r_expectancy, 0.0, 2.0) / 2.0
+        raw_score += _attr_bonus
     norm_score = _clamp((raw_score + _NORM_OFFSET) / _NORM_RANGE)
 
     horizon = _compute_hold_horizon(indicator, vol_edge, trend_edge, structure_edge)
@@ -287,6 +295,9 @@ def score_symbol(
         nearest_support=nearest_support,
         nearest_resistance=nearest_resistance,
         structure_levels_count=levels_count,
+        playbook_win_rate=playbook_win_rate,
+        playbook_r_expectancy=playbook_r_expectancy,
+        attribution_sample_size=attribution_sample_size,
     )
 
 
@@ -296,8 +307,9 @@ def rank_universe(
     structure_snapshots: Optional[Dict[str, StructureSnapshot]] = None,
     tickers: Optional[Dict[str, Dict[str, Any]]] = None,
     consecutive_failures_by_symbol: Optional[Dict[str, int]] = None,
+    episode_priors: Optional[Dict[str, Dict[str, Any]]] = None,
     top_n: int = 10,
-) -> OpportunityRanking:
+) -> "OpportunityRanking":
     """Score all symbols and return a ranked OpportunityRanking.
 
     Args:
@@ -306,6 +318,9 @@ def rank_universe(
         structure_snapshots: Optional dict mapping symbol → StructureSnapshot.
         tickers: Optional dict mapping symbol → raw exchange ticker.
         consecutive_failures_by_symbol: Per-symbol failure counts.
+        episode_priors: Optional dict mapping symbol → prior dict from
+            compute_playbook_prior() (R79). Keys: win_rate, r_expectancy,
+            sample_size, sufficient_data.
         top_n: How many cards to include in the ranking.
 
     Returns:
@@ -323,6 +338,12 @@ def rank_universe(
         ticker = (tickers or {}).get(symbol)
         failures = (consecutive_failures_by_symbol or {}).get(symbol, 0)
 
+        # R79: attribution priors
+        prior = (episode_priors or {}).get(symbol) or {}
+        _win_rate = prior.get("win_rate") if prior.get("sufficient_data") else None
+        _r_exp = prior.get("r_expectancy") if prior.get("sufficient_data") else None
+        _sample = prior.get("sample_size", 0)
+
         try:
             card = score_symbol(
                 symbol=symbol,
@@ -330,6 +351,9 @@ def rank_universe(
                 structure=structure,
                 ticker=ticker,
                 consecutive_price_failures=failures,
+                playbook_win_rate=_win_rate,
+                playbook_r_expectancy=_r_exp,
+                attribution_sample_size=_sample,
             )
             cards.append(card)
         except Exception:

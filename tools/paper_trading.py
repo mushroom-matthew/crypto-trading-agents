@@ -1572,13 +1572,25 @@ async def build_episode_activity(
             regime_fingerprint=_fp,
             episode_source="paper",
         )
+        # R79: enrich with hypothesis attribution tags
+        try:
+            from services.hypothesis_attribution import enrich_episode_with_attribution as _enrich
+            record = _enrich(
+                record,
+                stop_hit=(hit == "stop"),
+                target_hit=(hit == "target"),
+                invalidation_hit=False,
+            )
+        except Exception as _ae:
+            logger.debug("R79: attribution enrichment failed (non-fatal): %s", _ae)
+
         store = EpisodeMemoryStore()
         store.add(record)
         # R82: persist with session_id for cross-session indexing
         store.persist_episode(record, session_id=session_id)
         logger.info(
-            "episode_memory: built episode signal_id=%s symbol=%s hit=%s r=%.2f",
-            signal_id, symbol, hit, r_achieved,
+            "episode_memory: built episode signal_id=%s symbol=%s hit=%s r=%.2f tags=%s",
+            signal_id, symbol, hit, r_achieved, record.attribution_tags,
         )
     except Exception as exc:
         logger.warning("build_episode_activity failed (non-fatal): %s", exc)

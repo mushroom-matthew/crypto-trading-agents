@@ -109,6 +109,24 @@ class OpportunityCard(BaseModel):
         description="Total number of structure levels in snapshot.",
     )
 
+    # R79: playbook attribution priors (populated when ≥5 episodes exist)
+    playbook_win_rate: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Win rate from last ≥5 episodes for this symbol's primary playbook. "
+        "None when insufficient history.",
+    )
+    playbook_r_expectancy: Optional[float] = Field(
+        default=None,
+        description="Mean r_multiple from last ≥5 episodes for this symbol's primary playbook. "
+        "None when insufficient history.",
+    )
+    attribution_sample_size: int = Field(
+        default=0,
+        description="Number of episodes used to compute playbook priors.",
+    )
+
 
 class OpportunityRanking(BaseModel):
     """Ranked list of opportunity cards from the most recent scanner run."""

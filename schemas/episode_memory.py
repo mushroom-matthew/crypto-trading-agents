@@ -110,6 +110,19 @@ class EpisodeMemoryRecord(BaseModel):
     # retrieval
     retrieval_scope: Optional[Literal["symbol", "cohort", "global"]] = None
 
+    # R79: hypothesis attribution fields (optional — present when hypothesis model is active)
+    hypothesis_id: Optional[str] = None
+    thesis_text: Optional[str] = None
+    stop_hit: Optional[bool] = None
+    target_hit: Optional[bool] = None
+    invalidation_hit: Optional[bool] = None
+    attribution_tags: List[str] = Field(default_factory=list)
+    r_multiple_realized: Optional[float] = None   # alias for r_achieved; explicit for attribution
+    bars_held: Optional[int] = None               # alias for hold_bars; explicit for attribution
+    expected_bars: Optional[int] = None           # LLM's estimated_bars_to_resolution
+    timing_accuracy: Optional[float] = None       # expected_bars / bars_held (1.0 = perfect)
+    source_session_id: Optional[str] = None       # cross-session indexing
+
 
 # ---------------------------------------------------------------------------
 # Retrieval metadata
