@@ -763,6 +763,9 @@ export interface PaperTradingSessionConfig {
 
   // Screener Integration (R68)
   screener_regime?: string | null;
+
+  // Trailing Stop Defaults (R85)
+  default_trailing_config?: Record<string, unknown> | null;
 }
 
 export interface PaperTradingSession {
@@ -792,8 +795,19 @@ export interface PositionMeta {
   entry_category: string | null;
   entry_side: string | null;
   opened_at: string | null;
+  timeframe?: string | null;
+  estimated_bars_to_resolution?: number | null;
   stop_price_abs: number | null;
   target_price_abs: number | null;
+  current_R?: number | null;
+  mfe_r?: number | null;
+  trade_state?: string | null;
+  r1_reached?: boolean;
+  r2_reached?: boolean;
+  r3_reached?: boolean;
+  position_fraction?: number;
+  target_source?: string | null;
+  target_structural_kind?: string | null;
 }
 
 export interface PaperTradingPortfolio {

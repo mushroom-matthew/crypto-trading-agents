@@ -27,11 +27,17 @@ class TestAdaptiveTradeManagementState:
 
     def _state(self, **kwargs):
         from services.adaptive_trade_management import AdaptiveTradeManagementState
+        # Map legacy stop_price_abs → initial_stop_price + active_stop_price (R85 rename)
+        if "stop_price_abs" in kwargs:
+            stop = kwargs.pop("stop_price_abs")
+            kwargs.setdefault("initial_stop_price", stop)
+            kwargs.setdefault("active_stop_price", stop)
         defaults = dict(
             symbol="BTC-USD",
             direction="long",
             entry_price=100.0,
-            stop_price_abs=95.0,
+            initial_stop_price=95.0,
+            active_stop_price=95.0,
             target_price_abs=115.0,
             phase="EARLY",
             bars_held=0,
@@ -101,7 +107,8 @@ class TestAdaptiveTradeManagementState:
         s = self._state(
             direction="short",
             entry_price=100.0,
-            stop_price_abs=105.0,  # risk = 5
+            initial_stop_price=105.0,
+            active_stop_price=105.0,  # risk = 5
         )
         # R = (100 - 95) / 5 = 1.0 → EXTENDED
         s2 = s.tick(current_price=95.0)
@@ -118,13 +125,14 @@ class TestAdaptiveTradeManagementState:
         assert restored.peak_r_achieved == s2.peak_r_achieved
 
     def test_no_stop_no_crash(self):
-        """If stop_price_abs is None, phase stays EARLY but no crash."""
+        """If initial_stop_price is None, phase stays EARLY but no crash."""
         from services.adaptive_trade_management import AdaptiveTradeManagementState
         s = AdaptiveTradeManagementState(
             symbol="BTC-USD",
             direction="long",
             entry_price=100.0,
-            stop_price_abs=None,
+            initial_stop_price=None,
+            active_stop_price=None,
             phase="EARLY",
             bars_held=0,
             peak_r_achieved=0.0,
@@ -140,7 +148,8 @@ class TestAdaptiveTradeManagementState:
             symbol="BTC-USD",
             direction="long",
             entry_price=0.0,
-            stop_price_abs=None,
+            initial_stop_price=None,
+            active_stop_price=None,
             phase="EARLY",
             bars_held=0,
             peak_r_achieved=0.0,

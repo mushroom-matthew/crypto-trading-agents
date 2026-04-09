@@ -59,6 +59,7 @@ with workflow.unsafe.imports_passed_through():
     from services.policy_state_machine import PolicyStateMachine
     from schemas.policy_state import PolicyStateMachineRecord
     from schemas.reasoning_cadence import PolicyLoopTriggerEvent
+    from schemas.trailing_stop import TrailingStopConfig
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,15 @@ class PaperTradingConfig(BaseModel):
     research_max_loss_pct: Optional[float] = None      # % of research capital (None → 50%)
     # R76: AI-led portfolio planner
     use_ai_planner: bool = False
+    # R85: Trailing stop defaults (applied to every new position unless overridden per-trigger)
+    default_trailing_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Session-level trailing stop config. Matches TrailingStopConfig schema. "
+            "Modes: none, breakeven_only, atr_trail, pct_trail, step_trail. "
+            "None = static stop (current default behavior)."
+        ),
+    )
 
 
 class SessionState(BaseModel):
@@ -288,6 +298,8 @@ class SessionState(BaseModel):
     # R76: AI-led portfolio planner
     use_ai_planner: bool = False
     session_intent: Optional[Dict[str, Any]] = None
+    # R85: trailing stop session defaults
+    default_trailing_config: Optional[Dict[str, Any]] = None
     # R77: CadenceGovernor state
     cadence_governor_state: Optional[Dict[str, Any]] = None
 
@@ -1742,6 +1754,8 @@ class PaperTradingWorkflow:
         # R76: AI-led portfolio planner
         self.use_ai_planner: bool = False
         self._session_intent: Optional[Dict[str, Any]] = None
+        # R85: trailing stop session defaults (serialised TrailingStopConfig dict)
+        self._default_trailing_config: Optional[Dict[str, Any]] = None
         # R77: CadenceGovernor
         self._cadence_governor_state: Dict[str, Any] = {}
 
@@ -2185,6 +2199,8 @@ class PaperTradingWorkflow:
             self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
             # R76: AI planner flag
             self.use_ai_planner = parsed_config.use_ai_planner
+            # R85: trailing stop session defaults
+            self._default_trailing_config = parsed_config.default_trailing_config
             # R77: CadenceGovernor — initialize at session start
             try:
                 from services.cadence_governor import CadenceGovernor as _CG, CadenceGovernorState as _CGS
@@ -3281,10 +3297,15 @@ class PaperTradingWorkflow:
             except Exception as _traj_exc:
                 workflow.logger.debug("R83: per-bar trajectory update failed (non-fatal): %s", _traj_exc)
 
-        # R45/R63: Per-bar AdaptiveTradeManagement tick + R-tracking context injection.
-        # Computes current_R, mfe_r, trade_state and writes them into market_data so
-        # the trigger engine can evaluate r1_reached, r2_reached, trade_state conditions.
-        # Without this write, those context keys are always 0/False/"EARLY".
+        # R45/R63/R85: Per-bar AdaptiveTradeManagement tick + trailing stop + R-tracking.
+        # - Computes current_R, mfe_r, phase (EARLY/MATURE/EXTENDED/TRAIL) per bar
+        # - Applies trailing stop logic (breakeven ratchet, ATR/pct/step trail)
+        # - Handles close-confirmation (wick protection): suppresses trigger stop until
+        #   N consecutive closes breach the stop level
+        # - Fires partial exits at configured R milestones
+        # - Patches portfolio_state["position_meta"][sym]["stop_price_abs"] with the
+        #   current active (possibly trailed) stop so trigger engine sees the live level
+        _amt_partial_exit_orders: List[Dict[str, Any]] = []
         try:
             from services.adaptive_trade_management import AdaptiveTradeManagementState
             _open_positions = portfolio_state.get("positions") or {}
@@ -3295,41 +3316,120 @@ class PaperTradingWorkflow:
                 _price = float(current_prices.get(_sym) or 0)
                 if not _price:
                     continue
+
+                # Resolve session trailing config (or per-position override stored in state)
+                _trailing_cfg: Optional[TrailingStopConfig] = None
+                try:
+                    if self._default_trailing_config:
+                        _trailing_cfg = TrailingStopConfig.model_validate(self._default_trailing_config)
+                except Exception:
+                    pass
+
                 _state_dict = self.adaptive_management_states.get(_sym, {})
                 _meta = _position_meta.get(_sym) or {}
                 _meta["symbol"] = _sym
-                _mgmt = (
-                    AdaptiveTradeManagementState.model_validate(_state_dict)
-                    if _state_dict
-                    else AdaptiveTradeManagementState.initial(_meta)
-                )
-                _mgmt = _mgmt.tick(current_price=_price)
+                if _state_dict:
+                    _mgmt = AdaptiveTradeManagementState.model_validate(_state_dict)
+                else:
+                    _mgmt = AdaptiveTradeManagementState.initial(_meta, trailing_config=_trailing_cfg)
+
+                # Pass ATR so atr_trail mode can compute the trail distance
+                _atr = float(market_data.get(_sym, {}).get("atr_14") or 0) or None
+                _mgmt = _mgmt.tick(current_price=_price, atr=_atr)
                 self.adaptive_management_states[_sym] = _mgmt.model_dump()
 
-                # Compute current_R from entry/stop stored in position_meta
-                _entry = float(_meta.get("signal_entry_price") or _meta.get("entry_price") or 0)
-                _stop = float(_meta.get("stop_price_abs") or 0)
-                _side = _meta.get("entry_side", "long")
-                _current_r = 0.0
-                if _entry > 0 and _stop > 0:
-                    _risk = abs(_entry - _stop)
-                    if _risk > 0:
-                        _current_r = (
-                            (_price - _entry) / _risk if _side == "long"
-                            else (_entry - _price) / _risk
-                        )
-                _peak_r = max(_mgmt.peak_r_achieved, _current_r)
-
+                _peak_r = _mgmt.peak_r_achieved
+                _current_r = _mgmt._compute_r(_price)
                 _pos_frac = _meta.get("position_fraction", 1.0)
+                _trail_mode = _mgmt.trailing_config.mode
+                _active_stop = _mgmt.active_stop_price
 
-                # Inject R-tracking into market_data so trigger engine sees live values
+                # R85: Patch portfolio_state position_meta with the live trailing stop.
+                # The trigger engine reads stop_price_abs from position_meta for stop_hit.
+                # For close_required_bars > 1: suppress trigger engine stop (set to None)
+                # until AdaptiveManagement confirms enough consecutive closes.
+                _close_req = _mgmt.trailing_config.close_required_bars
+                if _active_stop is not None and _sym in _position_meta:
+                    if _close_req <= 1 or _mgmt.stop_fired:
+                        # Normal path: let trigger engine see the live stop
+                        _position_meta[_sym]["stop_price_abs"] = _active_stop
+                    else:
+                        # Confirmation pending: suppress trigger engine from firing early
+                        _position_meta[_sym]["stop_price_abs"] = None
+                        _position_meta[_sym]["_trailing_stop_pending"] = _active_stop
+                        _position_meta[_sym]["_stop_confirmation"] = (
+                            f"{_mgmt.consecutive_closes_below_stop}/{_close_req}"
+                        )
+                    # Always expose active stop for display / DSL reference
+                    _position_meta[_sym]["active_stop_price"] = _active_stop
+                    _position_meta[_sym]["trailing_mode"] = _trail_mode
+                    _position_meta[_sym]["breakeven_ratchet_fired"] = _mgmt.breakeven_ratchet_fired
+
+                # R85: When stop_fired via multi-bar confirmation, inject a synthetic exit order.
+                # The trigger engine's stop_hit is suppressed (stop set to None above), so
+                # we create the exit here directly.
+                if _mgmt.stop_fired and _close_req > 1:
+                    _side = _meta.get("entry_side", "long")
+                    _exit_side = "sell" if _side == "long" else "buy"
+                    _amt_partial_exit_orders.append({
+                        "symbol": _sym,
+                        "side": _exit_side,
+                        "quantity": _qty,
+                        "price": _price,
+                        "trigger_id": f"trail_stop_confirmed_{_sym}",
+                        "trigger_category": "stop",
+                        "intent": "exit",
+                        "reason": f"trailing_stop_confirmed ({_close_req} bars)",
+                    })
+                    workflow.logger.info(
+                        "R85: trailing stop confirmed for %s after %d bars (stop=%.4f price=%.4f)",
+                        _sym, _close_req, _active_stop or 0, _price,
+                    )
+
+                # R85: Partial exits — fire each milestone that just became due.
+                if _mgmt.partial_fires_pending:
+                    _side = _meta.get("entry_side", "long")
+                    _exit_side = "sell" if _side == "long" else "buy"
+                    _remaining_qty = float(_qty)
+                    _already_fired = set(_mgmt.partial_milestones_fired) - set(_mgmt.partial_fires_pending)
+                    # Track how much has already been exited (approximate: assumes equal fractions)
+                    for _r_target in _mgmt.partial_fires_pending:
+                        _spec = next(
+                            (p for p in _mgmt.trailing_config.partial_exits if p.at_r_multiple == _r_target),
+                            None,
+                        )
+                        if _spec is None:
+                            continue
+                        _exit_qty = round(_remaining_qty * _spec.exit_fraction, 8)
+                        if _exit_qty <= 0:
+                            continue
+                        _remaining_qty -= _exit_qty
+                        _amt_partial_exit_orders.append({
+                            "symbol": _sym,
+                            "side": _exit_side,
+                            "quantity": _exit_qty,
+                            "price": _price,
+                            "trigger_id": f"partial_exit_{_sym}_{_r_target}R",
+                            "trigger_category": "take_profit",
+                            "intent": "partial_exit",
+                            "reason": f"partial_exit at {_r_target}R",
+                        })
+                        workflow.logger.info(
+                            "R85: partial exit fired for %s at %.1fR — qty=%.6f (trail_mode=%s)",
+                            _sym, _r_target, _exit_qty, _trail_mode,
+                        )
+
+                # Inject R-tracking into market_data so trigger engine DSL sees live values
                 if _sym in market_data:
                     market_data[_sym]["current_R"] = round(_current_r, 4)
                     market_data[_sym]["mfe_r"] = round(_peak_r, 4)
                     market_data[_sym]["trade_state"] = _mgmt.phase
                     market_data[_sym]["position_fraction"] = _pos_frac
+                    market_data[_sym]["active_stop_price"] = _active_stop or 0.0
+                    market_data[_sym]["trailing_mode"] = _trail_mode
+                    market_data[_sym]["breakeven_ratchet_fired"] = _mgmt.breakeven_ratchet_fired
 
-                # Persist R-tracking per-symbol so get_live_r_tracking() can surface it to UI
+                # Persist R-tracking per-symbol so get_live_r_tracking() surfaces to UI
                 self._live_r_tracking[_sym] = {
                     "current_R": round(_current_r, 4),
                     "mfe_r": round(_peak_r, 4),
@@ -3338,6 +3438,14 @@ class PaperTradingWorkflow:
                     "r2_reached": _peak_r >= 2.0,
                     "r3_reached": _peak_r >= 3.0,
                     "position_fraction": _pos_frac,
+                    # R85 additions
+                    "active_stop_price": _active_stop,
+                    "trailing_mode": _trail_mode,
+                    "breakeven_ratchet_fired": _mgmt.breakeven_ratchet_fired,
+                    "stop_confirmation": (
+                        f"{_mgmt.consecutive_closes_below_stop}/{_close_req}"
+                        if _close_req > 1 and _mgmt.consecutive_closes_below_stop > 0 else None
+                    ),
                 }
         except Exception as _amt_exc:
             workflow.logger.debug("AdaptiveTradeManagement tick failed (non-fatal): %s", _amt_exc)
@@ -3357,6 +3465,12 @@ class PaperTradingWorkflow:
 
         orders = result.get("orders", []) if isinstance(result, dict) else list(result)
         trigger_events = result.get("events", []) if isinstance(result, dict) else []
+
+        # R85: Prepend any trailing-stop confirmed exits and partial exits generated above.
+        # These bypass the trigger engine (which was suppressed for close_required_bars > 1
+        # and has no partial-exit DSL). Prepended so they execute before new entries.
+        if _amt_partial_exit_orders:
+            orders = _amt_partial_exit_orders + orders
 
         for ev in trigger_events:
             await workflow.execute_activity(
@@ -3945,6 +4059,7 @@ class PaperTradingWorkflow:
             "trigger_id": trigger_id,
             "trigger_category": order.get("trigger_category"),
             "intent": order.get("intent"),
+            "timeframe": order.get("timeframe"),
         }
         if stop_price_abs is not None:
             fill_payload["stop_price_abs"] = stop_price_abs
@@ -4226,6 +4341,8 @@ class PaperTradingWorkflow:
             # R76: AI planner
             use_ai_planner=self.use_ai_planner,
             session_intent=dict(self._session_intent) if self._session_intent else None,
+            # R85: trailing stop defaults
+            default_trailing_config=dict(self._default_trailing_config) if self._default_trailing_config else None,
             # R77: CadenceGovernor
             cadence_governor_state=dict(self._cadence_governor_state) if self._cadence_governor_state else None,
         ).model_dump()
@@ -4282,6 +4399,8 @@ class PaperTradingWorkflow:
         # R76: AI planner
         self.use_ai_planner = parsed.use_ai_planner
         self._session_intent = dict(parsed.session_intent) if parsed.session_intent else None
+        # R85: trailing stop defaults
+        self._default_trailing_config = dict(parsed.default_trailing_config) if parsed.default_trailing_config else None
         # R77: CadenceGovernor
         self._cadence_governor_state = dict(parsed.cadence_governor_state) if parsed.cadence_governor_state else {}
 

@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -15,7 +15,10 @@ import {
   screenerAPI,
   type PaperTradingSessionConfig,
   type CandleBar,
+  type PaperTradingPlan,
+  type PaperTradingPortfolio,
   type PaperTradingTradeSet,
+  type PositionMeta,
   type ScreenerRecommendationItem,
 } from '../lib/api';
 // Note: PaperTradingMetrics used via paperTradingAPI.getMetrics() return type (inferred)
@@ -38,6 +41,13 @@ export function PaperTradingControl() {
   const [indicatorTimeframe, setIndicatorTimeframe] = useState<string>('1h');
   const [userOverrodeTf, setUserOverrodeTf] = useState(false);
   const [directionBias, setDirectionBias] = useState<string>('neutral');
+  // R85: trailing stop session defaults
+  const [trailingMode, setTrailingMode] = useState<string>('none');
+  const [trailBreakevenAtR, setTrailBreakevenAtR] = useState<number>(1.0);
+  const [trailActivationR, setTrailActivationR] = useState<number>(1.5);
+  const [trailAtrMultiple, setTrailAtrMultiple] = useState<number>(2.0);
+  const [trailPctDistance, setTrailPctDistance] = useState<number>(2.0);
+  const [trailCloseRequired, setTrailCloseRequired] = useState<number>(1);
   const [enableDiscovery, setEnableDiscovery] = useState(false);
   const [annotateScreenerShortlist, setAnnotateScreenerShortlist] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(true);
@@ -248,7 +258,58 @@ export function PaperTradingControl() {
   // Chart state
   const [chartSymbol, setChartSymbol] = useState('BTC-USD');
   const [chartTimeframe, setChartTimeframe] = useState('1m');
+  const autoSelectedChartSessionRef = useRef<string | null>(null);
   const [selectedChartCandleTime, setSelectedChartCandleTime] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      autoSelectedChartSessionRef.current = null;
+      return;
+    }
+    if (autoSelectedChartSessionRef.current === selectedSessionId) {
+      return;
+    }
+    if (!session || !portfolio) {
+      return;
+    }
+
+    const openSymbols = Object.entries(portfolio.positions ?? {})
+      .filter(([, qty]) => Math.abs(Number(qty) || 0) > 1e-9)
+      .map(([symbol]) => symbol);
+    const needsPlanForResolution = session.has_plan
+      && !plan
+      && openSymbols.some((symbol) => {
+        const meta = portfolio.position_meta?.[symbol];
+        return !normalizeChartTimeframe(meta?.timeframe) && !!meta?.entry_trigger_id;
+      });
+    if (needsPlanForResolution) {
+      return;
+    }
+
+    const fallbackTimeframe = session.indicator_timeframe ?? indicatorTimeframe;
+    const selection = chooseSessionChartSelection({
+      portfolio,
+      plan,
+      fallbackTimeframe,
+    });
+
+    if (selection) {
+      setChartSymbol(selection.symbol);
+      setChartTimeframe(selection.timeframe);
+    } else {
+      const firstSymbol = session.symbols[0];
+      const normalizedFallback = normalizeChartTimeframe(fallbackTimeframe);
+      if (firstSymbol) {
+        setChartSymbol(firstSymbol);
+      }
+      if (normalizedFallback) {
+        setChartTimeframe(normalizedFallback);
+      }
+    }
+
+    autoSelectedChartSessionRef.current = selectedSessionId;
+  }, [selectedSessionId, session, portfolio, plan, indicatorTimeframe]);
+
   const { data: candlesData } = useQuery({
     queryKey: ['paper-trading-candles', selectedSessionId, chartSymbol, chartTimeframe],
     queryFn: () => paperTradingAPI.getCandles(selectedSessionId!, chartSymbol, chartTimeframe, 120),
@@ -329,6 +390,21 @@ export function PaperTradingControl() {
       // R68: derive screener_regime from the top candidate's group in the preflight
       const screenerRegime = screenerGroups[0]?.hypothesis ?? null;
 
+      // R85: build trailing stop config dict (only when mode != 'none')
+      const defaultTrailingConfig = trailingMode === 'none' ? undefined : (() => {
+        const cfg: Record<string, unknown> = {
+          mode: trailingMode,
+          close_required_bars: trailCloseRequired,
+        };
+        if (trailBreakevenAtR > 0) cfg.breakeven_at_r = trailBreakevenAtR;
+        if (trailingMode !== 'breakeven_only') {
+          cfg.trail_activation_r = trailActivationR;
+          if (trailingMode === 'atr_trail') cfg.atr_trail_multiple = trailAtrMultiple;
+          if (trailingMode === 'pct_trail') cfg.pct_trail_distance = trailPctDistance;
+        }
+        return cfg;
+      })();
+
       const config: PaperTradingSessionConfig = {
         symbols,
         initial_cash: initialCash,
@@ -341,6 +417,7 @@ export function PaperTradingControl() {
         screener_regime: screenerRegime || undefined,
         enable_symbol_discovery: enableDiscovery,
         exit_binding_mode: 'category',
+        default_trailing_config: defaultTrailingConfig,
         // Aggressive trading settings
         ...aggressiveSettings,
         ...planningSettings,
@@ -834,6 +911,94 @@ export function PaperTradingControl() {
               </select>
             </div>
 
+            {/* Trailing Stop Config */}
+            <div className="border border-gray-200 dark:border-gray-600 rounded-lg p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">Trailing Stop</label>
+                <span className="text-xs text-gray-500">Applied to every new position</span>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Mode</label>
+                <select
+                  value={trailingMode}
+                  onChange={(e) => setTrailingMode(e.target.value)}
+                  className="w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+                  disabled={isRunning}
+                >
+                  <option value="none">None (static stop)</option>
+                  <option value="breakeven_only">Breakeven only (move stop to entry at R)</option>
+                  <option value="atr_trail">ATR trail (trail HWM at N×ATR)</option>
+                  <option value="pct_trail">% trail (trail HWM at fixed %)</option>
+                  <option value="step_trail">Step trail (ratchet to each R milestone)</option>
+                </select>
+              </div>
+              {trailingMode !== 'none' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Breakeven at R</label>
+                    <input
+                      type="number" min={0.1} max={3} step={0.25}
+                      value={trailBreakevenAtR}
+                      onChange={(e) => setTrailBreakevenAtR(parseFloat(e.target.value) || 1.0)}
+                      className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+                      disabled={isRunning}
+                    />
+                    <p className="text-xs text-gray-400 mt-0.5">Move stop to entry at this R</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Close confirm bars</label>
+                    <input
+                      type="number" min={1} max={5} step={1}
+                      value={trailCloseRequired}
+                      onChange={(e) => setTrailCloseRequired(parseInt(e.target.value) || 1)}
+                      className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+                      disabled={isRunning}
+                    />
+                    <p className="text-xs text-gray-400 mt-0.5">Bars to confirm stop breach (wick protection)</p>
+                  </div>
+                  {trailingMode !== 'breakeven_only' && (
+                    <div>
+                      <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Trail activation R</label>
+                      <input
+                        type="number" min={0.5} max={5} step={0.25}
+                        value={trailActivationR}
+                        onChange={(e) => setTrailActivationR(parseFloat(e.target.value) || 1.5)}
+                        className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+                        disabled={isRunning}
+                      />
+                      <p className="text-xs text-gray-400 mt-0.5">Start trailing at this R</p>
+                    </div>
+                  )}
+                  {trailingMode === 'atr_trail' && (
+                    <div>
+                      <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">ATR multiple</label>
+                      <input
+                        type="number" min={0.5} max={6} step={0.5}
+                        value={trailAtrMultiple}
+                        onChange={(e) => setTrailAtrMultiple(parseFloat(e.target.value) || 2.0)}
+                        className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+                        disabled={isRunning}
+                      />
+                      <p className="text-xs text-gray-400 mt-0.5">Stop = HWM − N×ATR(14)</p>
+                    </div>
+                  )}
+                  {trailingMode === 'pct_trail' && (
+                    <div>
+                      <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Trail distance %</label>
+                      <input
+                        type="number" min={0.5} max={10} step={0.5}
+                        value={trailPctDistance}
+                        onChange={(e) => setTrailPctDistance(parseFloat(e.target.value) || 2.0)}
+                        className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+                        disabled={isRunning}
+                      />
+                      <p className="text-xs text-gray-400 mt-0.5">Stop = HWM × (1 − %/100)</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Symbol Discovery Toggle */}
             <div className="flex items-center gap-3">
               <input
@@ -1031,6 +1196,11 @@ export function PaperTradingControl() {
                   const positionFraction: number = meta?.position_fraction ?? 1.0;
                   const targetSource: string | null = meta?.target_source ?? null;
                   const targetKind: string | null = meta?.target_structural_kind ?? null;
+                  // R85: trailing stop fields
+                  const trailingMode: string | null = meta?.trailing_mode ?? null;
+                  const activeStopPrice: number | null = meta?.active_stop_price ?? null;
+                  const breakevenFired: boolean = meta?.breakeven_ratchet_fired ?? false;
+                  const stopConfirmation: string | null = meta?.stop_confirmation ?? null;
                   const absQty = Math.abs(qty);
                   const notional = entryPx * absQty;
                   const pnlAbs = (lastPx - entryPx) * absQty * (side === 'short' ? -1 : 1);
@@ -1056,7 +1226,7 @@ export function PaperTradingControl() {
                   if (riskAbs !== null) totalAtRisk += riskAbs;
                   if (stopPx === null) positionsWithoutStop++;
 
-                  return { symbol, qty: absQty, entryPx, lastPx, meta, openedAt, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio, mfeR, tradeState, r1Reached, r2Reached, r3Reached, positionFraction, targetSource, targetKind };
+                  return { symbol, qty: absQty, entryPx, lastPx, meta, openedAt, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio, mfeR, tradeState, r1Reached, r2Reached, r3Reached, positionFraction, targetSource, targetKind, trailingMode, activeStopPrice, breakevenFired, stopConfirmation };
                 });
 
                 const exposurePct = portfolio.total_equity > 0 ? totalExposure / portfolio.total_equity * 100 : 0;
@@ -1066,7 +1236,7 @@ export function PaperTradingControl() {
                   <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
                     <p className="text-sm font-medium mb-3">Open Positions</p>
                     <div className="space-y-3">
-                      {posData.map(({ symbol, qty, entryPx, lastPx, openedAt, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio, mfeR, tradeState, r1Reached, r2Reached, r3Reached, positionFraction, targetSource, targetKind }) => (
+                      {posData.map(({ symbol, qty, entryPx, lastPx, openedAt, stopPx, targetPx, side, category, notional, pnlAbs, pnlPct, riskAbs, riskPct, stopDistPct, tgtDistPct, currentR, rrRatio, mfeR, tradeState, r1Reached, r2Reached, r3Reached, positionFraction, targetSource, targetKind, trailingMode, activeStopPrice, breakevenFired, stopConfirmation }) => (
                         <div key={symbol} className="text-sm rounded-md border border-gray-200 dark:border-gray-700 p-2.5 space-y-1.5">
                           {/* Header row: symbol + badges */}
                           <div className="flex items-center gap-2 flex-wrap">
@@ -1126,10 +1296,38 @@ export function PaperTradingControl() {
                             Current: <span className="font-mono text-gray-700 dark:text-gray-300">{formatCurrency(lastPx)}</span>
                           </div>
                           {/* Stop row */}
-                          {stopPx !== null ? (
+                          {(stopPx !== null || activeStopPrice !== null) ? (
                             <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400 font-mono">
                               <span>↓ Stop</span>
-                              <span className="font-semibold">{formatCurrency(stopPx)}</span>
+                              {/* Show active (trailing) stop if it has moved from entry stop */}
+                              {activeStopPrice !== null && activeStopPrice !== stopPx ? (
+                                <span className="font-semibold text-purple-600 dark:text-purple-400" title="Trailing stop (moved from entry stop)">
+                                  {formatCurrency(activeStopPrice)}
+                                  {stopPx !== null && (
+                                    <span className="ml-1 line-through text-gray-400 text-xs">{formatCurrency(stopPx)}</span>
+                                  )}
+                                </span>
+                              ) : (
+                                <span className="font-semibold">{formatCurrency(stopPx ?? activeStopPrice ?? 0)}</span>
+                              )}
+                              {/* Trailing mode badge */}
+                              {trailingMode && trailingMode !== 'none' && (
+                                <span className="px-1 py-0.5 rounded text-xs font-semibold bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300" title={`Trailing mode: ${trailingMode}`}>
+                                  {trailingMode === 'atr_trail' ? 'ATR~' : trailingMode === 'pct_trail' ? '%~' : trailingMode === 'step_trail' ? 'step~' : trailingMode === 'breakeven_only' ? 'BE' : '~'}
+                                </span>
+                              )}
+                              {/* Breakeven locked indicator */}
+                              {breakevenFired && (
+                                <span className="px-1 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" title="Stop moved to breakeven">
+                                  BE✓
+                                </span>
+                              )}
+                              {/* Close confirmation progress */}
+                              {stopConfirmation && (
+                                <span className="text-amber-500 dark:text-amber-400 text-xs font-medium" title="Waiting for close confirmation">
+                                  confirm {stopConfirmation}
+                                </span>
+                              )}
                               {stopDistPct !== null && (
                                 <span className="text-gray-500">({stopDistPct.toFixed(1)}% away)</span>
                               )}
@@ -1426,7 +1624,7 @@ export function PaperTradingControl() {
               })()}
               {/* Timeframe selector */}
               <div className="flex gap-1 ml-2">
-                {['1m', '5m', '15m', '1h', '6h', '1d'].map((tf) => (
+                {CHART_TIMEFRAMES.map((tf) => (
                   <button
                     key={tf}
                     onClick={() => setChartTimeframe(tf)}
@@ -1758,6 +1956,179 @@ function formatOpenDuration(openedAt: string): string {
     return `${hours}h`;
   }
   return `${hours}h ${minutes}m`;
+}
+
+const CHART_TIMEFRAMES = ['1m', '5m', '15m', '1h', '6h', '1d'] as const;
+const CHART_TIMEFRAME_SET = new Set<string>(CHART_TIMEFRAMES);
+
+type ChartSelection = {
+  symbol: string;
+  timeframe: string;
+};
+
+function chooseSessionChartSelection({
+  portfolio,
+  plan,
+  fallbackTimeframe,
+}: {
+  portfolio: PaperTradingPortfolio;
+  plan?: PaperTradingPlan;
+  fallbackTimeframe?: string | null;
+}): ChartSelection | null {
+  const openSymbols = Object.entries(portfolio.positions ?? {})
+    .filter(([, qty]) => Math.abs(Number(qty) || 0) > 1e-9)
+    .map(([symbol]) => symbol);
+
+  if (openSymbols.length === 0) {
+    return null;
+  }
+
+  const fallback = normalizeChartTimeframe(fallbackTimeframe) ?? '1h';
+  const ranked = openSymbols
+    .map((symbol) => {
+      const meta = portfolio.position_meta?.[symbol];
+      const timeframe = resolvePositionChartTimeframe(symbol, meta, plan, fallback);
+      const lastPrice = portfolio.last_prices?.[symbol];
+
+      return {
+        symbol,
+        timeframe,
+        expectedCloseDeltaMs: estimatedCloseDeltaMs(meta, timeframe),
+        exitDistanceScore: exitDistanceScore(meta, lastPrice),
+        timeframeMs: timeframeToMs(timeframe) ?? Number.POSITIVE_INFINITY,
+        openedAtMs: parseTimestampMs(meta?.opened_at) ?? Number.POSITIVE_INFINITY,
+      };
+    })
+    .sort((left, right) => (
+      compareNumbers(left.expectedCloseDeltaMs, right.expectedCloseDeltaMs)
+      || compareNumbers(left.exitDistanceScore, right.exitDistanceScore)
+      || compareNumbers(left.timeframeMs, right.timeframeMs)
+      || compareNumbers(left.openedAtMs, right.openedAtMs)
+      || left.symbol.localeCompare(right.symbol)
+    ));
+
+  const best = ranked[0];
+  return best ? { symbol: best.symbol, timeframe: best.timeframe } : null;
+}
+
+function resolvePositionChartTimeframe(
+  symbol: string,
+  meta: PositionMeta | undefined,
+  plan: PaperTradingPlan | undefined,
+  fallbackTimeframe: string,
+): string {
+  const direct = normalizeChartTimeframe(meta?.timeframe);
+  if (direct) {
+    return direct;
+  }
+
+  const entryTriggerId = meta?.entry_trigger_id;
+  const triggerById = entryTriggerId
+    ? plan?.triggers.find((trigger) => trigger.id === entryTriggerId)
+    : undefined;
+  const triggerTimeframe = normalizeChartTimeframe(triggerById?.timeframe);
+  if (triggerTimeframe) {
+    return triggerTimeframe;
+  }
+
+  const triggerBySymbol = plan?.triggers.find((trigger) => (
+    trigger.symbol === symbol
+    && (!meta?.entry_category || trigger.category === meta.entry_category)
+    && (!meta?.entry_side || trigger.direction === meta.entry_side)
+  ));
+  const symbolTimeframe = normalizeChartTimeframe(triggerBySymbol?.timeframe);
+  if (symbolTimeframe) {
+    return symbolTimeframe;
+  }
+
+  return normalizeChartTimeframe(fallbackTimeframe) ?? '1h';
+}
+
+function normalizeChartTimeframe(timeframe?: string | null): string | null {
+  if (!timeframe) {
+    return null;
+  }
+  const normalized = timeframe.trim();
+  return CHART_TIMEFRAME_SET.has(normalized) ? normalized : null;
+}
+
+function estimatedCloseDeltaMs(meta: PositionMeta | undefined, timeframe: string): number {
+  const openedAtMs = parseTimestampMs(meta?.opened_at);
+  const barsToResolution = meta?.estimated_bars_to_resolution;
+  const timeframeMs = timeframeToMs(timeframe);
+  if (
+    openedAtMs == null
+    || timeframeMs == null
+    || typeof barsToResolution !== 'number'
+    || !Number.isFinite(barsToResolution)
+    || barsToResolution <= 0
+  ) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return openedAtMs + (barsToResolution * timeframeMs) - Date.now();
+}
+
+function exitDistanceScore(meta: PositionMeta | undefined, lastPrice: number | undefined): number {
+  if (!Number.isFinite(lastPrice) || !lastPrice || lastPrice <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const distances: number[] = [];
+  if (typeof meta?.stop_price_abs === 'number' && Number.isFinite(meta.stop_price_abs)) {
+    distances.push(Math.abs(lastPrice - meta.stop_price_abs) / lastPrice);
+  }
+  if (typeof meta?.target_price_abs === 'number' && Number.isFinite(meta.target_price_abs)) {
+    distances.push(Math.abs(meta.target_price_abs - lastPrice) / lastPrice);
+  }
+
+  if (distances.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.min(...distances);
+}
+
+function parseTimestampMs(timestamp?: string | null): number | null {
+  if (!timestamp) {
+    return null;
+  }
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function timeframeToMs(timeframe?: string | null): number | null {
+  if (!timeframe) {
+    return null;
+  }
+  const value = Number(timeframe.slice(0, -1));
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  const unit = timeframe.slice(-1);
+  switch (unit) {
+    case 'm':
+      return value * 60 * 1000;
+    case 'h':
+      return value * 60 * 60 * 1000;
+    case 'd':
+      return value * 24 * 60 * 60 * 1000;
+    default:
+      return null;
+  }
+}
+
+function compareNumbers(left: number, right: number): number {
+  const leftFinite = Number.isFinite(left);
+  const rightFinite = Number.isFinite(right);
+  if (leftFinite && rightFinite) {
+    return left === right ? 0 : left - right;
+  }
+  if (leftFinite) {
+    return -1;
+  }
+  if (rightFinite) {
+    return 1;
+  }
+  return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2165,7 +2536,7 @@ function PaperCandlestickTooltip({
   axisDecimals,
 }: {
   active?: boolean;
-  payload?: PaperCandlestickTooltipDatum[];
+  payload?: readonly PaperCandlestickTooltipDatum[];
   axisDecimals: number;
 }) {
   if (!active || !payload?.length) return null;
@@ -2290,7 +2661,7 @@ const CandlestickChart = memo(function CandlestickChart({
     };
   }, [candles, openPositionEntryPrice, stopPrice, targetPrice]);
   const renderTooltip = useMemo(
-    () => (props: { active?: boolean; payload?: PaperCandlestickTooltipDatum[] }) => (
+    () => (props: { active?: boolean; payload?: readonly PaperCandlestickTooltipDatum[] }) => (
       <PaperCandlestickTooltip {...props} axisDecimals={axisDecimals} />
     ),
     [axisDecimals],
