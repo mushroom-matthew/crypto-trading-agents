@@ -231,6 +231,8 @@ class PaperTradingConfig(BaseModel):
     research_budget_enabled: bool = True
     research_budget_fraction: Optional[float] = None   # None → fall back to env var
     research_max_loss_pct: Optional[float] = None      # % of research capital (None → 50%)
+    # R76: AI-led portfolio planner
+    use_ai_planner: bool = False
 
 
 class SessionState(BaseModel):
@@ -283,6 +285,9 @@ class SessionState(BaseModel):
     hypothesis_executor_state: Dict[str, Any] = {}
     # R80: WorldState — shared world model for ii-loop coherence
     world_state: Optional[Dict[str, Any]] = None
+    # R76: AI-led portfolio planner
+    use_ai_planner: bool = False
+    session_intent: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
@@ -302,6 +307,7 @@ async def generate_strategy_plan_activity(
     direction_bias: Optional[str] = None,
     preferred_symbol: Optional[str] = None,
     policy_state_machine_record: Optional[Dict[str, Any]] = None,
+    session_intent_dict: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Generate a strategy plan using the LLM client.
 
@@ -544,6 +550,26 @@ async def generate_strategy_plan_activity(
                 )
         except Exception as _mem_exc:
             logger.debug("Memory context injection failed (non-fatal): %s", _mem_exc)
+
+    # R76: Inject SESSION_INTENT block when AI planner provided one.
+    if session_intent_dict and not repair_instructions:
+        try:
+            from schemas.session_intent import SessionIntent as _SessionIntent
+            _intent_obj = _SessionIntent.model_validate(session_intent_dict)
+            effective_prompt = (
+                (effective_prompt or "")
+                + "\n\n"
+                + _intent_obj.to_prompt_block()
+                + "\n\nGenerate triggers for ALL selected symbols in the SESSION_INTENT above. "
+                "Respect each symbol's direction_bias and risk_budget_fraction.\n"
+            )
+            logger.info(
+                "R76: SESSION_INTENT injected — symbols=%s is_fallback=%s",
+                _intent_obj.selected_symbols,
+                _intent_obj.is_fallback,
+            )
+        except Exception as _ie:
+            logger.warning("R76: SESSION_INTENT injection failed (non-fatal): %s", _ie)
 
     llm_client = LLMClient(model=llm_model) if llm_model else LLMClient()
     try:
@@ -1534,6 +1560,70 @@ async def build_episode_activity(
         logger.warning("build_episode_activity failed (non-fatal): %s", exc)
 
 
+@activity.defn
+async def generate_session_intent_activity(
+    symbols: List[str],
+    indicator_snapshots_raw: Dict[str, Any],
+    structure_snapshots_raw: Dict[str, Any],
+    portfolio_state: Dict[str, Any],
+    session_config: Dict[str, Any],
+    llm_model: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """R76: Generate a SessionIntent using the AI portfolio planner.
+
+    Runs the opportunity scanner over indicator snapshots, then calls
+    generate_session_intent() to produce symbol selection and risk allocation.
+
+    Returns the SessionIntent as a dict, or None if both LLM and fallback fail.
+    """
+    try:
+        from services.opportunity_scanner import rank_universe as _rank_universe
+        from services.session_planner import generate_session_intent as _gen_intent
+        from schemas.llm_strategist import IndicatorSnapshot as _IS
+        from schemas.opportunity import OpportunityCard as _OC
+        from datetime import datetime as _dt, timezone as _tz
+
+        # Reconstruct IndicatorSnapshot objects from raw dicts
+        _snaps: Dict[str, Any] = {}
+        for sym, raw in indicator_snapshots_raw.items():
+            if not isinstance(raw, dict):
+                continue
+            try:
+                _snaps[sym] = _IS.model_validate({
+                    **raw,
+                    "symbol": sym,
+                    "timeframe": session_config.get("indicator_timeframe", "1h"),
+                    "as_of": raw.get("as_of", _dt.now(_tz.utc)),
+                })
+            except Exception:
+                pass
+
+        # Run opportunity scanner
+        _ranking = _rank_universe(
+            symbols=list(_snaps.keys()) or symbols,
+            indicator_snapshots=_snaps,
+            top_n=10,
+        )
+
+        # Generate session intent via LLM (with fallback)
+        _intent = await _gen_intent(
+            opportunity_ranking=_ranking.cards,
+            portfolio_state=portfolio_state,
+            session_config=session_config,
+            fallback_symbols=symbols,
+            llm_model=llm_model,
+        )
+        logger.info(
+            "R76: session_intent generated — symbols=%s fallback=%s",
+            _intent.selected_symbols,
+            _intent.is_fallback,
+        )
+        return _intent.model_dump(mode="json")
+    except Exception as exc:
+        logger.warning("generate_session_intent_activity failed (non-fatal): %s", exc)
+        return None
+
+
 # ============================================================================
 # Workflow
 # ============================================================================
@@ -1611,6 +1701,9 @@ class PaperTradingWorkflow:
         self._hypothesis_executor_state: Dict[str, Any] = {}
         # R80: WorldState — shared world model (regime + judge guidance + calibration)
         self._world_state: Dict[str, Any] = {}
+        # R76: AI-led portfolio planner
+        self.use_ai_planner: bool = False
+        self._session_intent: Optional[Dict[str, Any]] = None
 
     # -------------------------------------------------------------------------
     # Signals
@@ -2026,6 +2119,8 @@ class PaperTradingWorkflow:
             self.min_volume_24h = parsed_config.min_volume_24h
             self.exit_binding_mode = parsed_config.exit_binding_mode
             self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
+            # R76: AI planner flag
+            self.use_ai_planner = parsed_config.use_ai_planner
 
             # Initialize research budget (separate capital pool)
             if not parsed_config.research_budget_enabled:
@@ -2368,6 +2463,60 @@ class PaperTradingWorkflow:
             return
         # ─────────────────────────────────────────────────────────────────────
 
+        # R76: AI portfolio planner — generate SessionIntent on first plan cycle
+        if self.use_ai_planner and self._session_intent is None:
+            try:
+                _session_config_for_planner = {
+                    "indicator_timeframe": self.indicator_timeframe,
+                    "screener_regime": self.screener_regime,
+                    "direction_bias": self.direction_bias,
+                }
+                _raw_snaps_for_planner = {
+                    sym: dict(indicator_snapshots.get(sym) or {})
+                    for sym in self.symbols
+                    if indicator_snapshots.get(sym)
+                }
+                _intent_dict = await workflow.execute_activity(
+                    generate_session_intent_activity,
+                    args=[
+                        self.symbols,
+                        _raw_snaps_for_planner,
+                        {},  # structure_snapshots_raw (lightweight for now)
+                        portfolio_state,
+                        _session_config_for_planner,
+                        None,  # llm_model
+                    ],
+                    schedule_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+                if _intent_dict:
+                    self._session_intent = _intent_dict
+                    # Override session symbols with planner selection
+                    _selected = _intent_dict.get("selected_symbols") or []
+                    if _selected:
+                        self.symbols = list(_selected)
+                        workflow.logger.info(
+                            "R76: planner overrode symbols → %s (is_fallback=%s)",
+                            self.symbols,
+                            _intent_dict.get("is_fallback", True),
+                        )
+                    # Emit event for UI
+                    await workflow.execute_activity(
+                        emit_paper_trading_event_activity,
+                        args=[self.session_id, "session_intent_generated", {
+                            "selected_symbols": self.symbols,
+                            "is_fallback": _intent_dict.get("is_fallback", True),
+                            "regime_summary": _intent_dict.get("regime_summary", ""),
+                            "planner_rationale": _intent_dict.get("planner_rationale", ""),
+                        }],
+                        schedule_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+            except Exception as _planner_exc:
+                workflow.logger.warning(
+                    "R76: session intent generation failed (non-fatal): %s", _planner_exc
+                )
+
         # Generate plan (guarded by PolicyLoopGate — gate acquired above)
         try:
             # R63: thread in-session episode records so the activity can load them
@@ -2410,6 +2559,7 @@ class PaperTradingWorkflow:
                     self.direction_bias,
                     self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
                     dict(self.policy_state_machine_record) if self.policy_state_machine_record else None,  # R66
+                    dict(self._session_intent) if self._session_intent else None,  # R76
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -2465,6 +2615,7 @@ class PaperTradingWorkflow:
                         self.direction_bias,
                         self.symbols[0] if len(self.symbols) == 1 else None,  # preferred_symbol
                         dict(self.policy_state_machine_record) if self.policy_state_machine_record else None,  # R66
+                        None,  # session_intent_dict: omit in repair pass (repair_instructions overrides)
                     ],
                     schedule_to_close_timeout=timedelta(minutes=5),
                     retry_policy=RetryPolicy(maximum_attempts=1),
@@ -3820,6 +3971,9 @@ class PaperTradingWorkflow:
             hypothesis_executor_state=dict(self._hypothesis_executor_state),
             # R80: WorldState
             world_state=dict(self._world_state) if self._world_state else None,
+            # R76: AI planner
+            use_ai_planner=self.use_ai_planner,
+            session_intent=dict(self._session_intent) if self._session_intent else None,
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -3871,6 +4025,9 @@ class PaperTradingWorkflow:
         self._hypothesis_executor_state = dict(parsed.hypothesis_executor_state or {})
         # R80: WorldState
         self._world_state = dict(parsed.world_state) if parsed.world_state else {}
+        # R76: AI planner
+        self.use_ai_planner = parsed.use_ai_planner
+        self._session_intent = dict(parsed.session_intent) if parsed.session_intent else None
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)

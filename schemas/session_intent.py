@@ -1,0 +1,117 @@
+"""SessionIntent schema for AI-led portfolio planning (R76).
+
+SessionIntent is the output of the AI portfolio planner — it selects
+symbols, assigns risk budgets, and provides per-symbol thesis summaries
+before the strategy LLM runs. This decouples symbol selection from
+trigger generation and makes the session's intention explicit.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Dict, List, Literal, Optional
+from uuid import uuid4
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class SymbolIntent(BaseModel):
+    """Per-symbol allocation and thesis within a SessionIntent."""
+
+    model_config = {"extra": "forbid"}
+
+    symbol: str
+    opportunity_score_norm: float = Field(ge=0.0, le=1.0)
+    risk_budget_fraction: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Fraction of session risk budget allocated to this symbol. Sum across symbols ≤ 1.0.",
+    )
+    playbook_id: Optional[str] = Field(
+        default=None,
+        description="Playbook derived from regime + structure (not user-selected).",
+    )
+    thesis_summary: str = Field(
+        description="1-2 sentence AI-generated basis for trading this symbol."
+    )
+    expected_hold_horizon: Literal["scalp", "intraday", "swing"] = "intraday"
+    direction_bias: Literal["long", "short", "neutral"] = "neutral"
+
+
+class SessionIntent(BaseModel):
+    """AI-generated session plan: symbol selection, risk map, and per-symbol thesis.
+
+    Created once at session start (or on first plan generation when use_ai_planner=True).
+    Injected into the strategy LLM prompt as a SESSION_INTENT block so the strategist
+    generates plans aligned with the planner's symbol selection and risk allocation.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    intent_id: str = Field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    selected_symbols: List[str] = Field(
+        description="Symbols selected for this session, ranked by opportunity_score."
+    )
+    planned_trade_cadence_min: int = Field(default=5, ge=1)
+    planned_trade_cadence_max: int = Field(default=10, ge=1)
+
+    symbol_intents: List[SymbolIntent] = Field(default_factory=list)
+    total_risk_budget_fraction: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    regime_summary: str = Field(
+        default="",
+        description="Overall market regime at intent creation time.",
+    )
+    planner_rationale: str = Field(
+        default="",
+        description="Why these symbols were chosen over alternatives.",
+    )
+    use_ai_planner: bool = True
+
+    # Fallback metadata (populated when LLM call fails)
+    is_fallback: bool = Field(
+        default=False,
+        description="True when LLM failed and fallback (user symbols + neutral allocation) was used.",
+    )
+
+    @field_validator("symbol_intents")
+    @classmethod
+    def validate_risk_budget_sum(cls, v: List[SymbolIntent]) -> List[SymbolIntent]:
+        if not v:
+            return v
+        total = sum(si.risk_budget_fraction for si in v)
+        if total > 1.01:  # allow small float rounding tolerance
+            raise ValueError(
+                f"sum(risk_budget_fraction) = {total:.3f} > 1.0 — risk budget overcommitted"
+            )
+        return v
+
+    def to_prompt_block(self) -> str:
+        """Format as SESSION_INTENT context block for injection into LLM prompt."""
+        lines = [
+            "SESSION_INTENT (AI-generated portfolio plan for this session):",
+            f"Selected symbols: {', '.join(self.selected_symbols)}",
+            f"Regime: {self.regime_summary or 'not specified'}",
+            f"Planned cadence: {self.planned_trade_cadence_min}–{self.planned_trade_cadence_max} trades/24h",
+            f"Rationale: {self.planner_rationale or 'see per-symbol thesis below'}",
+            "",
+            "Per-symbol allocations:",
+        ]
+        for si in self.symbol_intents:
+            lines.append(
+                f"  {si.symbol}: score={si.opportunity_score_norm:.2f} "
+                f"risk={si.risk_budget_fraction:.0%} "
+                f"bias={si.direction_bias} "
+                f"horizon={si.expected_hold_horizon}"
+                + (f" playbook={si.playbook_id}" if si.playbook_id else "")
+            )
+            lines.append(f"    Thesis: {si.thesis_summary}")
+        return "\n".join(lines)
+
+    def symbol_intent_for(self, symbol: str) -> Optional[SymbolIntent]:
+        """Return the SymbolIntent for a given symbol, or None."""
+        for si in self.symbol_intents:
+            if si.symbol == symbol:
+                return si
+        return None
