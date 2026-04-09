@@ -95,8 +95,23 @@ class PaperTradingSessionConfig(BaseModel):
     )
     plan_interval_hours: float = Field(
         default=4.0,
-        description="How often to regenerate strategy plans (in hours)"
+        description=(
+            "How often to regenerate strategy plans (in hours). "
+            "When left at default (4.0), auto-computed from indicator_timeframe: "
+            "1m→0.25h, 5m→0.5h, 15m→0.75h, 1h→4.0h, 6h→12.0h, 1d→24.0h. "
+            "Explicit values always override auto-computation."
+        ),
     )
+
+    # Sentinel to detect whether plan_interval_hours was explicitly set by the caller.
+    # Pydantic does not expose a "was this field provided?" flag directly, so we track
+    # it via a private flag set in model_post_init.
+    _plan_interval_explicit: bool = False
+
+    def model_post_init(self, __context: object) -> None:  # type: ignore[override]
+        # Mark plan_interval as explicitly set only when it differs from the default.
+        # This allows auto-computation to kick in when the caller omits the field.
+        object.__setattr__(self, "_plan_interval_explicit", self.plan_interval_hours != 4.0)
     indicator_timeframe: str = Field(
         default="1h",
         description=(
@@ -330,6 +345,8 @@ class SessionStartResponse(BaseModel):
     session_id: str
     status: str
     message: str
+    plan_interval_hours: Optional[float] = None
+    plan_interval_auto: Optional[bool] = None  # True when derived from indicator_timeframe
 
 
 class SessionStatus(BaseModel):
@@ -342,6 +359,9 @@ class SessionStatus(BaseModel):
     has_plan: bool
     last_plan_time: Optional[str]
     plan_interval_hours: float
+    indicator_timeframe: Optional[str] = None
+    direction_bias: Optional[str] = None
+    enable_symbol_discovery: Optional[bool] = None
     # R77: CadenceGovernor summary
     cadence_summary: Optional[Dict[str, Any]] = None
     # R76: AI planner session intent
@@ -355,6 +375,7 @@ class PortfolioStatus(BaseModel):
     """Current portfolio status."""
 
     cash: float
+    initial_cash: Optional[float] = None
     positions: Dict[str, float]
     entry_prices: Dict[str, float]
     last_prices: Dict[str, float]
@@ -462,6 +483,19 @@ async def start_session(config: PaperTradingSessionConfig):
         # Normalize symbols
         symbols = [s.upper() if "-" in s else f"{s.upper()}-USD" for s in config.symbols]
 
+        # Auto-compute plan_interval_hours from indicator_timeframe when not explicitly set.
+        # Only applies when the caller left plan_interval_hours at the default (4.0).
+        _TF_DEFAULT_INTERVALS: Dict[str, float] = {
+            "1m": 0.25, "5m": 0.5, "15m": 0.75, "1h": 4.0, "6h": 12.0, "1d": 24.0,
+        }
+        plan_interval_hours = config.plan_interval_hours
+        plan_interval_auto = False
+        if not config._plan_interval_explicit:
+            derived = _TF_DEFAULT_INTERVALS.get(config.indicator_timeframe)
+            if derived is not None and derived != plan_interval_hours:
+                plan_interval_hours = derived
+                plan_interval_auto = True
+
         # Normalize allocations
         initial_allocations = None
         if config.initial_allocations:
@@ -529,7 +563,7 @@ async def start_session(config: PaperTradingSessionConfig):
             "initial_cash": config.initial_cash,
             "initial_allocations": initial_allocations,
             "strategy_prompt": strategy_prompt,
-            "plan_interval_hours": config.plan_interval_hours,
+            "plan_interval_hours": plan_interval_hours,
             "indicator_timeframe": config.indicator_timeframe,
             "replan_on_day_boundary": (
                 config.replan_on_day_boundary if config.replan_on_day_boundary is not None else True
@@ -605,10 +639,15 @@ async def start_session(config: PaperTradingSessionConfig):
 
         logger.info(f"Started paper trading session: {session_id}")
 
+        _msg = f"Paper trading session started. Use GET /paper-trading/sessions/{session_id} to monitor."
+        if plan_interval_auto:
+            _msg += f" plan_interval_hours auto-set to {plan_interval_hours}h from indicator_timeframe={config.indicator_timeframe}."
         return SessionStartResponse(
             session_id=session_id,
             status="running",
-            message=f"Paper trading session started. Use GET /paper-trading/sessions/{session_id} to monitor."
+            message=_msg,
+            plan_interval_hours=plan_interval_hours,
+            plan_interval_auto=plan_interval_auto,
         )
 
     except Exception as e:
@@ -626,17 +665,33 @@ async def get_session_status(session_id: str):
         client = await get_temporal_client()
         handle = client.get_workflow_handle(session_id)
 
-        # Query workflow status
-        status = await handle.query("get_session_status")
+        # Execution status from describe() is the source of truth for lifecycle:
+        # running/completed/failed/terminated/etc. Query state can be stale after
+        # closure (e.g. a failed workflow may still return stopped=False in query).
+        desc = await handle.describe()
+        execution_status = desc.status.name.lower() if desc.status else "unknown"
+
+        status: Dict[str, Any] = {}
+        try:
+            status = await handle.query("get_session_status")
+        except Exception as query_err:
+            logger.warning(
+                "Session %s: get_session_status query unavailable (%s); using describe()-only fallback",
+                session_id,
+                query_err,
+            )
 
         return SessionStatus(
-            session_id=status["session_id"],
-            status="running" if not status["stopped"] else "stopped",
-            symbols=status["symbols"],
-            cycle_count=status["cycle_count"],
-            has_plan=status["has_plan"],
-            last_plan_time=status["last_plan_time"],
-            plan_interval_hours=status["plan_interval_hours"],
+            session_id=status.get("session_id", session_id),
+            status=execution_status,
+            symbols=status.get("symbols") or [],
+            cycle_count=int(status.get("cycle_count") or 0),
+            has_plan=bool(status.get("has_plan", False)),
+            last_plan_time=status.get("last_plan_time"),
+            plan_interval_hours=float(status.get("plan_interval_hours") or 0.0),
+            indicator_timeframe=status.get("indicator_timeframe"),
+            direction_bias=status.get("direction_bias"),
+            enable_symbol_discovery=status.get("enable_symbol_discovery"),
             cadence_summary=status.get("cadence_summary"),
             session_intent_symbols=status.get("session_intent_symbols"),
             session_intent=status.get("session_intent"),
@@ -734,6 +789,7 @@ async def get_portfolio(session_id: str):
 
         return PortfolioStatus(
             cash=float(portfolio.get("cash", 0)),
+            initial_cash=float(portfolio.get("initial_cash", 0)) if portfolio.get("initial_cash") is not None else None,
             positions={k: float(v) for k, v in portfolio.get("positions", {}).items()},
             entry_prices={k: float(v) for k, v in portfolio.get("entry_prices", {}).items()},
             last_prices={k: float(v) for k, v in portfolio.get("last_prices", {}).items()},
@@ -965,7 +1021,8 @@ async def get_trades(session_id: str, limit: int = 100):
         for tx in transactions:
             ts_raw = tx.get("timestamp", "")
             if isinstance(ts_raw, (int, float)):
-                ts_str = datetime.fromtimestamp(ts_raw, tz=_tz.utc).isoformat()
+                ts_sec = ts_raw / 1000.0 if ts_raw > 1e12 else ts_raw
+                ts_str = datetime.fromtimestamp(ts_sec, tz=_tz.utc).isoformat()
             else:
                 ts_str = str(ts_raw)
             trades.append(TradeRecord(
@@ -985,6 +1042,55 @@ async def get_trades(session_id: str, limit: int = 100):
     except Exception as e:
         logger.error(f"Failed to get trades: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _build_hold_overrides_from_order_events(session_id: str, max_events: int = 10000) -> Dict[str, List[float]]:
+    """Derive per-symbol FIFO hold durations from order_executed event telemetry.
+
+    Why this exists:
+    - Legacy sessions may have coarse or replay-skewed ledger timestamps.
+    - order_executed events carry reliable event-store timestamps and are emitted
+      on every fill. Using them as hold-time overrides keeps historical UI/metrics
+      stable without changing PnL pairing logic.
+    """
+    from ops_api.event_store import EventStore
+
+    store = EventStore()
+    events = store.list_events_filtered(
+        event_type="order_executed",
+        run_id=session_id,
+        limit=max_events,
+        order="asc",
+    )
+    open_entries: Dict[str, List[datetime]] = {}
+    holds_by_symbol: Dict[str, List[float]] = {}
+
+    for event in events:
+        payload = event.payload or {}
+        symbol = str(payload.get("symbol") or "")
+        if not symbol:
+            continue
+
+        side = str(payload.get("side") or "").lower()
+        intent = str(payload.get("intent") or ("entry" if side == "buy" else "exit")).lower()
+        is_entry = intent == "entry" or side == "buy"
+        is_exit = intent in {"exit", "flat", "conflict_exit", "conflict_reverse"} or side == "sell"
+
+        if is_entry:
+            open_entries.setdefault(symbol, []).append(event.ts)
+            continue
+        if not is_exit:
+            continue
+
+        entries = open_entries.get(symbol, [])
+        if not entries:
+            continue
+
+        entry_ts = entries.pop(0)
+        hold_minutes = max(0.0, (event.ts - entry_ts).total_seconds() / 60.0)
+        holds_by_symbol.setdefault(symbol, []).append(hold_minutes)
+
+    return holds_by_symbol
 
 
 @router.get("/sessions/{session_id}/trade_sets")
@@ -1017,14 +1123,17 @@ async def get_trade_sets(session_id: str, limit: int = 50):
 
         # Sort oldest-first for pairing
         txs = sorted(transactions, key=lambda x: x.get("timestamp", 0))
+        hold_overrides = _build_hold_overrides_from_order_events(session_id)
 
         def _ts_to_iso(raw) -> str:
             if isinstance(raw, (int, float)):
-                return datetime.fromtimestamp(raw, tz=_tz.utc).isoformat()
+                ts_sec = raw / 1000.0 if raw > 1e12 else raw
+                return datetime.fromtimestamp(ts_sec, tz=_tz.utc).isoformat()
             return str(raw)
 
         # Pair BUY → SELL for the same symbol using a FIFO stack per symbol
         open_entries: Dict[str, List[Dict]] = {}  # symbol → list of open entry dicts
+        closed_trade_index: Dict[str, int] = {}
         trade_sets = []
 
         for tx in txs:
@@ -1043,6 +1152,8 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                 if not entries:
                     continue
                 entry = entries.pop(0)
+                pair_idx = closed_trade_index.get(symbol, 0)
+                closed_trade_index[symbol] = pair_idx + 1
 
                 entry_price = float(entry.get("price", entry.get("fill_price", 0)))
                 entry_qty = float(entry.get("qty", entry.get("quantity", 0)))
@@ -1058,6 +1169,9 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                 entry_ts_sec = entry_ts if entry_ts < 1e12 else entry_ts / 1000.0
                 exit_ts_sec = ts_raw if ts_raw < 1e12 else ts_raw / 1000.0
                 hold_minutes = (exit_ts_sec - entry_ts_sec) / 60.0
+                symbol_overrides = hold_overrides.get(symbol)
+                if symbol_overrides and pair_idx < len(symbol_overrides):
+                    hold_minutes = symbol_overrides[pair_idx]
 
                 # R-per-hour: net_pnl / initial_risk / hold_hours
                 stop_px = entry.get("stop_price_abs")
@@ -1177,7 +1291,9 @@ async def get_session_metrics(session_id: str):
 
         # Compute FIFO trade pairs (identical logic to get_trade_sets)
         txs = sorted(transactions, key=lambda x: x.get("timestamp", 0))
+        hold_overrides = _build_hold_overrides_from_order_events(session_id)
         open_entries: Dict[str, List[Dict]] = {}
+        closed_trade_index: Dict[str, int] = {}
         trade_sets: List[Dict[str, Any]] = []
 
         for tx in txs:
@@ -1196,6 +1312,8 @@ async def get_session_metrics(session_id: str):
                 if not entries:
                     continue
                 entry = entries.pop(0)
+                pair_idx = closed_trade_index.get(symbol, 0)
+                closed_trade_index[symbol] = pair_idx + 1
                 entry_price = float(entry.get("price", entry.get("fill_price", 0)))
                 entry_qty = float(entry.get("qty", entry.get("quantity", 0)))
                 entry_ts = entry.get("timestamp", 0)
@@ -1207,6 +1325,9 @@ async def get_session_metrics(session_id: str):
                 entry_ts_sec = entry_ts if entry_ts < 1e12 else entry_ts / 1000.0
                 exit_ts_sec = ts_raw if ts_raw < 1e12 else ts_raw / 1000.0
                 hold_minutes = (exit_ts_sec - entry_ts_sec) / 60.0
+                symbol_overrides = hold_overrides.get(symbol)
+                if symbol_overrides and pair_idx < len(symbol_overrides):
+                    hold_minutes = symbol_overrides[pair_idx]
                 stop_px = entry.get("stop_price_abs")
                 r_return = None
                 if stop_px and entry_price > 0:
@@ -1644,24 +1765,34 @@ async def list_sessions(status: Optional[str] = None, limit: int = 20):
     try:
         client = await get_temporal_client()
 
-        # Build query
+        # Query all paper-trading executions, then collapse to one canonical row
+        # per session_id. This avoids showing:
+        #  - session-scoped ledger workflows (suffix "-ledger")
+        #  - historical continued-as-new executions for the same session_id
+        # Temporal returns newest executions first; keep the first seen per id.
         query = 'WorkflowId STARTS_WITH "paper-trading-"'
-        if status == "running":
-            query += ' AND ExecutionStatus = "Running"'
-        elif status == "stopped":
-            query += ' AND ExecutionStatus != "Running"'
-
-        sessions = []
+        deduped: Dict[str, Dict[str, Any]] = {}
         async for workflow in client.list_workflows(query=query):
-            sessions.append({
-                "session_id": workflow.id,
+            workflow_id = workflow.id
+            if not workflow_id or workflow_id.endswith("-ledger"):
+                continue
+            if workflow_id in deduped:
+                continue
+            deduped[workflow_id] = {
+                "session_id": workflow_id,
                 "status": workflow.status.name.lower() if workflow.status else "unknown",
                 "start_time": workflow.start_time.isoformat() if workflow.start_time else None,
                 "close_time": workflow.close_time.isoformat() if workflow.close_time else None,
-            })
-            if len(sessions) >= limit:
-                break
+            }
 
+        sessions = list(deduped.values())
+        if status == "running":
+            sessions = [s for s in sessions if s["status"] == "running"]
+        elif status == "stopped":
+            sessions = [s for s in sessions if s["status"] != "running"]
+
+        # Preserve newest-first ordering from Temporal scan.
+        sessions = sessions[:limit]
         return {"sessions": sessions, "count": len(sessions)}
 
     except Exception as e:

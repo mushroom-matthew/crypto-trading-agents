@@ -1962,6 +1962,9 @@ class PaperTradingWorkflow:
             "last_plan_time": self.last_plan_time.isoformat() if self.last_plan_time else None,
             "has_plan": self.current_plan is not None,
             "plan_interval_hours": self.plan_interval_hours,
+            "indicator_timeframe": self.indicator_timeframe,
+            "direction_bias": self.direction_bias,
+            "enable_symbol_discovery": self.enable_symbol_discovery,
             "research": research,
             "active_experiments": self.active_experiments,
             "world_state_summary": _ws_summary,
@@ -2404,6 +2407,34 @@ class PaperTradingWorkflow:
         # Store snapshots for use in trigger evaluation between plan cycles
         self.last_indicators = indicator_snapshots
         self._append_structure_history(indicator_snapshots, origin="plan")
+
+        # R83: Seed trajectory from historical OHLCV bars on the first plan cycle.
+        # This gives the trajectory meaningful velocity/stability from bar 0 rather
+        # than waiting for real-time bars to accumulate. Only runs once.
+        if self.cycle_count <= 1 and _raw_ohlcv_data:
+            _primary_sym_seed = self.symbols[0] if self.symbols else None
+            if _primary_sym_seed:
+                _intraday_rows = (_raw_ohlcv_data.get(_primary_sym_seed) or {}).get("intraday", [])
+                if _intraday_rows:
+                    try:
+                        from services.world_state_manager import seed_trajectory_from_ohlcv as _seed_traj
+                        from schemas.world_state import WorldState as _WorldState
+                        _ws = _WorldState.from_dict(self._world_state) if self._world_state else _WorldState()
+                        _ws = _seed_traj(
+                            _ws,
+                            _intraday_rows,
+                            symbol=_primary_sym_seed,
+                            timeframe=self.indicator_timeframe or "1h",
+                        )
+                        self._world_state = _ws.to_dict()
+                        workflow.logger.info(
+                            "R83: trajectory seeded from %d historical bars",
+                            len(_intraday_rows),
+                        )
+                    except Exception as _seed_exc:
+                        workflow.logger.debug(
+                            "R83: trajectory seed failed (non-fatal): %s", _seed_exc
+                        )
 
         # Build market context from full snapshots; fall back to ledger price
         # for any symbol that failed indicator computation.
@@ -3238,8 +3269,10 @@ class PaperTradingWorkflow:
             except Exception as _traj_exc:
                 workflow.logger.debug("R83: per-bar trajectory update failed (non-fatal): %s", _traj_exc)
 
-        # R63: Per-bar AdaptiveTradeManagement tick for each open position.
-        # Runs deterministically inside the workflow (pure Pydantic state update).
+        # R45/R63: Per-bar AdaptiveTradeManagement tick + R-tracking context injection.
+        # Computes current_R, mfe_r, trade_state and writes them into market_data so
+        # the trigger engine can evaluate r1_reached, r2_reached, trade_state conditions.
+        # Without this write, those context keys are always 0/False/"EARLY".
         try:
             from services.adaptive_trade_management import AdaptiveTradeManagementState
             _open_positions = portfolio_state.get("positions") or {}
@@ -3260,6 +3293,27 @@ class PaperTradingWorkflow:
                 )
                 _mgmt = _mgmt.tick(current_price=_price)
                 self.adaptive_management_states[_sym] = _mgmt.model_dump()
+
+                # Compute current_R from entry/stop stored in position_meta
+                _entry = float(_meta.get("signal_entry_price") or _meta.get("entry_price") or 0)
+                _stop = float(_meta.get("stop_price_abs") or 0)
+                _side = _meta.get("entry_side", "long")
+                _current_r = 0.0
+                if _entry > 0 and _stop > 0:
+                    _risk = abs(_entry - _stop)
+                    if _risk > 0:
+                        _current_r = (
+                            (_price - _entry) / _risk if _side == "long"
+                            else (_entry - _price) / _risk
+                        )
+                _peak_r = max(_mgmt.peak_r_achieved, _current_r)
+
+                # Inject R-tracking into market_data so trigger engine sees live values
+                if _sym in market_data:
+                    market_data[_sym]["current_R"] = round(_current_r, 4)
+                    market_data[_sym]["mfe_r"] = round(_peak_r, 4)
+                    market_data[_sym]["trade_state"] = _mgmt.phase
+                    market_data[_sym]["position_fraction"] = _meta.get("position_fraction", 1.0)
         except Exception as _amt_exc:
             workflow.logger.debug("AdaptiveTradeManagement tick failed (non-fatal): %s", _amt_exc)
 
