@@ -3203,6 +3203,41 @@ class PaperTradingWorkflow:
         if not market_data:
             return
 
+        # R83: Per-bar WorldState regime trajectory update.
+        # Uses stale indicator snapshot (last plan) + fresh price from current_prices.
+        # The trajectory captures how market conditions are evolving between plan cycles
+        # and is agnostic to our planning cadence — planning should read FROM it, not drive it.
+        _primary_sym = self.symbols[0] if self.symbols else None
+        if _primary_sym and self.last_indicators.get(_primary_sym):
+            try:
+                _snap_dict = dict(self.last_indicators[_primary_sym])
+                # Override close with fresh price so fingerprint reflects current market state
+                _fresh_price = float(current_prices.get(_primary_sym) or _snap_dict.get("close", 0))
+                if _fresh_price > 0:
+                    _snap_dict["close"] = _fresh_price
+                _snap_obj = IndicatorSnapshot.model_validate(_snap_dict)
+                _asset_st = build_asset_state(_primary_sym, [_snap_obj])
+                _fingerprint = build_regime_fingerprint(_snap_obj, _asset_st)
+                _fp_dict = dict(zip(
+                    _fingerprint.numeric_vector_feature_names,
+                    _fingerprint.numeric_vector,
+                ))
+                from services.world_state_manager import update_regime as _update_regime  # noqa: PLC0415
+                from schemas.world_state import WorldState as _WorldState  # noqa: PLC0415
+                _ws = _WorldState.from_dict(self._world_state) if self._world_state else _WorldState()
+                _ws = _update_regime(
+                    _ws,
+                    _fp_dict,
+                    trend_state=_fingerprint.trend_state,
+                    vol_state=_fingerprint.vol_state,
+                    regime_confidence=_fingerprint.regime_confidence,
+                    bar_index=self.cycle_count,
+                    as_of_ts=workflow.now(),
+                )
+                self._world_state = _ws.to_dict()
+            except Exception as _traj_exc:
+                workflow.logger.debug("R83: per-bar trajectory update failed (non-fatal): %s", _traj_exc)
+
         # R63: Per-bar AdaptiveTradeManagement tick for each open position.
         # Runs deterministically inside the workflow (pure Pydantic state update).
         try:
