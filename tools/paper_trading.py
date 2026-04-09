@@ -288,6 +288,8 @@ class SessionState(BaseModel):
     # R76: AI-led portfolio planner
     use_ai_planner: bool = False
     session_intent: Optional[Dict[str, Any]] = None
+    # R77: CadenceGovernor state
+    cadence_governor_state: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
@@ -563,10 +565,32 @@ async def generate_strategy_plan_activity(
                 + "\n\nGenerate triggers for ALL selected symbols in the SESSION_INTENT above. "
                 "Respect each symbol's direction_bias and risk_budget_fraction.\n"
             )
+            # R77: When hypothesis model is active, generate exactly one TradeHypothesis
+            # per symbol in the SessionIntent, using per-symbol thesis and direction as seeds.
+            if _use_hypothesis_model and _intent_obj.symbol_intents:
+                _hyp_lines = [
+                    "\nHYPOTHESIS_SYNTHESIS_CONTRACT (use_hypothesis_model=True):",
+                    "Generate exactly one TradeHypothesis per symbol in the SESSION_INTENT.",
+                    "For each hypothesis:",
+                ]
+                for _si in _intent_obj.symbol_intents:
+                    _hyp_lines.append(
+                        f"  - {_si.symbol}: direction={_si.direction_bias}, "
+                        f"horizon={_si.expected_hold_horizon}, "
+                        f"playbook={_si.playbook_id or 'LLM-selected'}, "
+                        f"thesis_seed=\"{_si.thesis_summary[:120]}\""
+                    )
+                _hyp_lines += [
+                    "Fill: entry_rule, invalidation_rule, estimated_bars_to_resolution.",
+                    "The compiler will fill stop_price and target_price from structure levels.",
+                    "Do NOT include unrelated exit triggers — one hypothesis per symbol.\n",
+                ]
+                effective_prompt += "\n".join(_hyp_lines)
             logger.info(
-                "R76: SESSION_INTENT injected — symbols=%s is_fallback=%s",
+                "R76: SESSION_INTENT injected — symbols=%s is_fallback=%s hypothesis_mode=%s",
                 _intent_obj.selected_symbols,
                 _intent_obj.is_fallback,
+                _use_hypothesis_model,
             )
         except Exception as _ie:
             logger.warning("R76: SESSION_INTENT injection failed (non-fatal): %s", _ie)
@@ -1704,6 +1728,8 @@ class PaperTradingWorkflow:
         # R76: AI-led portfolio planner
         self.use_ai_planner: bool = False
         self._session_intent: Optional[Dict[str, Any]] = None
+        # R77: CadenceGovernor
+        self._cadence_governor_state: Dict[str, Any] = {}
 
     # -------------------------------------------------------------------------
     # Signals
@@ -1908,6 +1934,14 @@ class PaperTradingWorkflow:
                 "judge_risk_multiplier": (self._world_state.get("judge_guidance") or {}).get("risk_multiplier", 1.0),
                 "has_judge_guidance": bool(self._world_state.get("judge_guidance")),
             }
+        # R77: include CadenceGovernor summary
+        _cadence_summary: Dict[str, Any] = {}
+        if self._cadence_governor_state:
+            _cadence_summary = {
+                "round_trips_completed": self._cadence_governor_state.get("round_trips_completed", 0),
+                "cadence_status": self._cadence_governor_state.get("cadence_status", "not_started"),
+                "projected_24h_rate": self._cadence_governor_state.get("projected_24h_rate", 0.0),
+            }
         return {
             "session_id": self.session_id,
             "symbols": self.symbols,
@@ -1919,6 +1953,8 @@ class PaperTradingWorkflow:
             "research": research,
             "active_experiments": self.active_experiments,
             "world_state_summary": _ws_summary,
+            "cadence_summary": _cadence_summary,
+            "session_intent_symbols": (self._session_intent or {}).get("selected_symbols"),
         }
 
     @workflow.query
@@ -2121,6 +2157,14 @@ class PaperTradingWorkflow:
             self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
             # R76: AI planner flag
             self.use_ai_planner = parsed_config.use_ai_planner
+            # R77: CadenceGovernor — initialize at session start
+            try:
+                from services.cadence_governor import CadenceGovernor as _CG, CadenceGovernorState as _CGS
+                _gov = _CG()
+                _gov.initialize(session_start=workflow.now(), target_min=5, target_max=10)
+                self._cadence_governor_state = _gov.state.model_dump(mode="json")
+            except Exception:
+                pass
 
             # Initialize research budget (separate capital pool)
             if not parsed_config.research_budget_enabled:
@@ -2462,6 +2506,30 @@ class PaperTradingWorkflow:
             )
             return
         # ─────────────────────────────────────────────────────────────────────
+
+        # R77: CadenceGovernor — check adaptation recommendation before plan generation
+        _cadence_adaptation: Optional[str] = None
+        try:
+            from services.cadence_governor import CadenceGovernor as _CG, CadenceGovernorState as _CGS
+            _gov_state = _CGS.model_validate(self._cadence_governor_state) if self._cadence_governor_state else _CGS()
+            _gov = _CG(state=_gov_state)
+            _adaptation = _gov.get_adaptation_recommendation(now=workflow.now())
+            _cadence_adaptation = _adaptation.get("action", "hold")
+            self._cadence_governor_state = _gov.state.model_dump(mode="json")
+            if _cadence_adaptation == "widen_breadth":
+                # Add next symbols from last opportunity ranking stored in world state
+                # For now log the recommendation; actual widen happens via session intent refresh
+                workflow.logger.info(
+                    "R77: CadenceGovernor recommends widen_breadth — %s",
+                    _adaptation.get("reason", ""),
+                )
+            elif _cadence_adaptation == "throttle":
+                workflow.logger.info(
+                    "R77: CadenceGovernor recommends throttle — %s",
+                    _adaptation.get("reason", ""),
+                )
+        except Exception as _gov_exc:
+            workflow.logger.debug("R77: CadenceGovernor check failed (non-fatal): %s", _gov_exc)
 
         # R76: AI portfolio planner — generate SessionIntent on first plan cycle
         if self.use_ai_planner and self._session_intent is None:
@@ -3450,6 +3518,21 @@ class PaperTradingWorkflow:
                 })
                 # Also clear adaptive management state for this symbol on close
                 self.adaptive_management_states.pop(symbol, None)
+
+                # R77: record round trip in CadenceGovernor
+                try:
+                    from services.cadence_governor import CadenceGovernor as _CG, CadenceGovernorState as _CGS
+                    _gov_s = _CGS.model_validate(self._cadence_governor_state) if self._cadence_governor_state else _CGS()
+                    _gov = _CG(state=_gov_s)
+                    _gov.record_round_trip_complete(
+                        symbol=symbol,
+                        outcome="win" if hit == "target" else "loss",
+                        r_achieved=round(_ep_r, 4),
+                        playbook_id=meta.get("playbook_id"),
+                    )
+                    self._cadence_governor_state = _gov.state.model_dump(mode="json")
+                except Exception as _cg_exc:
+                    workflow.logger.debug("R77: CadenceGovernor.record_round_trip failed (non-fatal): %s", _cg_exc)
             except Exception as _ep_exc:
                 workflow.logger.debug("episode_memory_store_state append failed (non-fatal): %s", _ep_exc)
 
@@ -3974,6 +4057,8 @@ class PaperTradingWorkflow:
             # R76: AI planner
             use_ai_planner=self.use_ai_planner,
             session_intent=dict(self._session_intent) if self._session_intent else None,
+            # R77: CadenceGovernor
+            cadence_governor_state=dict(self._cadence_governor_state) if self._cadence_governor_state else None,
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -4028,6 +4113,8 @@ class PaperTradingWorkflow:
         # R76: AI planner
         self.use_ai_planner = parsed.use_ai_planner
         self._session_intent = dict(parsed.session_intent) if parsed.session_intent else None
+        # R77: CadenceGovernor
+        self._cadence_governor_state = dict(parsed.cadence_governor_state) if parsed.cadence_governor_state else {}
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)
