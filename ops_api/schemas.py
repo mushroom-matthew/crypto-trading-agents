@@ -33,6 +33,7 @@ EventType = Literal[
     "policy_loop_skipped",
     "plan_validation_rejected",
     "plan_stand_down",
+    "session_intent_generated",
 ]
 
 

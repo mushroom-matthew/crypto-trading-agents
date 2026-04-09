@@ -1967,6 +1967,7 @@ class PaperTradingWorkflow:
             "world_state_summary": _ws_summary,
             "cadence_summary": _cadence_summary,
             "session_intent_symbols": (self._session_intent or {}).get("selected_symbols"),
+            "session_intent": self._session_intent,
         }
 
     @workflow.query

@@ -311,6 +311,18 @@ class PaperTradingSessionConfig(BaseModel):
                     "Used to pre-filter eligible playbooks before LLM generation.",
     )
 
+    # ============================================================================
+    # AI Portfolio Planner (Runbook 76)
+    # ============================================================================
+    use_ai_planner: bool = Field(
+        default=False,
+        description=(
+            "Enable the AI portfolio planner (R76). When true, generates a SessionIntent "
+            "before the first strategy plan, overriding the symbol list with LLM-selected "
+            "symbols and injecting a SESSION_INTENT block into the strategist prompt."
+        ),
+    )
+
 
 class SessionStartResponse(BaseModel):
     """Response when starting a paper trading session."""
@@ -330,6 +342,13 @@ class SessionStatus(BaseModel):
     has_plan: bool
     last_plan_time: Optional[str]
     plan_interval_hours: float
+    # R77: CadenceGovernor summary
+    cadence_summary: Optional[Dict[str, Any]] = None
+    # R76: AI planner session intent
+    session_intent_symbols: Optional[List[str]] = None
+    session_intent: Optional[Dict[str, Any]] = None
+    # R80: WorldState summary
+    world_state_summary: Optional[Dict[str, Any]] = None
 
 
 class PortfolioStatus(BaseModel):
@@ -547,6 +566,8 @@ async def start_session(config: PaperTradingSessionConfig):
             "direction_bias": config.direction_bias,
             # R68: screener-derived regime for playbook filtering
             "screener_regime": config.screener_regime,
+            # R76: AI portfolio planner
+            "use_ai_planner": config.use_ai_planner,
         }
 
         # Start workflow
@@ -616,6 +637,10 @@ async def get_session_status(session_id: str):
             has_plan=status["has_plan"],
             last_plan_time=status["last_plan_time"],
             plan_interval_hours=status["plan_interval_hours"],
+            cadence_summary=status.get("cadence_summary"),
+            session_intent_symbols=status.get("session_intent_symbols"),
+            session_intent=status.get("session_intent"),
+            world_state_summary=status.get("world_state_summary"),
         )
 
     except RPCError as e:

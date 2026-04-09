@@ -45,11 +45,20 @@ Trigger schema (each item in triggers MUST include these keys):
 - timeframe (e.g., "1h")
 - entry_rule (string expression - NO subscript syntax like indicator[-1])
 - exit_rule (string expression - NO subscript syntax like indicator[-1]; REQUIRED and non-empty for emergency_exit triggers)
-- stop_loss_pct (REQUIRED for short entries): percentage-based stop distance (e.g., 2.0 means 2% stop)
+- stop_loss_pct: percentage-based stop distance (e.g., 2.0 means 2% stop)
 
-IMPORTANT - Short entries:
-- All short triggers MUST include stop_loss_pct. Short entries without stop_loss_pct will be BLOCKED.
-- Example short trigger: {"direction": "short", "stop_loss_pct": 2.5, ...}
+IMPORTANT - Every entry trigger (long OR short) MUST define a stop. Plans with entry triggers missing a stop will be REJECTED:
+- Set stop_anchor_type (e.g. 'htf_daily_extreme', 'donchian_extreme', 'atr') — PREFERRED, uses structural price levels.
+- OR set stop_loss_pct > 0 — percentage fallback (e.g. 2.0 means 2% stop distance).
+- NULL stop_anchor_type + NULL/zero stop_loss_pct = VALIDATION FAILURE. The plan will not execute.
+
+PREFERRED stop for long entries: stop_anchor_type: "htf_daily_extreme" (falls back to donchian_extreme or atr if htf unavailable).
+PREFERRED stop for short entries: stop_anchor_type: "htf_daily_extreme" OR stop_loss_pct: 2.5.
+
+Examples:
+- Long with structural stop: {"direction": "long", "stop_anchor_type": "htf_daily_extreme", ...}
+- Long with ATR stop: {"direction": "long", "stop_anchor_type": "atr", "stop_loss_atr_mult": 1.5, ...}
+- Short with pct stop: {"direction": "short", "stop_loss_pct": 2.5, ...}
 
 IMPORTANT - Cross-Timeframe ATR Tautology (PLAN WILL BE REJECTED if violated):
 - ATR scales naturally as sqrt(T_high / T_low) across timeframes. Any comparison where
@@ -192,8 +201,9 @@ LEVEL-ANCHORED STOP/TARGET FIELDS (Runbook 42):
       'pct'     — stop_loss_pct % from entry (required: set stop_loss_pct)
       'atr'     — stop_loss_atr_mult * ATR(14) from entry (default mult=1.5)
       'fib_618' — exact 618 retracement level
-    Default (null): uses stop_loss_pct percentage calculation.
+    WARNING: null stop_anchor_type requires stop_loss_pct > 0. Both null = VALIDATION FAILURE.
     PREFERRED for longs: 'htf_daily_extreme' or 'donchian_extreme'.
+    PREFERRED for shorts: 'htf_daily_extreme' or set stop_loss_pct > 0.
 
   stop_loss_atr_mult (optional field on TriggerCondition):
     ATR multiplier when stop_anchor_type='atr'. Default: 1.5.

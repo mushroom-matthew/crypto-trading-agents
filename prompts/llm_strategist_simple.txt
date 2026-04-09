@@ -29,7 +29,7 @@ Optional output fields:
 Trigger schema (each trigger needs):
 - id, symbol, category, confidence_grade (A/B/C), direction (long/short/exit)
 - timeframe, entry_rule, exit_rule
-- stop_loss_pct (REQUIRED for shorts)
+- stop_anchor_type OR stop_loss_pct > 0 (REQUIRED for ALL long and short entries — omitting both causes VALIDATION FAILURE)
 - do NOT include extra trigger keys like note or confidence_detail
 
 Categories: trend_continuation, reversal, volatility_breakout, mean_reversion, risk_reduce, risk_off, emergency_exit, other
