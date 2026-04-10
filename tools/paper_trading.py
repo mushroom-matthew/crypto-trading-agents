@@ -2954,6 +2954,9 @@ class PaperTradingWorkflow:
                 "triggers": plan_dict.get("triggers", []),
             }
             self.plan_history.append(plan_record)
+            # Keep in-memory plan_history bounded; older entries rarely queried
+            if len(self.plan_history) > 50:
+                self.plan_history = self.plan_history[-50:]
 
             # Emit event
             validation_errors = [
@@ -4285,9 +4288,9 @@ class PaperTradingWorkflow:
                 "realized_pnl": portfolio_state.get("realized_pnl", 0),
             }
 
-            # Keep only last 2000 snapshots to prevent unbounded growth
-            if len(self.equity_history) >= 2000:
-                self.equity_history = self.equity_history[-1500:]
+            # Keep only last 500 snapshots in-memory; CaN snapshot further trims to 200
+            if len(self.equity_history) >= 500:
+                self.equity_history = self.equity_history[-400:]
 
             self.equity_history.append(snapshot)
             self.last_equity_snapshot = workflow.now()
@@ -4311,8 +4314,8 @@ class PaperTradingWorkflow:
             stopped=self.stopped,
             enable_symbol_discovery=self.enable_symbol_discovery,
             min_volume_24h=self.min_volume_24h,
-            plan_history=self.plan_history,
-            equity_history=self.equity_history[-500:],  # Keep last 500 snapshots across continue-as-new
+            plan_history=self._bounded_plan_history_snapshot(),
+            equity_history=self.equity_history[-200:],  # Keep last 200 snapshots across continue-as-new
             exit_binding_mode=self.exit_binding_mode,
             conflicting_signal_policy=self.conflicting_signal_policy,
             trigger_rule_edits=self.trigger_rule_edits,
@@ -4528,12 +4531,64 @@ class PaperTradingWorkflow:
                 self.structure_history[sym] = history[-per_symbol_limit:]
 
     def _bounded_structure_history_snapshot(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Return a size-bounded snapshot of structure_history for continue-as-new.
+
+        The in-memory store keeps 720 entries per symbol for UI lookup within a session,
+        but the CaN payload only carries the last 10 entries per symbol to stay well
+        under Temporal's input size limit (~2MB).  The 10 most recent entries are enough
+        to seed structure context at the start of the next execution window.
+        """
+        CAN_LIMIT_PER_SYMBOL = 10
         out: Dict[str, List[Dict[str, Any]]] = {}
         for sym, history in self.structure_history.items():
             if not history:
                 continue
-            out[str(sym).upper()] = list(history[-720:])
+            out[str(sym).upper()] = list(history[-CAN_LIMIT_PER_SYMBOL:])
         return out
+
+    def _bounded_plan_history_snapshot(self) -> List[Dict[str, Any]]:
+        """Return a size-bounded plan history for continue-as-new.
+
+        The full in-memory plan_history is kept for queries during a session, but
+        the CaN payload is aggressively trimmed:
+        - Keep last 10 plans only (anything older is rarely needed across CaN)
+        - Strip heavyweight fields from plans older than the most recent 2:
+            market_context.structure_snapshot — can be 50-200KB per plan
+            hypotheses — full compiled hypothesis list
+          These are preserved only on the 2 most recent plans (needed for replay
+          coherence and judge feedback).
+        """
+        CAN_PLAN_LIMIT = 10
+        FULL_DETAIL_COUNT = 2  # keep full data for this many most-recent plans
+        _STRIP_KEYS = ("structure_snapshot",)
+
+        history = self.plan_history[-CAN_PLAN_LIMIT:]
+        if not history:
+            return []
+
+        result: List[Dict[str, Any]] = []
+        for i, plan_rec in enumerate(history):
+            is_recent = i >= len(history) - FULL_DETAIL_COUNT
+            if is_recent:
+                result.append(plan_rec)
+            else:
+                # Shallow copy, strip heavyweight nested fields
+                slim = {k: v for k, v in plan_rec.items() if k not in ("hypotheses",)}
+                # Trim market_context.structure_snapshot if present
+                if "market_context" in slim and isinstance(slim["market_context"], dict):
+                    mc = dict(slim["market_context"])
+                    for _sk in _STRIP_KEYS:
+                        mc.pop(_sk, None)
+                    slim["market_context"] = mc
+                # Also trim triggers list from old plans (keep only id + direction for audit)
+                if "triggers" in slim and isinstance(slim["triggers"], list):
+                    slim["triggers"] = [
+                        {"id": t.get("id"), "direction": t.get("direction"), "symbol": t.get("symbol")}
+                        for t in slim["triggers"]
+                        if isinstance(t, dict)
+                    ]
+                result.append(slim)
+        return result
 
     def _lookup_structure_at_or_before(
         self,
