@@ -331,6 +331,10 @@ class ExecutionLedgerWorkflow:
                     "opened_at": opened_at,
                     "entry_side": "long" if new_qty > 0 else "short",
                 }
+                if fill.get("timeframe"):
+                    meta["timeframe"] = str(fill["timeframe"])
+                if fill.get("estimated_bars_to_resolution") is not None:
+                    meta["estimated_bars_to_resolution"] = int(fill["estimated_bars_to_resolution"])
                 if fill.get("stop_price_abs") is not None:
                     meta["stop_price_abs"] = float(fill["stop_price_abs"])
                 if fill.get("target_price_abs") is not None:
