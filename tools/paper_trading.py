@@ -2161,6 +2161,22 @@ class PaperTradingWorkflow:
         return dict(self._world_state) if self._world_state else {}
 
     # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    async def _emit(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Best-effort event emission. Failures are logged and never kill the session."""
+        try:
+            await workflow.execute_activity(
+                emit_paper_trading_event_activity,
+                args=[self.session_id, event_type, payload],
+                schedule_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except Exception as exc:
+            workflow.logger.warning(f"emit {event_type} failed (non-fatal): {exc}")
+
+    # -------------------------------------------------------------------------
     # Main Workflow
     # -------------------------------------------------------------------------
 
@@ -2243,30 +2259,35 @@ class PaperTradingWorkflow:
             )
 
             # Emit session started event
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[self.session_id, "session_started", {
-                    "symbols": self.symbols,
-                    "initial_cash": parsed_config.initial_cash,
-                    "initial_allocations": parsed_config.initial_allocations,
-                    "research_budget": (
-                        {
-                            "enabled": True,
-                            "initial_capital": self.research.initial_capital,
-                            "cash": self.research.cash,
-                            "max_loss_usd": self.research.max_loss_usd,
-                            "paused": self.research.paused,
-                        }
-                        if self.research is not None
-                        else {"enabled": False}
-                    ),
-                }],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            await self._emit("session_started", {
+                "symbols": self.symbols,
+                "initial_cash": parsed_config.initial_cash,
+                "initial_allocations": parsed_config.initial_allocations,
+                "research_budget": (
+                    {
+                        "enabled": True,
+                        "initial_capital": self.research.initial_capital,
+                        "cash": self.research.cash,
+                        "max_loss_usd": self.research.max_loss_usd,
+                        "paused": self.research.paused,
+                    }
+                    if self.research is not None
+                    else {"enabled": False}
+                ),
+            })
 
             workflow.logger.info(f"Started paper trading session: {self.session_id}")
         else:
             raise ValueError("Either config or resume_state must be provided")
+
+        # Part 3: startup jitter — spread concurrent fresh session launches to avoid
+        # thundering-herd on fetch/emit activities when 6+ sessions start simultaneously.
+        # workflow.random() is deterministic per workflow ID, so each session gets a
+        # different offset without any external randomness.
+        if not resume_state:
+            _jitter_secs = workflow.random().random() * 20  # 0–20 s spread
+            if _jitter_secs >= 1.0:
+                await workflow.sleep(timedelta(seconds=_jitter_secs))
 
         # Main loop
         plan_interval = timedelta(hours=self.plan_interval_hours)
@@ -2336,13 +2357,9 @@ class PaperTradingWorkflow:
                 workflow.logger.warning(f"Failed to stop ledger workflow {self.ledger_workflow_id}: {exc}")
 
         # Session stopped
-        await workflow.execute_activity(
-            emit_paper_trading_event_activity,
-            args=[self.session_id, "session_stopped", {
+                await self._emit("session_stopped", {
                 "cycle_count": self.cycle_count,
-            }],
-            schedule_to_close_timeout=timedelta(seconds=10),
-        )
+            })
 
         return {
             "session_id": self.session_id,
@@ -2414,7 +2431,7 @@ class PaperTradingWorkflow:
         portfolio_state = await workflow.execute_activity(
             query_ledger_portfolio_activity,
             args=[self.ledger_workflow_id],
-            schedule_to_close_timeout=timedelta(seconds=10),
+            schedule_to_close_timeout=timedelta(seconds=30),
         )
 
         # Fetch OHLCV history and compute full indicator snapshots so the LLM
@@ -2554,6 +2571,32 @@ class PaperTradingWorkflow:
         _state_record = PolicyStateMachineRecord.model_validate(
             self.policy_state_machine_record or {}
         )
+
+        # Auto-reset COOLDOWN → IDLE when there are no open positions.
+        # Without this, a double-exit bug (or any other stray state corruption)
+        # would leave the state machine stuck in COOLDOWN forever, because
+        # reset_to_idle is the only COOLDOWN→IDLE transition and it is never
+        # called externally.  It is safe to reset here: if we're in COOLDOWN
+        # with no positions the cooldown has effectively served its purpose.
+        if _state_record.current_state == "COOLDOWN":
+            try:
+                _live_positions = await workflow.execute_activity(
+                    query_ledger_portfolio_activity,
+                    args=[self.ledger_workflow_id],
+                    schedule_to_close_timeout=timedelta(seconds=30),
+                )
+                if not (_live_positions.get("positions") or {}):
+                    _sm_reset = PolicyStateMachine()
+                    _state_record = _sm_reset.reset_to_idle(_state_record)
+                    self.policy_state_machine_record = _state_record.model_dump()
+                    workflow.logger.info(
+                        "Policy state machine auto-reset COOLDOWN→IDLE (no open positions)"
+                    )
+            except Exception as _cooldown_exc:
+                workflow.logger.debug(
+                    "COOLDOWN→IDLE auto-reset check failed (non-fatal): %s", _cooldown_exc
+                )
+
         _last_eval_at = (
             datetime.fromisoformat(self.last_policy_eval_at)
             if self.last_policy_eval_at else None
@@ -2567,12 +2610,7 @@ class PaperTradingWorkflow:
         )
         if not _gate_allowed:
             if _skip_event:
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[self.session_id, "policy_loop_skipped", _skip_event.model_dump()],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+                await self._emit("policy_loop_skipped", _skip_event.model_dump())
             workflow.logger.debug(
                 "PolicyLoopGate: plan generation skipped for session %s", self.session_id
             )
@@ -2641,17 +2679,12 @@ class PaperTradingWorkflow:
                             _intent_dict.get("is_fallback", True),
                         )
                     # Emit event for UI
-                    await workflow.execute_activity(
-                        emit_paper_trading_event_activity,
-                        args=[self.session_id, "session_intent_generated", {
-                            "selected_symbols": self.symbols,
-                            "is_fallback": _intent_dict.get("is_fallback", True),
-                            "regime_summary": _intent_dict.get("regime_summary", ""),
-                            "planner_rationale": _intent_dict.get("planner_rationale", ""),
-                        }],
-                        schedule_to_close_timeout=timedelta(seconds=10),
-                        retry_policy=RetryPolicy(maximum_attempts=1),
-                    )
+                    await self._emit("session_intent_generated", {
+                        "selected_symbols": self.symbols,
+                        "is_fallback": _intent_dict.get("is_fallback", True),
+                        "regime_summary": _intent_dict.get("regime_summary", ""),
+                        "planner_rationale": _intent_dict.get("planner_rationale", ""),
+                    })
             except Exception as _planner_exc:
                 workflow.logger.warning(
                     "R76: session intent generation failed (non-fatal): %s", _planner_exc
@@ -2711,24 +2744,14 @@ class PaperTradingWorkflow:
                     "Judge validation gate: stand-down for session %s — skipping cycle",
                     self.session_id,
                 )
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[self.session_id, "plan_validation_rejected", {
-                        "cycle": len(self.plan_history),
-                        "reason": "validation_exhausted",
-                    }],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[self.session_id, "plan_stand_down", {
-                        "cycle": len(self.plan_history),
-                        "reason": "validation_exhausted",
-                    }],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+                await self._emit("plan_validation_rejected", {
+                    "cycle": len(self.plan_history),
+                    "reason": "validation_exhausted",
+                })
+                await self._emit("plan_stand_down", {
+                    "cycle": len(self.plan_history),
+                    "reason": "validation_exhausted",
+                })
                 return
 
             # Compile-time validation: detect hazardous patterns (e.g. ATR tautologies
@@ -2817,17 +2840,12 @@ class PaperTradingWorkflow:
                     _valid_triggers.append(_t)
 
             if _invalid_triggers:
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[self.session_id, "eval_summary", {
-                        "event": "trigger_dropped_at_validation",
-                        "dropped": _invalid_triggers,
-                        "valid_count": len(_valid_triggers),
-                        "invalid_count": len(_invalid_triggers),
-                    }],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+                await self._emit("eval_summary", {
+                    "event": "trigger_dropped_at_validation",
+                    "dropped": _invalid_triggers,
+                    "valid_count": len(_valid_triggers),
+                    "invalid_count": len(_invalid_triggers),
+                })
                 plan_dict["triggers"] = _valid_triggers
 
             # R72: Zero-trigger fallback synthesis.
@@ -2839,21 +2857,16 @@ class PaperTradingWorkflow:
                 workflow.logger.warning(
                     "R72: zero valid triggers after repair/validation — attempting fallback synthesis"
                 )
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[self.session_id, "eval_summary", {
-                        "event": "plan_construction_failed",
-                        "reason": "zero_triggers_after_repair",
-                        "missing_stop_count": sum(1 for i in _invalid_triggers if i.get("reason") == "missing_stop"),
-                        "missing_target_count": sum(1 for i in _invalid_triggers if "target" in i.get("reason", "")),
-                        "schema_mismatch_count": 0,
-                        "zero_trigger_fallback_attempted": True,
-                        "fallback_succeeded": False,  # updated below
-                        "cycle": len(self.plan_history),
-                    }],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+                await self._emit("eval_summary", {
+                    "event": "plan_construction_failed",
+                    "reason": "zero_triggers_after_repair",
+                    "missing_stop_count": sum(1 for i in _invalid_triggers if i.get("reason") == "missing_stop"),
+                    "missing_target_count": sum(1 for i in _invalid_triggers if "target" in i.get("reason", "")),
+                    "schema_mismatch_count": 0,
+                    "zero_trigger_fallback_attempted": True,
+                    "fallback_succeeded": False,  # updated below
+                    "cycle": len(self.plan_history),
+                })
 
                 # Build 1 minimal entry trigger per symbol using ATR stop + trailing exit
                 _fallback_triggers = []
@@ -2903,19 +2916,14 @@ class PaperTradingWorkflow:
                     workflow.logger.error(
                         "R72: fallback synthesis failed — standing down (zero valid triggers)"
                     )
-                    await workflow.execute_activity(
-                        emit_paper_trading_event_activity,
-                        args=[self.session_id, "plan_stand_down", {
-                            "cycle": len(self.plan_history),
-                            "reason": "zero_triggers_fallback_exhausted",
-                            "missing_stop_count": sum(1 for i in _invalid_triggers if i.get("reason") == "missing_stop"),
-                            "missing_target_count": sum(1 for i in _invalid_triggers if "target" in i.get("reason", "")),
-                            "zero_trigger_fallback_attempted": True,
-                            "fallback_succeeded": False,
-                        }],
-                        schedule_to_close_timeout=timedelta(seconds=10),
-                        retry_policy=RetryPolicy(maximum_attempts=1),
-                    )
+                    await self._emit("plan_stand_down", {
+                        "cycle": len(self.plan_history),
+                        "reason": "zero_triggers_fallback_exhausted",
+                        "missing_stop_count": sum(1 for i in _invalid_triggers if i.get("reason") == "missing_stop"),
+                        "missing_target_count": sum(1 for i in _invalid_triggers if "target" in i.get("reason", "")),
+                        "zero_trigger_fallback_attempted": True,
+                        "fallback_succeeded": False,
+                    })
                     return
 
             # Pop retrieval + R49/R72 snapshot metadata before storing — StrategyPlan uses extra="forbid"
@@ -2963,25 +2971,21 @@ class PaperTradingWorkflow:
                 {"trigger_id": e.trigger_id, "code": e.code, "message": e.message}
                 for e in _validation.hard_errors
             ]
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[self.session_id, "plan_generated", {
-                    "trigger_count": len(plan_dict.get("triggers", [])),
-                    "plan_index": len(self.plan_history) - 1,
-                    "validation_errors": validation_errors,
-                    "retrieved_template_id": _retrieved_template_id,
-                    "template_id": plan_dict.get("template_id"),
-                    # R49 snapshot provenance
-                    "snapshot_id": _snapshot_id,
-                    "snapshot_hash": _snapshot_hash,
-                    "snapshot_version": _snapshot_version,
-                    "snapshot_kind": _snapshot_kind,
-                    "snapshot_as_of_ts": _snapshot_as_of_ts,
-                    "snapshot_staleness_seconds": _snapshot_staleness_seconds,
-                    "snapshot_missing_sections": _snapshot_missing_sections,
-                }],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            await self._emit("plan_generated", {
+                "trigger_count": len(plan_dict.get("triggers", [])),
+                "plan_index": len(self.plan_history) - 1,
+                "validation_errors": validation_errors,
+                "retrieved_template_id": _retrieved_template_id,
+                "template_id": plan_dict.get("template_id"),
+                # R49 snapshot provenance
+                "snapshot_id": _snapshot_id,
+                "snapshot_hash": _snapshot_hash,
+                "snapshot_version": _snapshot_version,
+                "snapshot_kind": _snapshot_kind,
+                "snapshot_as_of_ts": _snapshot_as_of_ts,
+                "snapshot_staleness_seconds": _snapshot_staleness_seconds,
+                "snapshot_missing_sections": _snapshot_missing_sections,
+            })
 
             workflow.logger.info(f"Generated strategy plan with {len(plan_dict.get('triggers', []))} triggers")
 
@@ -3150,16 +3154,11 @@ class PaperTradingWorkflow:
                     "R71: using cached prices for %d symbol(s): %s",
                     len(current_prices), list(current_prices),
                 )
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[self.session_id, "eval_summary", {
-                        "event": "price_feed_degraded",
-                        "consecutive_failures": self.consecutive_price_failures,
-                        "symbols_from_cache": list(current_prices),
-                    }],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+                await self._emit("eval_summary", {
+                    "event": "price_feed_degraded",
+                    "consecutive_failures": self.consecutive_price_failures,
+                    "symbols_from_cache": list(current_prices),
+                })
             else:
                 # No cache at all — cannot proceed this tick
                 workflow.logger.error(
@@ -3187,21 +3186,17 @@ class PaperTradingWorkflow:
             await ledger_handle.signal("update_last_prices", live_prices)
 
         # Emit tick for UI
-        await workflow.execute_activity(
-            emit_paper_trading_event_activity,
-            args=[self.session_id, "tick", {
-                "prices": {s: float(current_prices.get(s) or 0) for s in self.symbols},
-                "cycle": self.cycle_count,
-            }],
-            schedule_to_close_timeout=timedelta(seconds=10),
-        )
+        await self._emit("tick", {
+            "prices": {s: float(current_prices.get(s) or 0) for s in self.symbols},
+            "cycle": self.cycle_count,
+        })
 
         # Query portfolio once — used by both the stop/target sweep and (if
         # a new candle) the full indicator evaluation below.
         portfolio_state = await workflow.execute_activity(
             query_ledger_portfolio_activity,
             args=[self.ledger_workflow_id],
-            schedule_to_close_timeout=timedelta(seconds=10),
+            schedule_to_close_timeout=timedelta(seconds=30),
         )
 
         # R78: Hypothesis executor tick (fast path — stop/target sweep for hypothesis-mode plans)
@@ -3224,12 +3219,7 @@ class PaperTradingWorkflow:
                         _rec = _hexec.on_exit(_sym, _price_f, _sig.exit_reason)
                         # Emit event for attribution
                         if _rec:
-                            await workflow.execute_activity(
-                                emit_paper_trading_event_activity,
-                                args=[self.session_id, "hypothesis_exit", _rec],
-                                schedule_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=1),
-                            )
+                            await self._emit("hypothesis_exit", _rec)
                 # Persist updated executor state
                 self._hypothesis_executor_state = _hexec.to_dict()
             except Exception as _hexc_exc:
@@ -3476,11 +3466,7 @@ class PaperTradingWorkflow:
             orders = _amt_partial_exit_orders + orders
 
         for ev in trigger_events:
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[self.session_id, ev["type"], ev["payload"]],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            await self._emit(ev["type"], ev["payload"])
 
         # R78: Hypothesis executor on_bar — evaluate entry rules for pending hypotheses.
         # When hypothesis model is active, also load hypotheses from the plan into the executor.
@@ -3537,12 +3523,7 @@ class PaperTradingWorkflow:
                         )
 
                         for _entry in _entry_sigs:
-                            await workflow.execute_activity(
-                                emit_paper_trading_event_activity,
-                                args=[self.session_id, "hypothesis_entry_fired", _entry],
-                                schedule_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=1),
-                            )
+                            await self._emit("hypothesis_entry_fired", _entry)
                             # Add entry to orders list for execution
                             _sym_e = _entry.get("symbol", "")
                             _dir_e = _entry.get("direction", "long")
@@ -3566,12 +3547,7 @@ class PaperTradingWorkflow:
                         for _exit in _exit_sigs:
                             _rec = _hexec.on_exit(_exit.symbol, _exit.exit_price, _exit.exit_reason)
                             if _rec:
-                                await workflow.execute_activity(
-                                    emit_paper_trading_event_activity,
-                                    args=[self.session_id, "hypothesis_exit", _rec],
-                                    schedule_to_close_timeout=timedelta(seconds=10),
-                                    retry_policy=RetryPolicy(maximum_attempts=1),
-                                )
+                                await self._emit("hypothesis_exit", _rec)
 
                     except Exception as _hexb_exc:
                         workflow.logger.debug("R78: hypothesis on_bar inner error (non-fatal): %s", _hexb_exc)
@@ -3595,25 +3571,17 @@ class PaperTradingWorkflow:
                 and order.get("trigger_category") != "emergency_exit"
                 and _sym in self.exit_contracts
             ):
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[
-                        self.session_id,
-                        "trade_blocked",
-                        {
-                            "symbol": _sym,
-                            "trigger_id": _reason,
-                            "reason": "m3_contract_backed_exit",
-                            "exit_class": "strategy_contract",
-                            "detail": (
-                                "Entry-rule flatten suppressed (Phase M3): position has an "
-                                "active exit contract. Contract stop/target/time rules govern "
-                                "this exit path."
-                            ),
-                        },
-                    ],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                )
+                await self._emit("trade_blocked", {
+                    "symbol": _sym,
+                    "trigger_id": _reason,
+                    "reason": "m3_contract_backed_exit",
+                    "exit_class": "strategy_contract",
+                    "detail": (
+                        "Entry-rule flatten suppressed (Phase M3): position has an "
+                        "active exit contract. Contract stop/target/time rules govern "
+                        "this exit path."
+                    ),
+                })
                 workflow.logger.debug(
                     "M3: suppressed entry-rule flatten for %s (%s) — exit contract active",
                     _sym, _reason,
@@ -3674,18 +3642,14 @@ class PaperTradingWorkflow:
             )
 
             # Emit trigger_fired event
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[self.session_id, "trigger_fired", {
-                    "symbol": symbol,
-                    "side": exit_side,
-                    "trigger_id": trigger_id,
-                    "category": category,
-                    "price": price,
-                    "timeframe": "1h",
-                }],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            await self._emit("trigger_fired", {
+                "symbol": symbol,
+                "side": exit_side,
+                "trigger_id": trigger_id,
+                "category": category,
+                "price": price,
+                "timeframe": "1h",
+            })
 
             # Execute the exit order
             await self._execute_order({
@@ -3699,6 +3663,13 @@ class PaperTradingWorkflow:
                 "intent": "exit",
                 "reason": trigger_id,
             })
+
+            # Remove the position from the local portfolio_state copy so that
+            # the R85 adaptive-management trailing-stop loop (which runs later
+            # on the same tick using the same dict) does not see a stale open
+            # position and fire a duplicate exit for the same symbol.
+            portfolio_state.get("positions", {}).pop(symbol, None)
+            portfolio_state.get("position_meta", {}).pop(symbol, None)
 
             # A4: Build episode record after position close (non-fatal).
             try:
@@ -3979,20 +3950,12 @@ class PaperTradingWorkflow:
                 f"Entry order for {order.get('symbol')} ({trigger_id}) rejected: "
                 f"stop price could not be resolved — position not opened"
             )
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[
-                    self.session_id,
-                    "trade_blocked",
-                    {
-                        "symbol": order.get("symbol"),
-                        "trigger_id": trigger_id,
-                        "reason": "stop_price_unresolvable",
-                        "detail": "Stop anchor resolved to None; entry rejected to prevent unprotected position.",
-                    },
-                ],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            await self._emit("trade_blocked", {
+                "symbol": order.get("symbol"),
+                "trigger_id": trigger_id,
+                "reason": "stop_price_unresolvable",
+                "detail": "Stop anchor resolved to None; entry rejected to prevent unprotected position.",
+            })
             return
 
         # Gate: if a target anchor is defined but target failed to resolve, reject.
@@ -4001,20 +3964,12 @@ class PaperTradingWorkflow:
                 f"Entry order for {order.get('symbol')} ({trigger_id}) rejected: "
                 f"target price could not be resolved for anchor={target_anchor_type}"
             )
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[
-                    self.session_id,
-                    "trade_blocked",
-                    {
-                        "symbol": order.get("symbol"),
-                        "trigger_id": trigger_id,
-                        "reason": "target_price_unresolvable",
-                        "detail": f"Target anchor '{target_anchor_type}' resolved to None; entry rejected.",
-                    },
-                ],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            await self._emit("trade_blocked", {
+                "symbol": order.get("symbol"),
+                "trigger_id": trigger_id,
+                "reason": "target_price_unresolvable",
+                "detail": f"Target anchor '{target_anchor_type}' resolved to None; entry rejected.",
+            })
             return
 
         # Gate: enforce minimum realized R:R from resolved stop/target at entry.
@@ -4032,23 +3987,15 @@ class PaperTradingWorkflow:
                     f"Entry order for {order.get('symbol')} ({trigger_id}) rejected: "
                     f"resolved R:R {rr:.2f} < {self.min_rr_ratio:.2f}"
                 )
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[
-                        self.session_id,
-                        "trade_blocked",
-                        {
-                            "symbol": order.get("symbol"),
-                            "trigger_id": trigger_id,
-                            "reason": "insufficient_rr_resolved",
-                            "detail": (
-                                f"Resolved R:R {rr:.2f} below minimum {self.min_rr_ratio:.2f} "
-                                f"(entry={fill_price:.4f}, stop={stop_price_abs:.4f}, target={target_price_abs:.4f})"
-                            ),
-                        },
-                    ],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                )
+                await self._emit("trade_blocked", {
+                    "symbol": order.get("symbol"),
+                    "trigger_id": trigger_id,
+                    "reason": "insufficient_rr_resolved",
+                    "detail": (
+                        f"Resolved R:R {rr:.2f} below minimum {self.min_rr_ratio:.2f} "
+                        f"(entry={fill_price:.4f}, stop={stop_price_abs:.4f}, target={target_price_abs:.4f})"
+                    ),
+                })
                 return
 
         fill_payload: Dict[str, Any] = {
@@ -4199,7 +4146,7 @@ class PaperTradingWorkflow:
                 await workflow.execute_activity(
                     record_signal_fill_activity,
                     args=[_signal_id, fill_price, _fill_ts_iso, _signal_ts, _signal_entry_price],
-                    schedule_to_close_timeout=timedelta(seconds=10),
+                    schedule_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
             except Exception:
@@ -4207,31 +4154,19 @@ class PaperTradingWorkflow:
 
         # Emit position_exit_contract_created event for auditable contract provenance
         if _exit_contract is not None:
-            try:
-                await workflow.execute_activity(
-                    emit_paper_trading_event_activity,
-                    args=[
-                        self.session_id,
-                        "position_exit_contract_created",
-                        {
-                            "contract_id": _exit_contract.contract_id,
-                            "position_id": _exit_contract.position_id,
-                            "symbol": _exit_contract.symbol,
-                            "side": _exit_contract.side,
-                            "entry_price": _exit_contract.entry_price,
-                            "stop_price_abs": _exit_contract.stop_price_abs,
-                            "target_legs_count": len(_exit_contract.target_legs),
-                            "has_time_exit": _exit_contract.time_exit is not None,
-                            "source_trigger_id": _exit_contract.source_trigger_id,
-                            "source_category": _exit_contract.source_category,
-                            "exit_class": "strategy_contract",
-                        },
-                    ],
-                    schedule_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
-            except Exception:
-                pass  # event telemetry is non-critical; never crash the workflow
+            await self._emit("position_exit_contract_created", {
+                "contract_id": _exit_contract.contract_id,
+                "position_id": _exit_contract.position_id,
+                "symbol": _exit_contract.symbol,
+                "side": _exit_contract.side,
+                "entry_price": _exit_contract.entry_price,
+                "stop_price_abs": _exit_contract.stop_price_abs,
+                "target_legs_count": len(_exit_contract.target_legs),
+                "has_time_exit": _exit_contract.time_exit is not None,
+                "source_trigger_id": _exit_contract.source_trigger_id,
+                "source_category": _exit_contract.source_category,
+                "exit_class": "strategy_contract",
+            })
 
         # Emit event with stop/target for activity feed
         event_payload = dict(order)
@@ -4239,11 +4174,7 @@ class PaperTradingWorkflow:
             event_payload["stop_price"] = stop_price_abs
         if target_price_abs is not None:
             event_payload["target_price"] = target_price_abs
-        await workflow.execute_activity(
-            emit_paper_trading_event_activity,
-            args=[self.session_id, "order_executed", event_payload],
-            schedule_to_close_timeout=timedelta(seconds=10),
-        )
+        await self._emit("order_executed", event_payload)
 
         workflow.logger.info(f"Executed order: {order['side']} {order['quantity']} {order['symbol']} @ {order['price']}")
 
@@ -4261,14 +4192,10 @@ class PaperTradingWorkflow:
             self.symbols.extend(new_symbols)
             workflow.logger.info(f"Discovered {len(new_symbols)} new symbols: {new_symbols}")
 
-            await workflow.execute_activity(
-                emit_paper_trading_event_activity,
-                args=[self.session_id, "symbols_discovered", {
-                    "new_symbols": new_symbols,
-                    "total_symbols": len(self.symbols),
-                }],
-                schedule_to_close_timeout=timedelta(seconds=10),
-            )
+            await self._emit("symbols_discovered", {
+                "new_symbols": new_symbols,
+                "total_symbols": len(self.symbols),
+            })
 
     async def _record_equity_snapshot(self) -> None:
         """Record a periodic equity snapshot for charting."""
@@ -4276,7 +4203,7 @@ class PaperTradingWorkflow:
             portfolio_state = await workflow.execute_activity(
                 query_ledger_portfolio_activity,
                 args=[self.ledger_workflow_id],
-                schedule_to_close_timeout=timedelta(seconds=10),
+                schedule_to_close_timeout=timedelta(seconds=30),
             )
 
             snapshot = {

@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import os
 from decimal import Decimal
-from typing import Dict, List, Any
+from typing import Awaitable, Callable, Dict, List, Any
 from datetime import datetime, timezone, timedelta
 from temporalio import workflow
 from temporalio.client import Client
 
-from agents.activities.ledger import persist_fill_activity
+from agents.activities.ledger import emit_ops_event_activity, persist_fill_activity
 from agents.wallet_provider import get_wallet_provider, PaperWalletProvider, WalletProvider
 import logging
 
@@ -94,6 +94,14 @@ class ExecutionLedgerWorkflow:
             # Treat smaller numeric values as epoch seconds.
             return int(value * 1000.0)
         return int(self._utc_now().timestamp() * 1000)
+
+    def _start_background_task(self, task_factory: Callable[[], Awaitable[Any]]) -> None:
+        """Schedule best-effort async work when a loop is available."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(task_factory())
 
     @workflow.signal
     def set_user_preferences(self, preferences: Dict[str, Any]) -> None:
@@ -223,7 +231,7 @@ class ExecutionLedgerWorkflow:
                     "trading_wallet_name": self.trading_wallet_name,
                     "equity_wallet_name": self.equity_wallet_name,
                 }
-                asyncio.create_task(self._persist_fill(payload))
+                self._start_background_task(lambda: self._persist_fill(payload))
 
         side = fill["side"]
         symbol = fill["symbol"]
@@ -289,14 +297,31 @@ class ExecutionLedgerWorkflow:
             
             self.positions[symbol] = new_qty
         else:  # SELL
-            self.cash += cost
-            try:
-                if self.wallet_provider:
-                    self.wallet_provider.credit("CASH", cost)
-            except Exception:
-                pass
+            # Guard: only credit cash for quantity we actually hold.
+            # A phantom sell (e.g. double-fire from trailing stop + sweep on the same
+            # tick) would have current_qty == 0 and must not inflate cash.
+            actual_sell_qty = min(qty, current_qty) if current_qty > 0 else Decimal("0")
+            actual_cost = price * actual_sell_qty
+            if actual_sell_qty > 0:
+                self.cash += actual_cost
+                try:
+                    if self.wallet_provider:
+                        self.wallet_provider.credit("CASH", actual_cost)
+                except Exception:
+                    pass
+            elif current_qty <= 0:
+                try:
+                    workflow.logger.warning(
+                        "record_fill: SELL %s qty=%.6f ignored — no open position (phantom sell guard)",
+                        symbol, float(qty),
+                    )
+                except Exception:
+                    logger.warning(
+                        "record_fill: SELL %s qty=%.6f ignored — no open position",
+                        symbol, float(qty),
+                    )
             new_qty = current_qty - qty
-            
+
             # Calculate realized PnL for the sold quantity
             if current_qty > 0 and symbol in self.entry_price:
                 entry_price = self.entry_price[symbol]
@@ -349,12 +374,10 @@ class ExecutionLedgerWorkflow:
                 self.position_meta[symbol] = meta
         self.fill_count += 1
 
-        # Emit position update event for ops telemetry
+        # Emit position update event for ops telemetry via activity context.
         try:
-            from agents.event_emitter import emit_event  # type: ignore
-
             unrealized_pnl = float(self.get_unrealized_pnl_decimal())
-            payload = {
+            event_payload = {
                 "symbol": symbol,
                 "qty": float(self.positions.get(symbol, Decimal("0"))),
                 "cash": float(self.cash),
@@ -362,19 +385,29 @@ class ExecutionLedgerWorkflow:
                 "unrealized_pnl": unrealized_pnl,
                 "pnl": float(self.realized_pnl) + unrealized_pnl,
                 "mark_price": float(price),
-                "entry_price": float(self.entry_price.get(symbol, Decimal("0"))) if symbol in self.entry_price else None,
+                "entry_price": (
+                    float(self.entry_price.get(symbol, Decimal("0")))
+                    if symbol in self.entry_price
+                    else None
+                ),
                 "scraped_profits": float(self.scraped_profits),
             }
             # Paper wallet snapshot for visibility; live provider would integrate real balances.
             if isinstance(self.wallet_provider, PaperWalletProvider):
-                payload["paper_balance_cash"] = float(self.wallet_provider.get_balance("CASH"))
-            asyncio.create_task(
-                emit_event(
-                    "position_update",
-                    payload,
-                    source="execution_ledger",
-                    run_id=info.workflow_id if "info" in locals() and info else None,
-                    correlation_id=str(sequence),
+                event_payload["paper_balance_cash"] = float(self.wallet_provider.get_balance("CASH"))
+            try:
+                info = workflow.info()
+            except Exception:
+                info = None
+            self._start_background_task(
+                lambda: self._emit_ops_event(
+                    {
+                        "event_type": "position_update",
+                        "payload": event_payload,
+                        "source": "execution_ledger",
+                        "run_id": info.workflow_id if info is not None else None,
+                        "correlation_id": str(sequence),
+                    }
                 )
             )
         except Exception:
@@ -388,7 +421,17 @@ class ExecutionLedgerWorkflow:
                 schedule_to_close_timeout=timedelta(seconds=30),
             )
         except Exception as exc:
-            workflow.logger.error("Failed to persist fill to ledger", error=str(exc))
+            workflow.logger.error("Failed to persist fill to ledger: %s", exc)
+
+    async def _emit_ops_event(self, payload: Dict[str, Any]) -> None:
+        try:
+            await workflow.execute_activity(
+                emit_ops_event_activity,
+                payload,
+                schedule_to_close_timeout=timedelta(seconds=10),
+            )
+        except Exception as exc:
+            workflow.logger.warning("Failed to emit ops event: %s", exc)
     
     def _validate_price(self, price: Decimal, symbol: str) -> bool:
         """Validate that a price is reasonable."""
