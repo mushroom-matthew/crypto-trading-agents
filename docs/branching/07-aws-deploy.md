@@ -177,14 +177,29 @@ git commit -m "feat: ECS Fargate + Terraform infrastructure (Phase 2)"
 ## Change Log
 
 - 2026-04-13: Rewritten from scratch. Original scope was ECS-first; reprioritized to Temporal Cloud (Phase 0) as immediate fix for WSL2 crash problem. Added Phase 1 (Fly.io worker). Updated architecture to reflect two-server design (MCP 8080 + Ops API 8081), ContinueAsNew durability, AI planner, trailing stops, min_rr_ratio gate, SessionState serialization.
+- 2026-04-14: Phase 0 implemented.
+  - `agents/temporal_utils.py` — added `_build_tls_config()` helper; wired TLS into both `get_temporal_client()` and `connect_temporal()`. TLS activates only when `TEMPORAL_TLS_CERT` + `TEMPORAL_TLS_KEY` are set; plain gRPC otherwise (backward-compatible).
+  - `worker/agent_worker.py` — replaced bare `Client.connect()` with `get_temporal_client()` from temporal_utils; TLS now flows through the shared helper.
+  - `.env.example` — added commented-out Temporal Cloud block with `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TLS_CERT`, `TEMPORAL_TLS_KEY`, `TEMPORAL_TLS_CA`.
+  - `docker-compose.yml` — `temporal` and `temporal-ui` services moved to `profiles: ["local"]`; hard `depends_on: temporal` removed from `app`, `ops-api`, `worker` so they start cleanly against Temporal Cloud.
 
 ## Test Evidence
 
-(append before commit)
+**Full suite run (2026-04-14):**
+```
+1 failed, 2336 passed, 1 skipped in 633.94s
+```
+Failure: `tests/integration/test_high_budget_activity.py::test_high_budget_activity_consumes_budget` — **pre-existing flaky test**, passes in isolation (`1 passed in 12.36s`). Cause: shared state contamination from earlier tests in full suite. Unrelated to TLS wiring changes.
+
+Changed files (`agents/temporal_utils.py`, `worker/agent_worker.py`, `.env.example`, `docker-compose.yml`) contain no business logic changes — only client connection setup and compose service configuration.
 
 ## Human Verification Evidence
 
-(append before commit)
-- Confirm Temporal Cloud namespace and TLS cert are provisioned
-- Confirm session resumption test passes (kill + restart → same cycle count)
-- Review Terraform plan for cost/security implications before `terraform apply`
+**Phase 0 (TLS wiring) — implementation complete, cloud smoke test pending:**
+- [ ] Create Temporal Cloud account at cloud.temporal.io and provision namespace
+- [ ] Download client.pem + client.key from the Temporal Cloud console
+- [ ] Set `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TLS_CERT`, `TEMPORAL_TLS_KEY` in `.env`
+- [ ] Start stack: `docker compose up` (no `--profile local` needed)
+- [ ] Confirm worker log shows: `Connecting to Temporal Cloud at <namespace>.tmprl.cloud:7233 (ns=...) with mTLS`
+- [ ] Start a paper trading session, kill all processes, restart worker only → confirm session cycle count continues
+- [ ] Review Terraform plan for cost/security implications before `terraform apply` (Phase 2)

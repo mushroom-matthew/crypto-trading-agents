@@ -1,5 +1,10 @@
 services:
+  # ── Local Temporal (dev only) ────────────────────────────────────────────────
+  # Start with:  docker compose --profile local up
+  # When using Temporal Cloud set TEMPORAL_ADDRESS / TEMPORAL_TLS_CERT / TEMPORAL_TLS_KEY
+  # in .env and omit --profile local — these services will not start.
   temporal:
+    profiles: ["local"]
     image: temporalio/auto-setup:1.24
     environment:
       - DB=postgres12
@@ -22,6 +27,7 @@ services:
       retries: 20
 
   temporal-ui:
+    profiles: ["local"]
     image: temporalio/ui:latest
     container_name: crypto-trading-agents-ui
     environment:
@@ -60,8 +66,6 @@ services:
   app:
     build: .
     depends_on:
-      temporal:
-        condition: service_healthy
       db:
         condition: service_healthy
     env_file: .env
@@ -78,8 +82,6 @@ services:
   ops-api: # Ops API for backtesting and monitoring
     build: .
     depends_on:
-      temporal:
-        condition: service_healthy
       db:
         condition: service_healthy
     env_file: .env
@@ -100,14 +102,12 @@ services:
   worker: # Temporal worker that loads workflows
     build: .
     depends_on:
-      temporal:
-        condition: service_healthy
       db:
         condition: service_healthy
       app:
         condition: service_started
     env_file: .env
-    # Add explicit wait for Temporal gRPC to be reachable before starting worker
+    # sleep 5: lets app and Temporal (local or cloud) finish accepting connections
     command: sh -lc "sleep 5 && uv run python -m worker.main"
     restart: unless-stopped
     # Workaround for Temporal Rust SDK DNS resolution issues
