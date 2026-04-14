@@ -47,7 +47,10 @@ class EventStore:
         self._ensure_table()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def _ensure_table(self) -> None:
         with self._connect() as conn:

@@ -766,6 +766,9 @@ export interface PaperTradingSessionConfig {
 
   // Trailing Stop Defaults (R85)
   default_trailing_config?: Record<string, unknown> | null;
+
+  // R:R Gate (LLM-invisible structural target screen)
+  min_rr_ratio?: number;
 }
 
 export interface PaperTradingSession {
@@ -808,6 +811,10 @@ export interface PositionMeta {
   position_fraction?: number;
   target_source?: string | null;
   target_structural_kind?: string | null;
+  trailing_mode?: string | null;
+  active_stop_price?: number | null;
+  breakeven_ratchet_fired?: boolean;
+  stop_confirmation?: string | null;
 }
 
 export interface PaperTradingPortfolio {
@@ -832,6 +839,25 @@ export interface PaperTradingTrigger {
   entry_rule: string | null;
   exit_rule: string | null;
   hold_rule: string | null;
+  // Fix C: hypothesis visibility
+  rationale: string | null;
+  stop_anchor_type: string | null;
+  target_anchor_type: string | null;
+}
+
+export interface PaperTradingHypothesis {
+  id: string;
+  symbol: string;
+  direction: 'long' | 'short';
+  timeframe: string;
+  confidence_grade: string;
+  thesis: string;
+  indicator_basis: string | null;
+  stop_price: number | null;
+  target_price: number | null;
+  rr_ratio: number | null;
+  playbook_id: string | null;
+  regime_context: string | null;
 }
 
 export interface TriggerRuleUpdateRequest {
@@ -885,8 +911,10 @@ export interface PaperTradingPlan {
   allowed_symbols: string[];
   max_trades_per_day: number | null;
   global_view: string | null;
+  plan_rationale: string | null;
   regime: string | null;
   triggers: PaperTradingTrigger[];
+  hypotheses: PaperTradingHypothesis[];
   // R68/R49: snapshot provenance for plan inspector
   snapshot_id?: string | null;
   snapshot_hash?: string | null;
@@ -982,11 +1010,20 @@ export interface PaperTradingTradeSetsResponse {
   trade_sets: PaperTradingTradeSet[];
 }
 
+export interface SessionListSummary {
+  open_positions: number;
+  completed_positions: number;
+  total_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+}
+
 export interface SessionListItem {
   session_id: string;
   status: string;
   start_time: string | null;
   close_time: string | null;
+  summary?: SessionListSummary | null;
 }
 
 export interface PaperTradingPlanRecord {

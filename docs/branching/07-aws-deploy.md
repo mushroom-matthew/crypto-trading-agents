@@ -1,96 +1,190 @@
 # Branch: aws-deploy
 
 ## Purpose
-Implement AWS deployment infrastructure for paper and live trading as described in AWS_DEPLOYMENT_SCOPE.
+
+Move from a purely local stack to a crash-resilient cloud deployment. WSL2 crashes have repeatedly killed active paper trading sessions. Temporal Cloud solves this immediately by making workflow state independent of the local machine.
+
+**Implementation order matches urgency:**
+1. **Phase 0 — Temporal Cloud** (immediate, ~2 hours) — workflows survive crashes
+2. **Phase 1 — Remote Worker** (Fly.io or EC2, ~half day) — process survives machine restarts
+3. **Phase 2 — ECS Fargate** (full cloud ops-api + mcp-server, ~1-2 days)
+4. **Phase 3+4 — RDS + Live Trading Controls** (pre-live-trading)
 
 ## Source Plans
-- docs/AWS_DEPLOYMENT_SCOPE.md
 
-## Scope
-- Add ECS task definitions for worker, ops-api, mcp-server, and optional temporal.
-- Add Terraform modules for VPC, ECS, RDS, ALB, IAM, Secrets Manager, and CloudWatch.
-- Add Secrets Manager wiring and config safety checks for live trading.
-- Add CI/CD workflows for paper and live deployments (approval gates, rollback).
+- `docs/AWS_DEPLOYMENT_SCOPE.md` — full architecture, cost estimates, checklist
 
-## Out of Scope / Deferred
-- Non-AWS runtime code changes unrelated to deployment wiring.
-- Multi-wallet or trading logic changes.
+## Scope (Phase 0 — implement first)
+
+- Wire Temporal Cloud TLS into `worker/agent_worker.py`
+- Wire TLS into `get_temporal_client()` (shared by ops-api and mcp-server)
+- Add `TEMPORAL_TLS_CERT`, `TEMPORAL_TLS_KEY` env var support
+- Make `temporal` + `temporal-ui` docker-compose services optional (local dev only)
+- Update `.env.example` with Temporal Cloud vars
+
+## Scope (Phase 1)
+
+- Add `fly.toml` for worker deployment
+- Dockerfile already exists — worker builds from existing image
+- Document secret provisioning for remote worker
+
+## Scope (Phase 2+)
+
+- `infra/ecs/task-definitions/worker.json`, `ops-api.json`, `mcp-server.json`
+- `infra/terraform/*.tf` (vpc, ecs, alb, secrets, cloudwatch, iam)
+- CI/CD via `.github/workflows/deploy-paper.yml` and `deploy-live.yml`
+
+## Out of Scope
+
+- Trading logic changes
+- Changes to workflow business logic
+- Multi-wallet changes
 
 ## Key Files
-- infra/ecs/task-definitions/*.json
-- infra/terraform/*.tf
-- app/core/config.py (Secrets Manager wiring)
-- pyproject.toml (boto3 dependency)
-- .github/workflows/deploy*.yml
 
-## Dependencies / Coordination
-- Coordinate with multi-wallet branch if Secrets Manager keys overlap.
-- Keep app/runtime behavior unchanged except for optional Secrets Manager toggle.
+**Phase 0:**
+- `worker/agent_worker.py` — TLS client connect
+- `worker/run.py` — may need TLS config passed through
+- `mcp_server/app.py` — `get_temporal_client()` used here
+- `ops_api/routers/paper_trading.py` — `get_temporal_client()` used here
+- `.env.example` — add Temporal Cloud vars
+- `docker-compose.yml` — make temporal services optional
+
+**Phase 1:**
+- `fly.toml` (new)
+- `Dockerfile` (already exists, no changes expected)
+
+**Phase 2+:**
+- `infra/ecs/task-definitions/*.json`
+- `infra/terraform/*.tf`
+- `.github/workflows/deploy*.yml`
+
+## Architecture Context (current — as of 2026-04-13)
+
+Two separate HTTP servers:
+- **MCP Server** (`mcp_server/app.py`, port 8080) — agent/programmatic interface
+- **Ops API** (`ops_api/app.py`, port 8081) — human operator dashboard
+
+Three ECS tasks needed (no self-hosted Temporal after Phase 0):
+- `worker` — runs all Temporal workflows and activities
+- `ops-api` — FastAPI for UI
+- `mcp-server` — FastMCP for agent tools
+
+Key workflow durability facts:
+- `PaperTradingWorkflow` uses ContinueAsNew every ~40 cycles — history is bounded
+- `SessionState` is fully serializable — CaN snapshots survive worker restarts cleanly
+- All in-session state (WorldState, EpisodeMemory, RegimeTrajectory, trailing stop states, AI planner intent) lives inside Temporal — no external DB needed for paper trading
+
+## Dependencies
+
+- Temporal Cloud account (free tier sufficient for paper trading)
+- Fly.io account (Phase 1)
+- AWS account (Phase 2+)
 
 ## Acceptance Criteria
-- Task definitions exist for all required services.
-- Terraform configs cover VPC, ECS, RDS, ALB, IAM, Secrets, CloudWatch.
-- Secrets Manager integration works with explicit live trading safety check.
-- CI/CD workflows implement paper vs live separation and approval gates.
 
-## Test Plan (required before commit)
-- (Terraform) cd infra/terraform && terraform fmt -recursive
-- (Terraform) cd infra/terraform && terraform init
-- (Terraform) cd infra/terraform && terraform validate
+**Phase 0:**
+- Worker connects to Temporal Cloud with TLS
+- Kill the local worker mid-session → restart it → session resumes at same cycle
+- Kill docker compose entirely → restart → session resumes
+- Local dev still works with `docker-compose.yml` temporal services (via env var toggle)
 
-If infra validation cannot run (missing credentials), obtain user-run output and paste it below before committing.
+**Phase 1:**
+- Worker deployed to remote VM
+- Local machine can be shut down → sessions continue running (triggers keep evaluating)
+- Worker reconnects automatically after own restart
 
-## Human Verification (required)
-- Review Terraform plan output and task definitions for security/cost implications.
-- Confirm live trading safety check requires LIVE_TRADING_ACK before orders can be placed.
-- Paste plan summary or review notes in the Human Verification Evidence section.
+**Phase 2:**
+- All services running in ECS Fargate
+- Ops API accessible via ALB HTTPS endpoint
+- React UI pointed at cloud ops-api
 
-## Worktree Setup (recommended for parallel agents)
-Use a linked worktree so multiple branches can be worked on in parallel from one clone.
+## Test Plan
 
+**Phase 0:**
 ```bash
-# From the main repo directory
-git fetch
-git worktree add -b aws-deploy ../wt-aws-deploy aws-deploy
-cd ../wt-aws-deploy
+# 1. Start session, confirm it's running
+curl http://localhost:8081/paper-trading/sessions
 
-# When finished (after merge)
-git worktree remove ../wt-aws-deploy
+# 2. Kill everything
+docker compose down
+
+# 3. Restart only the worker (no local temporal)
+uv run python -m worker.main
+
+# 4. Confirm session resumed at same cycle
+curl http://localhost:8081/paper-trading/sessions
 ```
 
-## Git Workflow (explicit)
+**Phase 1:**
 ```bash
-# Start from updated main
-git checkout main
-git pull
+# Deploy worker to Fly.io
+fly deploy
 
-# Create branch
-git checkout -b aws-deploy
+# Confirm worker is polling Temporal Cloud
+fly logs
 
-# Work, then review changes
-git status
-git diff
+# Shut down local machine (or just kill all processes)
+# Wait 1 candle interval (5 minutes for 5m sessions)
+# Restart local ops-api
+# Confirm session cycle count is still incrementing
+curl http://localhost:8081/paper-trading/sessions/<session_id>
+```
 
-# Stage changes
-git add infra/ecs/task-definitions \
-  infra/terraform \
-  app/core/config.py \
-  pyproject.toml \
-  .github/workflows
-
-# Run tests (must succeed or be explicitly approved by user with pasted output)
+**Phase 2:**
+```bash
+# Terraform
 cd infra/terraform && terraform fmt -recursive
 cd infra/terraform && terraform init
 cd infra/terraform && terraform validate
+cd infra/terraform && terraform plan
 
-# Commit ONLY after test evidence is captured below
-git commit -m "AWS deploy: ECS, Terraform, secrets, CI/CD"
+# Paste plan output in Test Evidence before applying
 ```
 
-## Change Log (update during implementation)
-- YYYY-MM-DD: Summary of changes, files touched, and decisions.
+## Worktree Setup
 
-## Test Evidence (append results before commit)
+```bash
+git fetch
+git worktree add -b aws-deploy ../wt-aws-deploy main
+cd ../wt-aws-deploy
 
-## Human Verification Evidence (append results before commit when required)
+# When finished
+git worktree remove ../wt-aws-deploy
+```
 
+## Git Workflow
+
+```bash
+git checkout main
+git pull
+git checkout -b aws-deploy
+
+# Phase 0 commit
+git add worker/agent_worker.py mcp_server/app.py ops_api/routers/paper_trading.py \
+    docker-compose.yml .env.example
+git commit -m "feat: Temporal Cloud TLS wiring (Phase 0 crash resilience)"
+
+# Phase 1 commit
+git add fly.toml
+git commit -m "feat: Fly.io worker deploy config (Phase 1)"
+
+# Phase 2 commit (after terraform validate passes)
+git add infra/ .github/workflows/
+git commit -m "feat: ECS Fargate + Terraform infrastructure (Phase 2)"
+```
+
+## Change Log
+
+- 2026-04-13: Rewritten from scratch. Original scope was ECS-first; reprioritized to Temporal Cloud (Phase 0) as immediate fix for WSL2 crash problem. Added Phase 1 (Fly.io worker). Updated architecture to reflect two-server design (MCP 8080 + Ops API 8081), ContinueAsNew durability, AI planner, trailing stops, min_rr_ratio gate, SessionState serialization.
+
+## Test Evidence
+
+(append before commit)
+
+## Human Verification Evidence
+
+(append before commit)
+- Confirm Temporal Cloud namespace and TLS cert are provisioned
+- Confirm session resumption test passes (kill + restart → same cycle count)
+- Review Terraform plan for cost/security implications before `terraform apply`

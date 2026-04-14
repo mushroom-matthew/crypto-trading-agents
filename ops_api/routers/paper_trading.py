@@ -49,6 +49,36 @@ async def _verify_session_exists(client: Any, session_id: str) -> None:
         raise
 
 
+async def _get_session_list_summary(client: Any, session_id: str) -> Optional[Dict[str, Any]]:
+    """Best-effort summary for the sessions dropdown."""
+    try:
+        handle = client.get_workflow_handle(session_id)
+        session_status = await handle.query("get_session_status")
+        equity_history = await handle.query("get_equity_history")
+
+        latest_snapshot = equity_history[-1] if equity_history else {}
+        positions = latest_snapshot.get("positions") or {}
+        open_positions = sum(1 for qty in positions.values() if abs(float(qty or 0)) > 1e-12)
+
+        cadence_summary = session_status.get("cadence_summary") or {}
+        completed_positions = int(cadence_summary.get("round_trips_completed", 0) or 0)
+
+        realized_pnl = float(latest_snapshot.get("realized_pnl", 0) or 0)
+        unrealized_pnl = float(latest_snapshot.get("unrealized_pnl", 0) or 0)
+        total_pnl = realized_pnl + unrealized_pnl
+
+        return {
+            "open_positions": open_positions,
+            "completed_positions": completed_positions,
+            "total_pnl": round(total_pnl, 4),
+            "realized_pnl": round(realized_pnl, 4),
+            "unrealized_pnl": round(unrealized_pnl, 4),
+        }
+    except Exception as err:
+        logger.warning("Failed to build session summary for %s: %s", session_id, err)
+        return None
+
+
 async def _cleanup_session_ledger(
     client: Any,
     session_id: str,
@@ -338,6 +368,34 @@ class PaperTradingSessionConfig(BaseModel):
         ),
     )
 
+    # ============================================================================
+    # Trailing Stop (Runbook 85)
+    # ============================================================================
+    default_trailing_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Session-level trailing stop config applied to every new position. "
+            "Matches TrailingStopConfig schema. "
+            "Modes: none, breakeven_only, atr_trail, pct_trail, step_trail. "
+            "None = static stop (default). "
+            "Example: {\"mode\": \"atr_trail\", \"breakeven_at_r\": 1.0, \"trail_activation_r\": 1.5, \"atr_trail_multiple\": 2.0}"
+        ),
+    )
+
+    # ============================================================================
+    # R:R Gate
+    # ============================================================================
+    min_rr_ratio: float = Field(
+        default=1.75,
+        ge=0.5,
+        le=5.0,
+        description=(
+            "Minimum reward:risk ratio required for entry (default 1.75). "
+            "Entries whose resolved structural stop/target fall below this are blocked. "
+            "The LLM never sees this threshold — it picks structural levels honestly."
+        ),
+    )
+
 
 class SessionStartResponse(BaseModel):
     """Response when starting a paper trading session."""
@@ -385,6 +443,33 @@ class PortfolioStatus(BaseModel):
     position_meta: Dict[str, Any] = {}
 
 
+class SessionListSummary(BaseModel):
+    """Compact session-level metrics for dropdown displays."""
+
+    open_positions: int = 0
+    completed_positions: int = 0
+    total_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+
+
+class SessionListItem(BaseModel):
+    """List item for the session picker."""
+
+    session_id: str
+    status: str
+    start_time: Optional[str] = None
+    close_time: Optional[str] = None
+    summary: Optional[SessionListSummary] = None
+
+
+class SessionListResponse(BaseModel):
+    """Response payload for the session picker."""
+
+    sessions: List[SessionListItem]
+    count: int
+
+
 class TriggerSummary(BaseModel):
     """Lightweight summary of a single trigger for the UI."""
     id: str
@@ -396,6 +481,26 @@ class TriggerSummary(BaseModel):
     entry_rule: Optional[str] = None
     exit_rule: Optional[str] = None
     hold_rule: Optional[str] = None
+    # Hypothesis visibility (Fix C)
+    rationale: Optional[str] = None
+    stop_anchor_type: Optional[str] = None
+    target_anchor_type: Optional[str] = None
+
+
+class HypothesisSummary(BaseModel):
+    """Lightweight summary of a TradeHypothesis for the UI."""
+    id: str
+    symbol: str
+    direction: str
+    timeframe: str
+    confidence_grade: str
+    thesis: str
+    indicator_basis: Optional[str] = None
+    stop_price: Optional[float] = None
+    target_price: Optional[float] = None
+    rr_ratio: Optional[float] = None
+    playbook_id: Optional[str] = None
+    regime_context: Optional[str] = None
 
 
 class StrategyPlanSummary(BaseModel):
@@ -409,7 +514,9 @@ class StrategyPlanSummary(BaseModel):
     # Enriched fields for the activity UI
     global_view: Optional[str] = None
     regime: Optional[str] = None
+    plan_rationale: Optional[str] = None
     triggers: List[TriggerSummary] = []
+    hypotheses: List[HypothesisSummary] = []
     # R68/R49: snapshot provenance fields for plan inspector UI
     snapshot_id: Optional[str] = None
     snapshot_hash: Optional[str] = None
@@ -602,6 +709,10 @@ async def start_session(config: PaperTradingSessionConfig):
             "screener_regime": config.screener_regime,
             # R76: AI portfolio planner
             "use_ai_planner": config.use_ai_planner,
+            # R85: trailing stop session defaults
+            "default_trailing_config": config.default_trailing_config,
+            # R:R gate (LLM-invisible — structural targets screened post-resolution)
+            "min_rr_ratio": config.min_rr_ratio,
         }
 
         # Start workflow
@@ -844,13 +955,35 @@ async def get_current_plan(session_id: str):
                 category=t.get("category", ""),
                 direction=t.get("direction", ""),
                 timeframe=t.get("timeframe", ""),
-                confidence=t.get("confidence"),
+                confidence=t.get("confidence") or t.get("confidence_grade"),
                 entry_rule=(t.get("entry_rule") or "") or None,
                 exit_rule=(t.get("exit_rule") or "") or None,
                 hold_rule=(t.get("hold_rule") or "") or None,
+                rationale=t.get("rationale") or None,
+                stop_anchor_type=t.get("stop_anchor_type") or None,
+                target_anchor_type=t.get("target_anchor_type") or None,
             )
             for t in raw_triggers
             if isinstance(t, dict)
+        ]
+        raw_hypotheses = plan.get("hypotheses", []) or []
+        hypothesis_summaries = [
+            HypothesisSummary(
+                id=h.get("id", ""),
+                symbol=h.get("symbol", ""),
+                direction=h.get("direction", ""),
+                timeframe=h.get("timeframe", ""),
+                confidence_grade=h.get("confidence_grade", "B"),
+                thesis=h.get("thesis", ""),
+                indicator_basis=h.get("indicator_basis") or None,
+                stop_price=h.get("stop_price") if isinstance(h.get("stop_price"), (int, float)) else None,
+                target_price=h.get("target_price") if isinstance(h.get("target_price"), (int, float)) else None,
+                rr_ratio=h.get("rr_ratio") if isinstance(h.get("rr_ratio"), (int, float)) else None,
+                playbook_id=h.get("playbook_id") or None,
+                regime_context=h.get("regime_context") or None,
+            )
+            for h in raw_hypotheses
+            if isinstance(h, dict)
         ]
         return StrategyPlanSummary(
             generated_at=plan.get("generated_at"),
@@ -860,7 +993,9 @@ async def get_current_plan(session_id: str):
             max_trades_per_day=plan.get("max_trades_per_day"),
             global_view=plan.get("global_view"),
             regime=plan.get("regime"),
+            plan_rationale=plan.get("rationale") or None,
             triggers=trigger_summaries,
+            hypotheses=hypothesis_summaries,
             # R68: snapshot provenance from workflow query (R49 metadata)
             snapshot_id=plan.get("snapshot_id"),
             snapshot_hash=plan.get("snapshot_hash"),
@@ -1783,7 +1918,7 @@ async def update_symbols(session_id: str, symbols: List[str]):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/sessions")
+@router.get("/sessions", response_model=SessionListResponse)
 async def list_sessions(status: Optional[str] = None, limit: int = 20):
     """List paper trading sessions.
 
@@ -1822,7 +1957,16 @@ async def list_sessions(status: Optional[str] = None, limit: int = 20):
 
         # Preserve newest-first ordering from Temporal scan.
         sessions = sessions[:limit]
-        return {"sessions": sessions, "count": len(sessions)}
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def _attach_summary(session: Dict[str, Any]) -> Dict[str, Any]:
+            async with semaphore:
+                summary = await _get_session_list_summary(client, session["session_id"])
+            return {**session, "summary": summary}
+
+        sessions_with_summaries = await asyncio.gather(*(_attach_summary(session) for session in sessions))
+        return {"sessions": sessions_with_summaries, "count": len(sessions_with_summaries)}
 
     except Exception as e:
         logger.error(f"Failed to list sessions: {e}", exc_info=True)

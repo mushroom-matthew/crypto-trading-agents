@@ -19,6 +19,7 @@ import {
   type PaperTradingPortfolio,
   type PaperTradingTradeSet,
   type PositionMeta,
+  type SessionListItem,
   type ScreenerRecommendationItem,
 } from '../lib/api';
 // Note: PaperTradingMetrics used via paperTradingAPI.getMetrics() return type (inferred)
@@ -28,6 +29,20 @@ import { AggressiveSettingsPanel, type AggressiveSettings } from './AggressiveSe
 import { PlanningSettingsPanel, type PlanningSettings } from './PlanningSettingsPanel';
 import { ResearchBudgetPanel } from './ResearchBudgetPanel';
 import { ScannerPanel } from './ScannerPanel';
+
+function formatSessionOptionLabel(session: SessionListItem): string {
+  const summary = session.summary;
+  if (!summary) {
+    return `${session.session_id} (${session.status})`;
+  }
+
+  const signedTotalPnl = `${summary.total_pnl >= 0 ? '+' : ''}${formatCurrency(summary.total_pnl)}`;
+  return `${session.session_id} (${session.status}) | open ${summary.open_positions} | closed ${summary.completed_positions} | P&L ${signedTotalPnl}`;
+}
+
+function formatSignedCurrency(value: number): string {
+  return `${value >= 0 ? '+' : ''}${formatCurrency(value)}`;
+}
 
 export function PaperTradingControl() {
   const queryClient = useQueryClient();
@@ -41,6 +56,8 @@ export function PaperTradingControl() {
   const [indicatorTimeframe, setIndicatorTimeframe] = useState<string>('1h');
   const [userOverrodeTf, setUserOverrodeTf] = useState(false);
   const [directionBias, setDirectionBias] = useState<string>('neutral');
+  // R:R gate
+  const [minRrRatio, setMinRrRatio] = useState<number>(1.75);
   // R85: trailing stop session defaults
   const [trailingMode, setTrailingMode] = useState<string>('none');
   const [trailBreakevenAtR, setTrailBreakevenAtR] = useState<number>(1.0);
@@ -121,6 +138,8 @@ export function PaperTradingControl() {
     queryFn: () => paperTradingAPI.listSessions(undefined, 20),
     refetchInterval: 10000,
   });
+  const sessionOptions = sessionsData?.sessions ?? [];
+  const selectedSessionListItem = sessionOptions.find((item) => item.session_id === selectedSessionId) ?? null;
 
   // Fetch selected session status
   const { data: session } = useQuery({
@@ -418,6 +437,7 @@ export function PaperTradingControl() {
         enable_symbol_discovery: enableDiscovery,
         exit_binding_mode: 'category',
         default_trailing_config: defaultTrailingConfig,
+        min_rr_ratio: minRrRatio,
         // Aggressive trading settings
         ...aggressiveSettings,
         ...planningSettings,
@@ -609,12 +629,91 @@ export function PaperTradingControl() {
                 className="w-full px-3 py-2 border border-green-300 dark:border-green-600 rounded-lg bg-white dark:bg-gray-700 focus:ring-2 focus:ring-green-500 focus:border-transparent"
               >
                 <option value="">-- Start a new session --</option>
-                {sessionsData?.sessions.map((s) => (
+                {sessionOptions.map((s) => (
                   <option key={s.session_id} value={s.session_id}>
-                    {s.session_id} ({s.status})
+                    {formatSessionOptionLabel(s)}
                   </option>
                 ))}
               </select>
+              {selectedSessionListItem?.summary && (
+                <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                  <span className="px-2 py-1 rounded-full border border-green-200 dark:border-green-700 bg-white/80 dark:bg-gray-900/40">
+                    {selectedSessionListItem.status}
+                  </span>
+                  <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-900/40">
+                    Open {selectedSessionListItem.summary.open_positions}
+                  </span>
+                  <span className="px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-900/40">
+                    Closed {selectedSessionListItem.summary.completed_positions}
+                  </span>
+                  <span
+                    className={cn(
+                      'px-2 py-1 rounded-full border bg-white/80 dark:bg-gray-900/40',
+                      selectedSessionListItem.summary.total_pnl >= 0
+                        ? 'border-emerald-200 text-emerald-700 dark:border-emerald-800 dark:text-emerald-300'
+                        : 'border-red-200 text-red-700 dark:border-red-800 dark:text-red-300'
+                    )}
+                  >
+                    P&L {formatSignedCurrency(selectedSessionListItem.summary.total_pnl)}
+                  </span>
+                </div>
+              )}
+              {sessionOptions.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {sessionOptions.map((sessionItem) => (
+                    <button
+                      key={`session-summary-${sessionItem.session_id}`}
+                      type="button"
+                      onClick={() => {
+                        setSelectedSessionId(sessionItem.session_id);
+                        localStorage.setItem('selectedPaperTradingSessionId', sessionItem.session_id);
+                      }}
+                      className={cn(
+                        'w-full rounded-lg border px-3 py-2 text-left transition-colors',
+                        sessionItem.session_id === selectedSessionId
+                          ? 'border-green-400 bg-white dark:bg-gray-800'
+                          : 'border-green-100 bg-white/70 hover:bg-white dark:border-green-900/40 dark:bg-gray-800/60 dark:hover:bg-gray-800'
+                      )}
+                    >
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-sm">{sessionItem.session_id}</span>
+                            <span className="rounded-full border border-green-200 dark:border-green-700 px-2 py-0.5 text-[11px] uppercase tracking-wide text-green-700 dark:text-green-300">
+                              {sessionItem.status}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                            {sessionItem.start_time ? `Started ${formatDateTime(sessionItem.start_time)}` : 'Start time unavailable'}
+                          </p>
+                        </div>
+                        {sessionItem.summary ? (
+                          <div className="flex flex-wrap gap-2 text-xs">
+                            <span className="rounded-full border border-gray-200 dark:border-gray-700 px-2 py-1">
+                              Open {sessionItem.summary.open_positions}
+                            </span>
+                            <span className="rounded-full border border-gray-200 dark:border-gray-700 px-2 py-1">
+                              Closed {sessionItem.summary.completed_positions}
+                            </span>
+                            <span
+                              className={cn(
+                                'rounded-full border px-2 py-1',
+                                sessionItem.summary.total_pnl >= 0
+                                  ? 'border-emerald-200 text-emerald-700 dark:border-emerald-800 dark:text-emerald-300'
+                                  : 'border-red-200 text-red-700 dark:border-red-800 dark:text-red-300'
+                              )}
+                            >
+                              P&L {formatSignedCurrency(sessionItem.summary.total_pnl)}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400 dark:text-gray-500">Summary unavailable</span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Screener preflight shortlist (session-start UX) */}
@@ -997,6 +1096,26 @@ export function PaperTradingControl() {
                   )}
                 </div>
               )}
+            </div>
+
+            {/* Min R:R Gate */}
+            <div className="border border-gray-200 dark:border-gray-600 rounded-lg p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">Min R:R Gate</label>
+                <span className="text-xs font-mono bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">
+                  {minRrRatio.toFixed(2)}
+                </span>
+              </div>
+              <input
+                type="range" min={0.5} max={5.0} step={0.25}
+                value={minRrRatio}
+                onChange={(e) => setMinRrRatio(parseFloat(e.target.value))}
+                className="w-full accent-green-500"
+                disabled={isRunning}
+              />
+              <p className="text-xs text-gray-400">
+                Entries blocked when resolved reward/risk &lt; this. LLM picks structural targets — this gate screens them silently.
+              </p>
             </div>
 
             {/* Symbol Discovery Toggle */}
@@ -1457,6 +1576,12 @@ export function PaperTradingControl() {
                   "{plan.global_view}"
                 </p>
               )}
+              {/* Plan-level rationale */}
+              {plan.plan_rationale && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 mb-3 leading-relaxed border-l-2 border-gray-300 pl-2">
+                  {plan.plan_rationale}
+                </p>
+              )}
 
               <div className="grid grid-cols-2 gap-3 text-sm mb-3">
                 <div>
@@ -1520,6 +1645,28 @@ export function PaperTradingControl() {
 
                           {expandedTriggers[t.id] && (
                             <div className="mt-3 pl-5 space-y-2">
+                              {/* Anchor type badges */}
+                              {(t.stop_anchor_type || t.target_anchor_type) && (
+                                <div className="flex gap-2 flex-wrap">
+                                  {t.stop_anchor_type && (
+                                    <span className="px-1.5 py-0.5 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded text-[10px] font-mono">
+                                      stop: {t.stop_anchor_type}
+                                    </span>
+                                  )}
+                                  {t.target_anchor_type && (
+                                    <span className="px-1.5 py-0.5 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 rounded text-[10px] font-mono">
+                                      target: {t.target_anchor_type}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              {/* Per-trigger rationale */}
+                              {t.rationale && (
+                                <div>
+                                  <p className="text-[11px] font-semibold text-gray-500">RATIONALE</p>
+                                  <p className="text-xs text-gray-600 dark:text-gray-300 italic leading-relaxed">{t.rationale}</p>
+                                </div>
+                              )}
                               {(t.entry_rule && !isLiteralFalseRule(t.entry_rule)) && (
                                 <div>
                                   <p className="text-[11px] font-semibold text-gray-500">ENTRY</p>
@@ -1551,6 +1698,57 @@ export function PaperTradingControl() {
                       ))}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Hypotheses section */}
+              {plan.hypotheses && plan.hypotheses.length > 0 && (
+                <div className="mt-3">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                    Hypotheses ({plan.hypotheses.length})
+                  </p>
+                  <div className="space-y-2">
+                    {plan.hypotheses.map((h: any) => (
+                      <div key={h.id} className={cn(
+                        'p-2 rounded text-xs border-l-2',
+                        h.direction === 'long' ? 'border-l-green-400 bg-green-50 dark:bg-green-900/10' :
+                        'border-l-red-400 bg-red-50 dark:bg-red-900/10'
+                      )}>
+                        <div className="flex items-center gap-2 mb-1">
+                          {h.direction === 'long'
+                            ? <TrendingUp className="w-3 h-3 text-green-500 flex-shrink-0" />
+                            : <TrendingDown className="w-3 h-3 text-red-500 flex-shrink-0" />}
+                          <span className="font-mono font-semibold">{h.symbol}</span>
+                          <span className="text-gray-500">{h.timeframe}</span>
+                          <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-[10px] font-bold">{h.confidence_grade}</span>
+                          {h.playbook_id && (
+                            <span className="text-gray-400 italic text-[10px]">{h.playbook_id}</span>
+                          )}
+                          {h.rr_ratio != null && (
+                            <span className="ml-auto text-gray-500">{h.rr_ratio.toFixed(1)}R</span>
+                          )}
+                        </div>
+                        <p className="text-gray-700 dark:text-gray-300 leading-relaxed">{h.thesis}</p>
+                        {h.indicator_basis && (
+                          <p className="text-gray-400 mt-1 italic">{h.indicator_basis}</p>
+                        )}
+                        {(h.stop_price != null || h.target_price != null) && (
+                          <div className="flex gap-3 mt-1">
+                            {h.stop_price != null && (
+                              <span className="text-red-600 dark:text-red-400 font-mono">
+                                stop {h.stop_price.toFixed(4)}
+                              </span>
+                            )}
+                            {h.target_price != null && (
+                              <span className="text-green-600 dark:text-green-400 font-mono">
+                                target {h.target_price.toFixed(4)}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

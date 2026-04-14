@@ -168,6 +168,35 @@ def _check_playbook_consistency(
                 "no exit trigger is present in the plan"
             )
 
+    # Mean-reversion directional coverage (soft)
+    # A mean_reversion plan that is purely long or purely short for a symbol is
+    # either a regime call (acceptable) or lazy generation (not acceptable).
+    # Require either symmetric coverage OR a global_view that explicitly names
+    # why only one side makes sense (e.g. "bear regime, only shorts valid").
+    mr_triggers_by_symbol: dict[str, list[str]] = {}
+    for t in plan.triggers:
+        if t.category == "mean_reversion" and t.direction in ("long", "short"):
+            mr_triggers_by_symbol.setdefault(t.symbol, []).append(t.direction)
+
+    has_explicit_asymmetry_justification = bool(
+        plan.global_view and any(
+            kw in (plan.global_view or "").lower()
+            for kw in ("only long", "only short", "longs only", "shorts only",
+                       "bear regime", "bull regime", "one-sided", "asymmetric",
+                       "directional bias", "skewed")
+        )
+    )
+
+    for sym, directions in mr_triggers_by_symbol.items():
+        unique_dirs = set(directions)
+        if len(unique_dirs) == 1 and not has_explicit_asymmetry_justification:
+            only_dir = next(iter(unique_dirs))
+            reasons.append(
+                f"REVISE: mean_reversion triggers for {sym} are all '{only_dir}' — "
+                f"add a '{('short' if only_dir == 'long' else 'long')}' counterpart at the "
+                f"opposite range extreme, or explain the one-sided bias in global_view"
+            )
+
     return reasons
 
 

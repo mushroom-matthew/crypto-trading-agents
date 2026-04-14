@@ -35,6 +35,24 @@ class PersistFillParams(BaseModel):
 _STATE: Optional[tuple[str, Settings, Database, LedgerEngine]] = None
 
 
+def _split_trading_pair(raw_symbol: Any) -> tuple[str, str]:
+    """Normalize supported pair formats into base/quote currencies."""
+    symbol = str(raw_symbol or "").strip().upper()
+    if not symbol:
+        raise ValueError("Fill symbol is required")
+    if "/" in symbol:
+        base_currency, quote_currency = symbol.split("/", 1)
+    elif "-" in symbol:
+        base_currency, quote_currency = symbol.rsplit("-", 1)
+    else:
+        raise ValueError(f"Unsupported fill symbol format: {raw_symbol!r}")
+    base_currency = base_currency.strip()
+    quote_currency = quote_currency.strip()
+    if not base_currency or not quote_currency:
+        raise ValueError(f"Unsupported fill symbol format: {raw_symbol!r}")
+    return base_currency, quote_currency
+
+
 def _get_state() -> tuple[Settings, Database, LedgerEngine]:
     global _STATE
     settings = get_settings()
@@ -112,7 +130,7 @@ async def persist_fill_activity(payload: dict[str, Any]) -> None:
 
     settings, database, ledger = _get_state()
 
-    base_currency, quote_currency = fill["symbol"].split("/")
+    base_currency, quote_currency = _split_trading_pair(fill.get("symbol"))
     qty = Decimal(str(fill["qty"]))
     fill_price = Decimal(str(fill.get("fill_price", fill.get("price", 0))))
     notional = Decimal(str(fill.get("cost", qty * fill_price)))
@@ -209,6 +227,23 @@ async def persist_fill_activity(payload: dict[str, Any]) -> None:
         raise
 
 
+@activity.defn
+async def emit_ops_event_activity(payload: dict[str, Any]) -> None:
+    """Emit an Ops event from activity context so workflows avoid direct I/O."""
+    from agents.event_emitter import emit_event
+
+    await emit_event(
+        str(payload["event_type"]),
+        dict(payload["payload"]),
+        source=str(payload["source"]),
+        run_id=str(payload["run_id"]) if payload.get("run_id") is not None else None,
+        correlation_id=(
+            str(payload["correlation_id"]) if payload.get("correlation_id") is not None else None
+        ),
+        dedupe_key=str(payload["dedupe_key"]) if payload.get("dedupe_key") is not None else None,
+    )
+
+
 # Lazy import to avoid circular dependency
 from app.db.models import LedgerSide  # noqa: E402
 
@@ -216,4 +251,9 @@ _LEDGER_SIDE_DEBIT = LedgerSide.debit
 _LEDGER_SIDE_CREDIT = LedgerSide.credit
 
 
-__all__ = ["persist_fill_activity", "PersistFillParams"]
+__all__ = [
+    "persist_fill_activity",
+    "PersistFillParams",
+    "emit_ops_event_activity",
+    "_split_trading_pair",
+]

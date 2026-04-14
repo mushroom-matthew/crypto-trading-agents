@@ -44,6 +44,7 @@ Multi-layer synthesis requirements:
    NOTE: If only a single timeframe is available, skip cross-timeframe requirements and build triggers using only that timeframe's indicators.
 2. Mandatory volatility gating: include at least one ATR, realized volatility, Donchian channel width, or Bollinger bandwidth comparison in every trigger. Match the gate to the trigger category (low-vol for ranges, high-vol for breakouts, etc.).
 3. Mean-reversion volume confirmation: every mean_reversion entry_rule must include a volume check when volume_multiple is available (e.g., volume_multiple >= 1.1). If volume_multiple is null, substitute a structural confirmation (e.g., cycle_position near extremes or nearest_support reclaim).
+   Mean-reversion MUST be bidirectional unless the regime explicitly rules out one side: generate at least one long (entry near range low / oversold extreme) AND one short (entry near range high / overbought extreme) per symbol with mean_reversion triggers. Use `htf_price_vs_daily_mid` or `cycle_position` to anchor which extreme each trigger targets — long triggers when price is in the lower half of the range, short triggers when price is in the upper half. If a bear/bull regime makes one side genuinely invalid, state that clearly in global_view; otherwise a plan with only long OR only short mean_reversion triggers per symbol will be REVISED at validation.
 4. Trigger diversity: emit at least seven triggers that cover these categories exactly once per asset set:
    - trend_continuation
    - reversal

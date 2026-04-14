@@ -1,605 +1,335 @@
-# AWS Deployment Scope - Paper & Live Trading
+# AWS Deployment Scope — Paper & Live Trading
 
-This document outlines the infrastructure, observability, and wiring required to deploy the trading system to AWS for both **paper trading** (simulated) and **live trading** (real capital).
-
-**Key Insight:** The AWS infrastructure is largely the same for both modes. The difference is in:
-1. Environment variables and secrets
-2. Database schema activation (production ledger)
-3. Safety controls and operational procedures
+**Last updated:** 2026-04-13
+**Status:** Phase 0 (Temporal Cloud) is immediate priority — solves WSL2 crash problem. Full ECS deployment follows.
 
 ---
 
-## Infrastructure Overview
+## Problem Statement
 
-### Architecture (Both Modes)
+Local WSL2 crashes repeatedly kill the entire stack mid-session. Temporal's durable execution guarantees only hold as long as the Temporal server itself is running. Moving Temporal to a managed cloud service (Temporal Cloud) makes workflows crash-proof regardless of what happens on the local machine.
+
+---
+
+## Deployment Phases
+
+| Phase | Scope | Urgency |
+|-------|-------|---------|
+| **0** | Temporal Cloud — workflows survive local crashes | **Now** |
+| **1** | Worker on EC2/Fly.io — process survives machine restarts | Soon |
+| **2** | Ops API + MCP Server on ECS Fargate — remove local dependency | Medium |
+| **3** | RDS PostgreSQL — production ledger | Pre-live-trading |
+| **4** | CI/CD, CloudWatch, live trading safety controls | Pre-live-trading |
+
+---
+
+## Phase 0: Temporal Cloud (Immediate)
+
+**Goal:** Workflows (`PaperTradingWorkflow`, `ExecutionLedgerWorkflow`) run in Temporal Cloud. Worker can be local or remote — either way, a crash just means the worker reconnects and resumes from the last checkpoint.
+
+**Steps:**
+1. Create Temporal Cloud account at cloud.temporal.io
+2. Create a namespace (e.g., `crypto-trading.acctid`)
+3. Download TLS certs (client cert + key + CA cert)
+4. Update `TEMPORAL_ADDRESS` in `.env` to `<namespace>.tmprl.cloud:7233`
+5. Add cert paths to worker config
+
+**Env changes (`.env`):**
+```bash
+TEMPORAL_ADDRESS=<namespace>.tmprl.cloud:7233
+TEMPORAL_NAMESPACE=<your-namespace>
+TEMPORAL_TLS_CERT=/path/to/client.pem
+TEMPORAL_TLS_KEY=/path/to/client.key
+# TEMPORAL_TLS_CA=/path/to/ca.pem  # optional, for mTLS
+```
+
+**Worker connection change (`worker/agent_worker.py`):**
+```python
+from temporalio.client import Client, TLSConfig
+
+tls = TLSConfig(
+    client_cert=open(os.environ["TEMPORAL_TLS_CERT"], "rb").read(),
+    client_private_key=open(os.environ["TEMPORAL_TLS_KEY"], "rb").read(),
+)
+client = await Client.connect(
+    os.environ["TEMPORAL_ADDRESS"],
+    namespace=os.environ["TEMPORAL_NAMESPACE"],
+    tls=tls,
+)
+```
+
+Same change needed in `mcp_server/app.py` and `ops_api/routers/paper_trading.py` wherever `get_temporal_client()` is called.
+
+**Docker compose change:** Remove the `temporal` and `temporal-ui` services from `docker-compose.yml` (or keep them for local dev with a `TEMPORAL_ADDRESS=temporal:7233` override).
+
+**Cost:** Temporal Cloud free tier = 10K actions/month. Paper trading at 5m bars ≈ ~288 workflow task executions/day × 30 = ~8.6K/month. Fits free tier for a single session.
+
+**What survives a crash after Phase 0:**
+- All active `PaperTradingWorkflow` sessions ✓
+- All `ExecutionLedgerWorkflow` states (cash, positions) ✓
+- `ExecutionAgentWorkflow`, `JudgeAgentWorkflow`, `BrokerAgentWorkflow` ✓
+- Session intent, world state, episode memory, trailing stop states ✓
+
+**What still dies in a crash (fixed in Phase 1+):**
+- Worker process (stops evaluating triggers — resumes on restart)
+- Ops API (UI goes dark — resumes on restart)
+- Local React UI dev server
+
+---
+
+## Phase 1: Worker on Remote VM
+
+**Goal:** The worker process never goes down with the local machine.
+
+**Options (cheapest first):**
+
+| Option | Cost | Notes |
+|--------|------|-------|
+| Fly.io Machine (shared-cpu-1x, 256MB) | ~$2/mo | Simple deploy, good for single worker |
+| EC2 t3.micro (spot) | ~$3/mo | Familiar, easy IAM integration |
+| EC2 t3.small (on-demand) | ~$15/mo | More headroom for 5+ simultaneous sessions |
+| Railway | ~$5/mo | Easy GitHub-based deploy |
+
+**Fly.io is the fastest path** — `fly deploy` from the repo root with a minimal `fly.toml`.
+
+**Worker sizing:**
+- Current: worker runs all workflows + activities for paper trading
+- 1m timeframe, 3 symbols: ~2 activity executions/minute → easily fits 256MB
+- 5m timeframe, 5+ symbols: ~1 activity execution/5m → trivial load
+
+**What the worker needs (env vars):**
+```bash
+TEMPORAL_ADDRESS=<cloud-endpoint>
+TEMPORAL_NAMESPACE=<namespace>
+TEMPORAL_TLS_CERT=...
+TEMPORAL_TLS_KEY=...
+OPENAI_API_KEY=...
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_PUBLIC_KEY=...
+COINBASEEXCHANGE_API_KEY=...  # for market data fetch
+COINBASEEXCHANGE_SECRET=...
+POSTGRES_HOST=...  # local or RDS
+```
+
+---
+
+## Phase 2: Ops API + MCP Server on ECS Fargate
+
+**Architecture (updated — reflects current two-server design):**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                           AWS VPC                                    │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Public Subnets                                                  │ │
-│  │  ├── Application Load Balancer (HTTPS)                           │ │
-│  │  └── NAT Gateway                                                 │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Private Subnets                                                 │ │
-│  │  ├── ECS Fargate: Worker (Temporal workflows)                   │ │
-│  │  ├── ECS Fargate: Ops API (FastAPI)                             │ │
-│  │  ├── ECS Fargate: MCP Server (Agent tools)                      │ │
-│  │  └── Temporal Server (or Temporal Cloud)                        │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Database Subnets                                                │ │
-│  │  └── RDS PostgreSQL (Multi-AZ for live trading)                 │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  Public Subnets                                              │   │
+│  │  ├── ALB → Ops API  (port 8081, operator dashboard)         │   │
+│  │  └── ALB → MCP Server (port 8080, agent/programmatic API)   │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  Private Subnets                                             │   │
+│  │  ├── ECS Fargate: worker (Temporal task queue consumer)      │   │
+│  │  ├── ECS Fargate: ops-api (FastAPI, port 8081)              │   │
+│  │  └── ECS Fargate: app/mcp-server (FastMCP, port 8080)       │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  Database Subnets                                            │   │
+│  │  └── RDS PostgreSQL (Phase 3+)                              │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────┐     ┌─────────────────────────┐
-│   Coinbase API          │     │   OpenAI API            │
-│   (Market Data + Orders)│     │   (LLM Strategy)        │
-└─────────────────────────┘     └─────────────────────────┘
+          │                                │
+          ▼                                ▼
+┌─────────────────────┐      ┌─────────────────────────┐
+│  Temporal Cloud     │      │  External APIs           │
+│  (workflows + state)│      │  Coinbase, OpenAI,       │
+└─────────────────────┘      │  Langfuse               │
+                             └─────────────────────────┘
 ```
 
----
+**Note:** Temporal is NOT self-hosted after Phase 0. The `temporal.json` task definition from the original scope is dropped.
 
-## Phase 5: AWS Infrastructure
+**ECS Task Definitions (`infra/ecs/task-definitions/`):**
 
-### 5.1 ECS Task Definitions
+| Task | CPU | Memory | Port | Purpose |
+|------|-----|--------|------|---------|
+| `worker.json` | 512 | 1024 | — | Temporal workflow + activity runner |
+| `ops-api.json` | 256 | 512 | 8081 | Human operator dashboard API |
+| `mcp-server.json` | 256 | 512 | 8080 | Agent/programmatic MCP tools |
 
-**Directory:** `infra/ecs/task-definitions/`
+**Key env vars that must be in Secrets Manager:**
+```
+trading/openai      → OPENAI_API_KEY
+trading/coinbase    → COINBASEEXCHANGE_API_KEY, COINBASEEXCHANGE_SECRET
+trading/langfuse    → LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY
+trading/temporal    → TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, TEMPORAL_TLS_CERT, TEMPORAL_TLS_KEY
+trading/database    → DB_DSN (Phase 3+)
+trading/config      → LIVE_TRADING_ACK, ENABLE_REAL_LEDGER (Phase 4)
+```
 
-| Task Definition | Purpose | CPU | Memory | Port |
-|-----------------|---------|-----|--------|------|
-| `worker.json` | Temporal worker (PaperTradingWorkflow, ExecutionLedgerWorkflow) | 512 | 1024 | - |
-| `ops-api.json` | Ops API (FastAPI endpoints) | 256 | 512 | 8081 |
-| `mcp-server.json` | MCP Server (agent tools) | 256 | 512 | 8080 |
-| `temporal.json` | Temporal server (if self-hosting) | 512 | 1024 | 7233 |
-
-**Environment Variables by Mode:**
-
-| Variable | Paper Trading | Live Trading |
-|----------|---------------|--------------|
-| `TRADING_MODE` | `paper` | `live` |
-| `LIVE_TRADING_ACK` | `false` | `true` |
-| `ENABLE_REAL_LEDGER` | `0` | `1` |
-| `COINBASE_API_KEY` | Optional (market data only) | Required |
-| `COINBASE_API_SECRET` | Optional | Required |
-| `DATABASE_URL` | Required | Required |
-| `OPENAI_API_KEY` | Required | Required |
-
-**Tasks:**
-- [ ] Create `worker.json` task definition
-- [ ] Create `ops-api.json` task definition
-- [ ] Create `mcp-server.json` task definition
-- [ ] Create `temporal.json` task definition (if self-hosting)
-- [ ] Configure health checks for each container
-- [ ] Set resource limits appropriate for workload
-- [ ] Create separate task definition variants for paper vs live (or use env var injection)
-
----
-
-### 5.2 Terraform Infrastructure
-
-**Directory:** `infra/terraform/`
-
-**Files to Create:**
+**Terraform files (`infra/terraform/`):**
 
 | File | Purpose |
 |------|---------|
-| `main.tf` | Provider configuration, module composition |
+| `main.tf` | Provider config, module composition |
 | `vpc.tf` | VPC, subnets, NAT gateway, route tables |
-| `ecs.tf` | ECS cluster, services, task definitions |
-| `rds.tf` | PostgreSQL RDS instance |
-| `alb.tf` | Application Load Balancer, target groups |
+| `ecs.tf` | Cluster, services, task definitions |
+| `alb.tf` | ALBs for ops-api and mcp-server |
 | `secrets.tf` | Secrets Manager secrets |
-| `cloudwatch.tf` | Log groups, dashboards, alarms |
+| `cloudwatch.tf` | Log groups, alarms |
 | `iam.tf` | Task roles, execution roles |
 | `variables.tf` | Input variables |
-| `outputs.tf` | Output values |
-
-**RDS Configuration by Mode:**
-
-| Setting | Paper Trading | Live Trading |
-|---------|---------------|--------------|
-| Instance Class | `db.t3.micro` | `db.t3.medium` or higher |
-| Multi-AZ | No | **Yes** (required) |
-| Backup Retention | 7 days | 30 days |
-| Encryption | Yes | Yes |
-| Deletion Protection | No | **Yes** |
-
-**Tasks:**
-- [ ] Create VPC with public/private/database subnets
-- [ ] Configure NAT Gateway for private subnet internet access
-- [ ] Create ECS Fargate cluster
-- [ ] Create ECS services for worker, ops-api, mcp-server
-- [ ] Create RDS PostgreSQL with appropriate settings
-- [ ] Create ALB with HTTPS listener (ACM certificate)
-- [ ] Configure target groups and health checks
-- [ ] Create Security Groups with least-privilege rules
-- [ ] Set up CloudWatch Log Groups
-- [ ] Create IAM roles with minimal permissions
+| `outputs.tf` | ALB DNS, cluster ARN, etc. |
 
 ---
 
-### 5.3 Secrets Manager Configuration
+## Phase 3: RDS PostgreSQL
 
-**Secrets to Store:**
+Only needed for live trading (production ledger). Paper trading uses Temporal in-memory state only.
 
-| Secret Name | Keys | Paper | Live |
-|-------------|------|-------|------|
-| `trading/openai` | `OPENAI_API_KEY` | Required | Required |
-| `trading/coinbase` | `COINBASE_API_KEY`, `COINBASE_API_SECRET`, `COINBASE_WALLET_SECRET` | Optional | **Required** |
-| `trading/langfuse` | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY` | Optional | Recommended |
-| `trading/database` | `DATABASE_URL` | Required | Required |
-| `trading/config` | `LIVE_TRADING_ACK`, `TRADING_MODE`, `ENABLE_REAL_LEDGER` | - | **Required** |
+**Paper trading ledger = `ExecutionLedgerWorkflow` in-memory state, serialized through Temporal Cloud.** No DB needed.
 
-**Implementation:**
+**Live trading ledger = `app/ledger/` PostgreSQL tables** (`wallets`, `ledger_entries`, `orders`, `reservations`, `cost_estimates`).
 
-```python
-# app/core/config.py
-import os
-import json
-import boto3
-from functools import lru_cache
+| Setting | Paper | Live |
+|---------|-------|------|
+| Instance | Not needed | `db.t3.medium` |
+| Multi-AZ | — | Yes |
+| Backup retention | — | 30 days |
+| Deletion protection | — | Yes |
 
-@lru_cache
-def get_secret(secret_name: str) -> dict:
-    """Fetch secret from AWS Secrets Manager."""
-    if os.environ.get("AWS_SECRETS_ENABLED", "false").lower() != "true":
-        return {}
+---
 
-    client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-east-1"))
-    response = client.get_secret_value(SecretId=secret_name)
-    return json.loads(response["SecretString"])
+## Phase 4: Live Trading Safety Controls + CI/CD
 
-def get_trading_config() -> dict:
-    """Get trading configuration with safety checks."""
-    config = {
-        "TRADING_MODE": os.environ.get("TRADING_MODE", "paper"),
-        "LIVE_TRADING_ACK": os.environ.get("LIVE_TRADING_ACK", "false"),
-        "ENABLE_REAL_LEDGER": os.environ.get("ENABLE_REAL_LEDGER", "0"),
-    }
+### Safety Controls
 
-    # Override with Secrets Manager if enabled
-    secrets = get_secret("trading/config")
-    config.update({k: v for k, v in secrets.items() if v})
+| Control | Paper | Live |
+|---------|-------|------|
+| `LIVE_TRADING_ACK=true` | Not required | Required |
+| `ENABLE_REAL_LEDGER=1` | Not required | Required |
+| Tradeable fraction | Not applicable | Required (e.g., 20%) |
+| Cost gating (`app/costing/gate.py`) | Not applicable | Required |
+| Reconciliation (every 15 min) | Not applicable | Required |
+| Min R:R gate (`min_rr_ratio`) | 1.75 default | 1.75+ (tighten for live) |
+| Multi-AZ RDS | — | Required |
+| PagerDuty alerts | Optional | Required |
 
-    # CRITICAL SAFETY CHECK
-    if config["TRADING_MODE"] == "live" and config["LIVE_TRADING_ACK"] != "true":
-        raise RuntimeError(
-            "SAFETY VIOLATION: Live trading mode requires LIVE_TRADING_ACK=true"
-        )
+### New since original scope
 
-    return config
+The following controls exist in code and need surfacing in the cloud config:
+
+- **`min_rr_ratio`** (default 1.75) — entry gate, must be in session config or env for live
+- **AI planner** (`use_ai_planner`) — LLM selects symbols from candidate list; adds OpenAI calls at session start
+- **Trailing stops** (`default_trailing_config`) — ATR/pct/step modes; session-level config
+- **ContinueAsNew** — workflows self-trim history; no manual intervention needed
+- **SessionState** fully serializable — CaN snapshot survives worker restarts cleanly
+- **WorldState / RegimeTrajectory / EpisodeMemory** — in-workflow state, no external DB needed for paper
+- **Judge agent** — evaluates performance every N trades; prompt versioning in `JudgeAgentWorkflow`
+
+### CI/CD
+
+```
+main push → build + test → ECR push → deploy worker + ops-api (paper)
+                                     ↓
+                              manual approval gate
+                                     ↓
+                              deploy live (separate ECS cluster)
 ```
 
-**Tasks:**
-- [ ] Add boto3 to dependencies (`pyproject.toml`)
-- [ ] Implement `get_secret()` function with caching
-- [ ] Implement safety checks for live trading
-- [ ] Create secrets in AWS Secrets Manager
-- [ ] Configure IAM roles for Secrets Manager access
-- [ ] Test fallback to env vars for local development
-
 ---
 
-### 5.4 CloudWatch Alerting
-
-**Alarms (Both Modes):**
-
-| Alarm | Metric | Threshold | Action |
-|-------|--------|-----------|--------|
-| WorkflowFailures | `TemporalWorkflowsFailed` | > 5 in 5 min | SNS → Email/Slack |
-| HighLLMCost | Custom metric | > $10/day | SNS → Email |
-| DatabaseConnections | `DatabaseConnections` | > 80% | SNS → Email |
-| ECSTaskUnhealthy | `UnhealthyHostCount` | > 0 for 5 min | SNS → Email |
-| HighMemoryUsage | `MemoryUtilization` | > 85% | SNS → Email |
-| HighCPUUsage | `CPUUtilization` | > 80% | SNS → Email |
-
-**Additional Alarms (Live Trading Only):**
-
-| Alarm | Metric | Threshold | Action |
-|-------|--------|-----------|--------|
-| **OrderFailures** | `CoinbaseOrdersFailed` | > 0 | SNS → PagerDuty/SMS |
-| **LedgerDrift** | `ReconciliationDrift` | > 0.01% | SNS → Email + PagerDuty |
-| **HighDrawdown** | `PortfolioDrawdownPct` | > 10% | SNS → PagerDuty |
-| **DailyLossLimit** | `DailyRealizedLoss` | > $500 | SNS → PagerDuty + Auto-halt |
-| **CostGateBlocks** | `CostGateBlockedOrders` | > 10 in 1h | SNS → Email |
-| **APIRateLimit** | `CoinbaseRateLimitHits` | > 0 | SNS → Email |
-
-**Dashboard Widgets:**
-- Active trading sessions (paper and live)
-- Portfolio equity over time
-- Trade count per hour
-- Order success/failure rates
-- LLM API calls and costs
-- Workflow execution latency
-- Error rates
-- **Live Only:** Real P&L, reconciliation status, cost gate decisions
-
-**Tasks:**
-- [ ] Create SNS topics for alerts (standard, urgent)
-- [ ] Create CloudWatch alarms for each metric
-- [ ] Create CloudWatch dashboard
-- [ ] Configure Slack/email notifications
-- [ ] Configure PagerDuty for live trading alerts
-- [ ] Add custom metrics for trading-specific events
-
----
-
-### 5.5 CI/CD Pipeline
-
-**File:** `.github/workflows/deploy.yml`
-
-**Pipeline Stages:**
-1. **Build** - Run tests, build Docker image
-2. **Push** - Push to ECR
-3. **Deploy Dev** - Update ECS service in dev (paper mode)
-4. **Integration Tests** - Run against dev
-5. **Deploy Staging** - Update ECS service in staging (paper mode with real market data)
-6. **Deploy Prod** - Update ECS service in prod (manual approval, **separate workflow for live**)
-
-**Live Trading Deployment Requirements:**
-- Separate approval workflow
-- Requires 2+ approvers
-- Automatic rollback on failure
-- Blue/green deployment
-- Database migration verification
-
-**Tasks:**
-- [ ] Create ECR repositories
-- [ ] Create GitHub Actions workflow for paper trading
-- [ ] Create separate workflow for live trading with approval gates
-- [ ] Configure OIDC for AWS authentication
-- [ ] Add deployment scripts
-- [ ] Add rollback procedures
-
----
-
-## Phase 6: Live Trading Wiring
-
-### 6.1 Production Ledger Setup
-
-**Files Involved:**
-- `app/ledger/engine.py` - LedgerEngine class
-- `app/db/models.py` - Wallet, LedgerEntry, Order, Reservation
-- `app/ledger/reconciliation.py` - Coinbase sync
-
-**Database Migrations:**
-
-```bash
-# Run migrations to create production ledger tables
-uv run alembic upgrade head
-```
-
-**Tables Created:**
-- `wallets` - Trading wallets linked to Coinbase accounts
-- `balances` - Balance snapshots from Coinbase
-- `ledger_entries` - Double-entry postings
-- `reservations` - Fund locks during trade execution
-- `orders` - Coinbase order records
-- `cost_estimates` - Pre-trade cost evaluations
-
-**Tasks:**
-- [ ] Verify all migrations are up to date
-- [ ] Create migration for any new fields
-- [ ] Set up RDS with production schema
-- [ ] Test migration rollback procedures
-- [ ] Document schema for audit purposes
-
----
-
-### 6.2 Coinbase Integration
-
-**Files Involved:**
-- `app/coinbase/client.py` - CoinbaseClient
-- `app/coinbase/advanced_trade.py` - Order placement
-- `app/coinbase/accounts.py` - Account queries
-
-**Required Credentials:**
-```bash
-# Coinbase Advanced Trade API (CDP App)
-COINBASE_API_KEY=organizations/{org_id}/apiKeys/{key_id}
-COINBASE_API_SECRET=-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----
-COINBASE_WALLET_SECRET=<optional, for wallet-level auth>
-```
-
-**Safety Controls Built Into CoinbaseClient:**
-```python
-# In app/coinbase/advanced_trade.py
-if runtime.is_live:
-    if not runtime.live_trading_ack:
-        raise RuntimeError(
-            "COINBASE ORDER BLOCKED: Cannot place real Coinbase order "
-            "without explicit LIVE_TRADING_ACK=true environment variable"
-        )
-```
-
-**Tasks:**
-- [ ] Generate Coinbase API credentials (CDP App)
-- [ ] Store credentials in Secrets Manager
-- [ ] Verify API permissions (trade, read accounts)
-- [ ] Test connectivity from ECS tasks
-- [ ] Configure rate limiting and retry logic
-
----
-
-### 6.3 Cost Gating Configuration
-
-**Files Involved:**
-- `app/costing/gate.py` - CostGate class
-- `app/costing/fees.py` - FeeService
-- `app/costing/slippage.py` - Slippage simulation
-
-**How Cost Gating Works:**
-```
-For each trade:
-1. Estimate total cost = exchange_fee + slippage + spread + transfer_fee
-2. Compare against expected_edge parameter
-3. Decision: proceed only if expected_edge >= total_cost * (1 + safety_buffer)
-4. Log decision in cost_estimates table for audit
-```
-
-**Configuration:**
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `COST_GATE_SAFETY_BUFFER` | 0.1 (10%) | Extra margin required above costs |
-| `COST_GATE_ENABLED` | true | Enable/disable cost gating |
-| `COST_GATE_OVERRIDE_ALLOWED` | false | Allow manual override |
-
-**Tasks:**
-- [ ] Configure cost gate parameters for production
-- [ ] Test cost gate with various market conditions
-- [ ] Set up alerting for blocked trades
-- [ ] Document override procedures
-
----
-
-### 6.4 Wallet Seeding and Tradeable Fractions
-
-**Initial Setup:**
-```bash
-# 1. Seed wallets from Coinbase accounts
-uv run python -m app.cli.main ledger seed-from-coinbase
-
-# 2. List wallets to get IDs
-uv run python -m app.cli.main wallet list
-
-# 3. Set tradeable fraction (e.g., 20% of wallet can be traded)
-uv run python -m app.cli.main wallet set-tradeable-fraction 1 0.20
-```
-
-**Tradeable Fraction Safety:**
-- Limits how much capital can be used for trading
-- Prevents accidental full-account trades
-- Can be adjusted per wallet
-- Reservations further limit within the fraction
-
-**Tasks:**
-- [ ] Document wallet seeding procedure
-- [ ] Set appropriate tradeable fractions for production
-- [ ] Create runbook for adjusting fractions
-- [ ] Test reservation logic under load
-
----
-
-### 6.5 Reconciliation Setup
-
-**Files Involved:**
-- `app/ledger/reconciliation.py` - Reconciler class
-
-**Reconciliation Process:**
-```python
-# Run reconciliation
-uv run python -m app.cli.main reconcile run --threshold 0.0001
-
-# What it does:
-# 1. Fetch current balances from Coinbase
-# 2. Compare against ledger balances
-# 3. Report any drift > threshold
-# 4. Optionally auto-correct (with approval)
-```
-
-**Scheduled Reconciliation:**
-- Run every 15 minutes in production
-- Alert on any drift > 0.01%
-- Auto-halt trading on drift > 1%
-
-**Tasks:**
-- [ ] Set up scheduled reconciliation (CloudWatch Events or cron)
-- [ ] Configure drift thresholds
-- [ ] Create alerting for reconciliation failures
-- [ ] Document manual correction procedures
-
----
-
-### 6.6 TradeExecutor Wiring
-
-**Files Involved:**
-- `app/strategy/trade_executor.py` - TradeExecutor class
-
-**Execution Pipeline:**
-```
-1. acquire_tradable_lock() - Reserve funds in ledger
-2. cost_gate.evaluate() - Check if trade is profitable
-3. place_order() - Send to Coinbase API
-4. persist_order() - Record in database
-5. handle_fills() - Post double-entry transactions
-6. release_reservation() - Free the lock
-```
-
-**Integration Points:**
-
-| Component | Paper Trading | Live Trading |
-|-----------|---------------|--------------|
-| Order Execution | `ExecutionLedgerWorkflow.record_fill()` | `TradeExecutor.execute_trade()` |
-| Ledger Updates | In-memory workflow state | PostgreSQL via LedgerEngine |
-| Cost Checking | None | CostGate.evaluate() |
-| Coinbase API | Market data only | Full trading API |
-
-**Tasks:**
-- [ ] Wire PaperTradingWorkflow to optionally use TradeExecutor
-- [ ] Add feature flag for paper vs live execution
-- [ ] Test end-to-end trade flow
-- [ ] Verify idempotency handling
-
----
-
-## Phase 7: Monitoring & Observability
-
-### 7.1 Prometheus Metrics
-
-**Metrics (Both Modes):**
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `trading_sessions_active` | Gauge | `mode` | Active sessions |
-| `trading_cycles_total` | Counter | `session_id`, `mode` | Evaluation cycles |
-| `trading_orders_total` | Counter | `session_id`, `side`, `mode` | Orders executed |
-| `trading_llm_calls_total` | Counter | `session_id` | LLM API calls |
-| `trading_llm_cost_dollars` | Counter | `session_id` | LLM cost |
-| `trading_portfolio_equity` | Gauge | `session_id` | Portfolio equity |
-
-**Additional Metrics (Live Trading):**
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `live_orders_placed` | Counter | `product`, `side` | Real orders placed |
-| `live_orders_filled` | Counter | `product`, `side` | Orders filled |
-| `live_orders_failed` | Counter | `product`, `reason` | Order failures |
-| `live_realized_pnl` | Gauge | `product` | Realized P&L |
-| `live_cost_gate_decisions` | Counter | `decision` | proceed/blocked |
-| `live_reconciliation_drift` | Gauge | `currency` | Balance drift |
-| `live_ledger_entries` | Counter | `source` | Ledger postings |
-
-**Tasks:**
-- [ ] Add prometheus_client to dependencies
-- [ ] Define metrics in appropriate modules
-- [ ] Increment metrics at execution points
-- [ ] Add `/metrics` endpoint to ops_api
-- [ ] Configure Prometheus scrape target
-
----
-
-### 7.2 Grafana Dashboards
-
-**Dashboard: Trading Overview**
-
-| Panel | Paper | Live |
-|-------|-------|------|
-| Active Sessions | ✓ | ✓ |
-| Portfolio Equity | ✓ | ✓ |
-| Trade Volume | ✓ | ✓ |
-| LLM Costs | ✓ | ✓ |
-| Order Success Rate | - | ✓ |
-| Real P&L | - | ✓ |
-| Reconciliation Status | - | ✓ |
-| Cost Gate Decisions | - | ✓ |
-
-**Tasks:**
-- [ ] Create Grafana dashboard JSON
-- [ ] Configure Grafana datasource for Prometheus
-- [ ] Add dashboard to Terraform provisioning
-- [ ] Create separate views for paper vs live
-
----
-
-## Cost Estimates
-
-### AWS Monthly (Paper Trading)
-
-| Resource | Specification | Cost |
-|----------|---------------|------|
-| ECS Fargate (3 tasks) | 0.5 vCPU, 1GB each | ~$30 |
-| RDS PostgreSQL | db.t3.micro, Single-AZ | ~$15 |
-| ALB | 1 load balancer | ~$20 |
-| NAT Gateway | 1 gateway | ~$35 |
+## Cost Estimates (Updated)
+
+### Minimal (Temporal Cloud + Fly.io worker — Phase 0+1)
+
+| Resource | Cost/month |
+|----------|------------|
+| Temporal Cloud (free tier) | $0 |
+| Fly.io worker (shared-cpu-1x) | ~$2 |
+| **Total** | **~$2/month** |
+
+Covers: crash-resilient sessions, persistent workflows, automatic reconnect on local crash.
+
+### Paper Trading Full Cloud (Phase 2)
+
+| Resource | Specification | Cost/month |
+|----------|---------------|------------|
+| Temporal Cloud (developer tier) | 100K actions | ~$50 |
+| ECS Fargate — worker | 0.5 vCPU, 1GB | ~$15 |
+| ECS Fargate — ops-api | 0.25 vCPU, 512MB | ~$8 |
+| ECS Fargate — mcp-server | 0.25 vCPU, 512MB | ~$8 |
+| ALB (2) | ops-api + mcp | ~$20 |
+| NAT Gateway | 1 | ~$35 |
 | CloudWatch Logs | 5 GB/month | ~$5 |
-| Secrets Manager | 4 secrets | ~$2 |
-| **Subtotal** | | **~$107/month** |
-
-### AWS Monthly (Live Trading)
-
-| Resource | Specification | Cost |
-|----------|---------------|------|
-| ECS Fargate (3 tasks) | 1 vCPU, 2GB each | ~$60 |
-| RDS PostgreSQL | db.t3.medium, **Multi-AZ** | ~$70 |
-| ALB | 1 load balancer | ~$20 |
-| NAT Gateway | 2 gateways (HA) | ~$70 |
-| CloudWatch Logs | 10 GB/month | ~$10 |
 | Secrets Manager | 6 secrets | ~$3 |
-| CloudWatch Alarms | 15 alarms | ~$5 |
-| **Subtotal** | | **~$238/month** |
+| **Total** | | **~$144/month** |
 
-### Optional: Temporal Cloud
+### Live Trading (Phase 3+4, additional)
 
-| Tier | Actions/Month | Cost |
-|------|---------------|------|
-| Free | 10K | $0 |
-| Developer | 100K | ~$50 |
-| Production | 1M+ | ~$100+ |
+| Resource | Specification | Additional cost/month |
+|----------|---------------|----------------------|
+| RDS PostgreSQL | db.t3.medium, Multi-AZ | +$70 |
+| NAT Gateway (2nd for HA) | | +$35 |
+| CloudWatch Alarms (15) | | +$5 |
+| PagerDuty | | varies |
+| **Additional** | | **~+$110/month** |
 
-### LLM Costs (gpt-5-mini)
+### LLM Cost (OpenAI)
 
-| Usage | Tokens/Week | Cost/Week |
-|-------|-------------|-----------|
-| 1 session, 4h plans | 336K | ~$0.50 |
-| 5 sessions, 1h plans | 8.4M | ~$12 |
+| Usage | Est. tokens/week | Cost/week |
+|-------|-----------------|-----------|
+| 1 session, 5m timeframe, AI planner | ~400K | ~$0.60 |
+| 3 sessions running simultaneously | ~1.2M | ~$1.80 |
 
 ---
 
 ## Deployment Checklist
 
-### Paper Trading Deployment
+### Phase 0: Temporal Cloud
 
-- [ ] Terraform apply for dev/staging
-- [ ] Deploy ECS tasks
-- [ ] Verify Temporal connectivity
-- [ ] Test paper trading session via API
-- [ ] Verify UI accessibility
-- [ ] Run for 24 hours, check for issues
+- [ ] Create Temporal Cloud account
+- [ ] Create namespace
+- [ ] Download TLS certs
+- [ ] Update `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` in `.env`
+- [ ] Wire TLS into `worker/agent_worker.py` and `get_temporal_client()`
+- [ ] Test: start local worker → kill it → restart → confirm session resumed
+- [ ] Remove `temporal` + `temporal-ui` services from `docker-compose.yml` (or make optional)
 
-### Live Trading Deployment (Additional Steps)
+### Phase 1: Remote Worker
 
-- [ ] **Legal/Compliance Review**
-- [ ] Terraform apply for production (Multi-AZ RDS)
-- [ ] Store Coinbase credentials in Secrets Manager
-- [ ] Run database migrations
-- [ ] Seed wallets from Coinbase (`ledger seed-from-coinbase`)
-- [ ] Set tradeable fractions (`wallet set-tradeable-fraction`)
-- [ ] Configure PagerDuty integration
-- [ ] Set up scheduled reconciliation
-- [ ] **Test with minimal capital first** ($100)
-- [ ] Verify cost gate is working
-- [ ] Verify reconciliation is working
-- [ ] Monitor for 7 days before increasing capital
-- [ ] Document incident response procedures
-- [ ] Set daily/weekly loss limits
+- [ ] Choose host (Fly.io recommended)
+- [ ] Add `fly.toml` or EC2 deploy script
+- [ ] Store secrets in host secret store or AWS Secrets Manager
+- [ ] Deploy worker
+- [ ] Test: crash local machine → verify triggers resume within one candle
 
----
+### Phase 2: ECS Fargate
 
-## Safety Controls Summary
+- [ ] Write Terraform in `infra/terraform/`
+- [ ] Write ECS task definitions in `infra/ecs/task-definitions/`
+- [ ] `terraform apply` for staging
+- [ ] Deploy ops-api and mcp-server to ECS
+- [ ] Configure ALB with HTTPS (ACM cert)
+- [ ] Verify UI works against cloud ops-api endpoint
 
-| Control | Paper | Live |
-|---------|-------|------|
-| `LIVE_TRADING_ACK=true` | Not required | **Required** |
-| `ENABLE_REAL_LEDGER=1` | Optional | **Required** |
-| Tradeable Fraction | Not applicable | **Required** (e.g., 20%) |
-| Cost Gating | Not applicable | **Required** |
-| Reconciliation | Not applicable | **Required** (every 15 min) |
-| Multi-AZ Database | Optional | **Required** |
-| Deletion Protection | Optional | **Required** |
-| Backup Retention | 7 days | 30 days |
-| PagerDuty Alerts | Optional | **Required** |
+### Phase 3+4: Live Trading
+
+- [ ] Legal/compliance review
+- [ ] Terraform for Multi-AZ RDS
+- [ ] Database migrations (`alembic upgrade head`)
+- [ ] Seed wallets from Coinbase
+- [ ] Set tradeable fractions
+- [ ] Configure cost gate
+- [ ] Configure scheduled reconciliation
+- [ ] Test with $100 minimum capital
+- [ ] Monitor 7 days before scaling capital
 
 ---
 
 ## References
 
-- [AWS ECS Fargate Docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html)
 - [Temporal Cloud](https://temporal.io/cloud)
-- [Prometheus Python Client](https://github.com/prometheus/client_python)
+- [Temporal Python TLS docs](https://python.temporal.io/temporalio.client.TLSConfig.html)
+- [Fly.io Python deploy](https://fly.io/docs/languages-and-frameworks/python/)
+- [AWS ECS Fargate](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html)
 - [Terraform AWS Provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
 - [Coinbase Advanced Trade API](https://docs.cloud.coinbase.com/advanced-trade-api/docs)

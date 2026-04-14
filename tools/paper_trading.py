@@ -243,6 +243,12 @@ class PaperTradingConfig(BaseModel):
             "None = static stop (current default behavior)."
         ),
     )
+    # Minimum R:R gate — entries whose resolved reward/risk falls below this are blocked.
+    # The LLM never sees this threshold; it picks structural targets honestly.
+    min_rr_ratio: float = Field(
+        default=1.75,
+        description="Minimum reward:risk ratio required for entry (default 1.75). LLM-invisible gate.",
+    )
 
 
 class SessionState(BaseModel):
@@ -300,6 +306,8 @@ class SessionState(BaseModel):
     session_intent: Optional[Dict[str, Any]] = None
     # R85: trailing stop session defaults
     default_trailing_config: Optional[Dict[str, Any]] = None
+    # Minimum R:R gate
+    min_rr_ratio: float = 1.75
     # R77: CadenceGovernor state
     cadence_governor_state: Optional[Dict[str, Any]] = None
 
@@ -882,6 +890,7 @@ def evaluate_triggers_activity(
     exit_binding_mode: str = "category",
     conflicting_signal_policy: str = "reverse",
     position_originating_plans: Optional[Dict[str, str]] = None,
+    min_rr_ratio: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Evaluate strategy triggers against current market data.
 
@@ -928,6 +937,7 @@ def evaluate_triggers_activity(
         exit_binding_mode=exit_binding_mode if exit_binding_mode else "category",
         conflicting_signal_policy=conflicting_signal_policy if conflicting_signal_policy else "reverse",
         position_originating_plans=position_originating_plans,  # R65
+        min_rr_ratio=min_rr_ratio if min_rr_ratio is not None else 1.75,
     )
 
     all_orders: List[Dict[str, Any]] = []
@@ -1704,7 +1714,7 @@ class PaperTradingWorkflow:
         self.trigger_rule_edits: List[Dict[str, Any]] = []
         # Indicator snapshots from last plan generation (used in trigger evaluation)
         self.last_indicators: Dict[str, Any] = {}
-        self.min_rr_ratio: float = float(os.environ.get("PAPER_TRADING_MIN_RR_RATIO", "1.2"))
+        self.min_rr_ratio: float = float(os.environ.get("PAPER_TRADING_MIN_RR_RATIO", "1.75"))
         # Live indicator snapshots refreshed on a 1-minute cadence for UI context.
         # This does not affect trigger evaluation; it is visibility-only.
         self.last_indicators_live: Dict[str, Any] = {}
@@ -2217,6 +2227,8 @@ class PaperTradingWorkflow:
             self.use_ai_planner = parsed_config.use_ai_planner
             # R85: trailing stop session defaults
             self._default_trailing_config = parsed_config.default_trailing_config
+            # Minimum R:R gate
+            self.min_rr_ratio = parsed_config.min_rr_ratio
             # R77: CadenceGovernor — initialize at session start
             try:
                 from services.cadence_governor import CadenceGovernor as _CG, CadenceGovernorState as _CGS
@@ -3452,6 +3464,7 @@ class PaperTradingWorkflow:
                 self.exit_binding_mode,
                 self.conflicting_signal_policy,
                 dict(self.position_originating_plans),  # R65: originating plan pinning
+                self.min_rr_ratio,
             ],
             schedule_to_close_timeout=timedelta(seconds=30),
         )
@@ -4273,6 +4286,8 @@ class PaperTradingWorkflow:
             session_intent=dict(self._session_intent) if self._session_intent else None,
             # R85: trailing stop defaults
             default_trailing_config=dict(self._default_trailing_config) if self._default_trailing_config else None,
+            # R:R gate
+            min_rr_ratio=self.min_rr_ratio,
             # R77: CadenceGovernor
             cadence_governor_state=dict(self._cadence_governor_state) if self._cadence_governor_state else None,
         ).model_dump()
@@ -4331,6 +4346,8 @@ class PaperTradingWorkflow:
         self._session_intent = dict(parsed.session_intent) if parsed.session_intent else None
         # R85: trailing stop defaults
         self._default_trailing_config = dict(parsed.default_trailing_config) if parsed.default_trailing_config else None
+        # R:R gate
+        self.min_rr_ratio = parsed.min_rr_ratio
         # R77: CadenceGovernor
         self._cadence_governor_state = dict(parsed.cadence_governor_state) if parsed.cadence_governor_state else {}
 

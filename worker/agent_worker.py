@@ -84,13 +84,15 @@ async def run_worker(runtime: RuntimeMode) -> None:
     client = await Client.connect(address, namespace=namespace)
     task_queue = os.environ.get("TASK_QUEUE", "mcp-tools")
 
-    with ThreadPoolExecutor() as activity_executor:
+    with ThreadPoolExecutor(max_workers=200) as activity_executor:
         worker = Worker(
             client,
             task_queue=task_queue,
             workflows=workflows,
             activities=activities,
             activity_executor=activity_executor,
+            max_concurrent_activities=200,
+            max_concurrent_workflow_tasks=50,
             workflow_runner=UnsandboxedWorkflowRunner(),
         )
         await worker.run()
