@@ -2443,7 +2443,7 @@ class PaperTradingWorkflow:
         portfolio_state = await workflow.execute_activity(
             query_ledger_portfolio_activity,
             args=[self.ledger_workflow_id],
-            schedule_to_close_timeout=timedelta(seconds=30),
+            schedule_to_close_timeout=timedelta(minutes=2),
         )
 
         # Fetch OHLCV history and compute full indicator snapshots so the LLM
@@ -2595,7 +2595,7 @@ class PaperTradingWorkflow:
                 _live_positions = await workflow.execute_activity(
                     query_ledger_portfolio_activity,
                     args=[self.ledger_workflow_id],
-                    schedule_to_close_timeout=timedelta(seconds=30),
+                    schedule_to_close_timeout=timedelta(minutes=2),
                 )
                 if not (_live_positions.get("positions") or {}):
                     _sm_reset = PolicyStateMachine()
@@ -3208,7 +3208,7 @@ class PaperTradingWorkflow:
         portfolio_state = await workflow.execute_activity(
             query_ledger_portfolio_activity,
             args=[self.ledger_workflow_id],
-            schedule_to_close_timeout=timedelta(seconds=30),
+            schedule_to_close_timeout=timedelta(minutes=2),
         )
 
         # R78: Hypothesis executor tick (fast path — stop/target sweep for hypothesis-mode plans)
@@ -4216,7 +4216,7 @@ class PaperTradingWorkflow:
             portfolio_state = await workflow.execute_activity(
                 query_ledger_portfolio_activity,
                 args=[self.ledger_workflow_id],
-                schedule_to_close_timeout=timedelta(seconds=30),
+                schedule_to_close_timeout=timedelta(minutes=2),
             )
 
             snapshot = {

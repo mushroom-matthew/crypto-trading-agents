@@ -1,7 +1,7 @@
 # AWS Deployment Scope — Paper & Live Trading
 
-**Last updated:** 2026-04-13
-**Status:** Phase 0 (Temporal Cloud) is immediate priority — solves WSL2 crash problem. Full ECS deployment follows.
+**Last updated:** 2026-04-20
+**Status:** Phase 0 ✅ COMPLETE — self-hosted Temporal on Hostinger VPS ($4/mo). Phase 1 (Fly.io worker) is next — required before 24hr sessions.
 
 ---
 
@@ -62,7 +62,7 @@ Same change needed in `mcp_server/app.py` and `ops_api/routers/paper_trading.py`
 
 **Docker compose change:** Remove the `temporal` and `temporal-ui` services from `docker-compose.yml` (or keep them for local dev with a `TEMPORAL_ADDRESS=temporal:7233` override).
 
-**Cost:** Temporal Cloud free tier = 10K actions/month. Paper trading at 5m bars ≈ ~288 workflow task executions/day × 30 = ~8.6K/month. Fits free tier for a single session.
+**Cost:** Temporal Cloud pricing starts at ~$100/month (no free tier as of 2026). For paper trading, a self-hosted Temporal on a cheap VPS (Hetzner CX22, ~$4/mo) is the recommended alternative — see Phase 0 Alt below.
 
 **What survives a crash after Phase 0:**
 - All active `PaperTradingWorkflow` sessions ✓
@@ -239,21 +239,33 @@ main push → build + test → ECR push → deploy worker + ops-api (paper)
 
 ## Cost Estimates (Updated)
 
-### Minimal (Temporal Cloud + Fly.io worker — Phase 0+1)
+### Minimal — Self-hosted Temporal on VPS + Fly.io worker (Phase 0 Alt + Phase 1)
+
+**Recommended for paper trading.** Run Temporal server on a cheap VPS instead of Temporal Cloud.
 
 | Resource | Cost/month |
 |----------|------------|
-| Temporal Cloud (free tier) | $0 |
+| Hetzner CX22 VPS (2 vCPU, 4GB) — Temporal server | ~$4 |
 | Fly.io worker (shared-cpu-1x) | ~$2 |
-| **Total** | **~$2/month** |
+| **Total** | **~$6/month** |
 
-Covers: crash-resilient sessions, persistent workflows, automatic reconnect on local crash.
+Covers: crash-resilient sessions (Temporal on VPS survives local crashes), persistent workflows, automatic reconnect. The VPS runs `temporalio/auto-setup` in Docker — same container you run locally, just on a server that never turns off.
+
+### Minimal — Temporal Cloud + Fly.io worker (Phase 0+1, original plan)
+
+| Resource | Cost/month |
+|----------|------------|
+| Temporal Cloud (entry tier, as of 2026) | ~$100 |
+| Fly.io worker (shared-cpu-1x) | ~$2 |
+| **Total** | **~$102/month** |
+
+Only justified if you need Temporal Cloud's SLA guarantees (multi-region, 99.99% uptime). Overkill for paper trading.
 
 ### Paper Trading Full Cloud (Phase 2)
 
 | Resource | Specification | Cost/month |
 |----------|---------------|------------|
-| Temporal Cloud (developer tier) | 100K actions | ~$50 |
+| Temporal on Hetzner VPS (or Temporal Cloud) | self-hosted ~$4 or cloud ~$100 | ~$4–$100 |
 | ECS Fargate — worker | 0.5 vCPU, 1GB | ~$15 |
 | ECS Fargate — ops-api | 0.25 vCPU, 512MB | ~$8 |
 | ECS Fargate — mcp-server | 0.25 vCPU, 512MB | ~$8 |

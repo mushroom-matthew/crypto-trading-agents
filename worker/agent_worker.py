@@ -8,10 +8,10 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable, Sequence
 
-from temporalio.client import Client
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from agents.runtime_mode import RuntimeMode
+from agents.temporal_utils import get_temporal_client
 
 ALLOWED_MODULES = [
     # Activities
@@ -79,9 +79,7 @@ async def run_worker(runtime: RuntimeMode) -> None:
     workflows, activities = _collect_definitions(modules)
     print(f"[agent_worker] Loaded {len(workflows)} workflows and {len(activities)} activities")
 
-    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
-    client = await Client.connect(address, namespace=namespace)
+    client = await get_temporal_client()
     task_queue = os.environ.get("TASK_QUEUE", "mcp-tools")
 
     with ThreadPoolExecutor(max_workers=200) as activity_executor:

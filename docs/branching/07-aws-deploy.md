@@ -77,7 +77,7 @@ Key workflow durability facts:
 
 ## Dependencies
 
-- Temporal Cloud account (free tier sufficient for paper trading)
+- Temporal server — either a cheap VPS (~$4/mo, recommended) or Temporal Cloud (~$100/mo, overkill for paper trading)
 - Fly.io account (Phase 1)
 - AWS account (Phase 2+)
 
@@ -177,14 +177,50 @@ git commit -m "feat: ECS Fargate + Terraform infrastructure (Phase 2)"
 ## Change Log
 
 - 2026-04-13: Rewritten from scratch. Original scope was ECS-first; reprioritized to Temporal Cloud (Phase 0) as immediate fix for WSL2 crash problem. Added Phase 1 (Fly.io worker). Updated architecture to reflect two-server design (MCP 8080 + Ops API 8081), ContinueAsNew durability, AI planner, trailing stops, min_rr_ratio gate, SessionState serialization.
+- 2026-04-14: Phase 0 TLS wiring implemented in code (see Test Evidence). Cloud smoke test deferred — chose self-hosted VPS over Temporal Cloud ($4/mo vs $100/mo).
+  - `agents/temporal_utils.py` — added `_build_tls_config()` helper; wired TLS into both `get_temporal_client()` and `connect_temporal()`. TLS activates only when `TEMPORAL_TLS_CERT` + `TEMPORAL_TLS_KEY` are set; plain gRPC otherwise (backward-compatible).
+  - `worker/agent_worker.py` — replaced bare `Client.connect()` with `get_temporal_client()` from temporal_utils; TLS now flows through the shared helper.
+  - `.env.example` — added commented-out Temporal Cloud block with `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TLS_CERT`, `TEMPORAL_TLS_KEY`, `TEMPORAL_TLS_CA`.
+  - `docker-compose.yml` — `temporal` and `temporal-ui` services moved to `profiles: ["local"]`; hard `depends_on: temporal` removed from `app`, `ops-api`, `worker` so they start cleanly against external Temporal.
+- 2026-04-20: **Phase 0 complete** — self-hosted Temporal on Hostinger VPS.
+  - Provisioned Hostinger VPS (Ubuntu 24.04, 2 vCPU / 4GB RAM, ~$4/mo)
+  - Docker 29.4.1 installed; `temporalio/auto-setup:1.24` + postgres:15-alpine + temporal-ui deployed via docker compose in `/opt/temporal/`
+  - Firewall: TCP 7233 locked to home IP only
+  - `.env` updated: `TEMPORAL_ADDRESS=<vps-ip>:7233`, `TEMPORAL_NAMESPACE=default`
+  - Smoke test passed: session `paper-trading-a16773fe` survived full `docker compose down` + restart; cycle_count=5 confirmed after restart
+  - Next: Phase 1 (Fly.io worker) — required before 24hr sessions
 
 ## Test Evidence
 
-(append before commit)
+**Full suite run (2026-04-14):**
+```
+1 failed, 2336 passed, 1 skipped in 633.94s
+```
+Failure: `tests/integration/test_high_budget_activity.py::test_high_budget_activity_consumes_budget` — **pre-existing flaky test**, passes in isolation (`1 passed in 12.36s`). Cause: shared state contamination from earlier tests in full suite. Unrelated to TLS wiring changes.
+
+**Phase 0 smoke test (2026-04-20):**
+```
+Session paper-trading-a16773fe started → docker compose down → docker compose up db worker ops-api
+→ GET /paper-trading/sessions/paper-trading-a16773fe → status: running, cycle_count: 5 ✅
+```
 
 ## Human Verification Evidence
 
-(append before commit)
-- Confirm Temporal Cloud namespace and TLS cert are provisioned
-- Confirm session resumption test passes (kill + restart → same cycle count)
-- Review Terraform plan for cost/security implications before `terraform apply`
+**Phase 0 — COMPLETE ✅ (2026-04-20)**
+- [x] VPS provisioned (Hostinger, Ubuntu 24.04)
+- [x] Docker installed, Temporal stack running (`temporalio/auto-setup:1.24`)
+- [x] Firewall: TCP 7233 locked to home IP
+- [x] `.env` updated with VPS address
+- [x] Session survived local docker compose down + restart (cycle_count confirmed)
+
+**Phase 1 (Fly.io worker) — PENDING**
+- [ ] Fly CLI installed + authenticated
+- [ ] `_build_tls_config()` verified to support inline cert content (for Fly secrets)
+- [ ] `fly.toml` added to repo root
+- [ ] All secrets stored in Fly (`fly secrets list`)
+- [ ] `fly deploy` succeeds
+- [ ] `fly logs` shows worker polling Temporal
+- [ ] Machine-off test: shut laptop, wait 10 min, confirm session cycle count still advancing
+
+**Phase 2 (ECS) — NOT STARTED**
+- [ ] Review Terraform plan for cost/security implications before `terraform apply`

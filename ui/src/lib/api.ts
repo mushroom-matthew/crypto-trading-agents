@@ -1115,9 +1115,15 @@ export const paperTradingAPI = {
     return response.data;
   },
 
-  // Stop a session
+  // Stop a session (graceful)
   stopSession: async (sessionId: string): Promise<{ session_id: string; status: string; message: string }> => {
     const response = await api.post(`/paper-trading/sessions/${sessionId}/stop`);
+    return response.data;
+  },
+
+  // Hard terminate a session (kills workflow + ledger immediately)
+  terminateSession: async (sessionId: string): Promise<{ session_id: string; status: string; message: string }> => {
+    const response = await api.post(`/paper-trading/sessions/${sessionId}/terminate`);
     return response.data;
   },
 

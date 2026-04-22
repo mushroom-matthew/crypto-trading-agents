@@ -7,7 +7,7 @@ import {
 import {
   PlayCircle, StopCircle, Loader2, RefreshCw, Activity, Zap,
   TrendingUp, TrendingDown, Minus, ChevronDown, ChevronUp,
-  ArrowUpRight, Ban, CheckCircle2, Radio, BarChart3,
+  ArrowUpRight, Ban, CheckCircle2, Radio, BarChart3, Trash2,
 } from 'lucide-react';
 import {
   paperTradingAPI,
@@ -462,6 +462,15 @@ export function PaperTradingControl() {
     },
   });
 
+  // Hard terminate session mutation (kills workflow + ledger immediately)
+  const terminateSession = useMutation({
+    mutationFn: () => paperTradingAPI.terminateSession(selectedSessionId!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['paper-trading-session', selectedSessionId] });
+      queryClient.invalidateQueries({ queryKey: ['paper-trading-sessions'] });
+    },
+  });
+
   // Force replan mutation
   const forceReplan = useMutation({
     mutationFn: () => paperTradingAPI.forceReplan(selectedSessionId!),
@@ -472,6 +481,8 @@ export function PaperTradingControl() {
 
   const isRunning = session?.status === 'running';
   const isStarting = startSession.isPending;
+  // Sessions that failed/timed-out still have a running ledger workflow — allow hard terminate
+  const isTerminable = !!selectedSessionId && !!session && ['failed', 'timed_out', 'cancelled'].includes(session.status ?? '');
   const isLiteralFalseRule = (rule?: string | null) => (rule || '').trim().toLowerCase() === 'false';
   const screenerErrorStatus = (screenerPreflightQuery.error as any)?.response?.status as number | undefined;
   const summarySymbols = session?.symbols?.length
@@ -1160,32 +1171,68 @@ export function PaperTradingControl() {
             {/* Action Buttons */}
             <div className="flex gap-3 pt-4">
               {!isRunning ? (
-                <button
-                  onClick={() => startSession.mutate()}
-                  disabled={isStarting}
-                  className={cn(
-                    'flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium transition-colors',
-                    isStarting
-                      ? 'bg-gray-400 cursor-not-allowed'
-                      : 'bg-green-600 hover:bg-green-700 text-white'
+                <>
+                  <button
+                    onClick={() => startSession.mutate()}
+                    disabled={isStarting}
+                    className={cn(
+                      'flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium transition-colors',
+                      isStarting
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : 'bg-green-600 hover:bg-green-700 text-white'
+                    )}
+                  >
+                    {isStarting ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <PlayCircle className="w-5 h-5" />
+                    )}
+                    {isStarting ? 'Starting...' : 'Start Paper Trading'}
+                  </button>
+                  {isTerminable && (
+                    <button
+                      onClick={() => {
+                        if (window.confirm(`Session ${selectedSessionId} is ${session?.status}. Kill its ledger workflow and clean up?`)) {
+                          terminateSession.mutate();
+                        }
+                      }}
+                      disabled={terminateSession.isPending}
+                      title="Kill orphaned ledger workflow left over from failed session"
+                      className="flex items-center justify-center gap-2 px-3 py-3 rounded-lg font-medium bg-red-900 hover:bg-red-800 text-white transition-colors disabled:opacity-60"
+                    >
+                      {terminateSession.isPending ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-5 h-5" />
+                      )}
+                    </button>
                   )}
-                >
-                  {isStarting ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    <PlayCircle className="w-5 h-5" />
-                  )}
-                  {isStarting ? 'Starting...' : 'Start Paper Trading'}
-                </button>
+                </>
               ) : (
                 <>
                   <button
                     onClick={() => stopSession.mutate()}
-                    disabled={stopSession.isPending}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium bg-red-600 hover:bg-red-700 text-white transition-colors"
+                    disabled={stopSession.isPending || terminateSession.isPending}
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-60"
                   >
                     <StopCircle className="w-5 h-5" />
-                    Stop Session
+                    Stop
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Hard-terminate session ${selectedSessionId}? This kills the workflow immediately and cannot be undone.`)) {
+                        terminateSession.mutate();
+                      }
+                    }}
+                    disabled={terminateSession.isPending || stopSession.isPending}
+                    title="Hard terminate — kills workflow immediately (use when Stop hangs)"
+                    className="flex items-center justify-center gap-2 px-3 py-3 rounded-lg font-medium bg-red-900 hover:bg-red-800 text-white transition-colors disabled:opacity-60"
+                  >
+                    {terminateSession.isPending ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-5 h-5" />
+                    )}
                   </button>
                   <button
                     onClick={() => forceReplan.mutate()}
