@@ -485,6 +485,10 @@ class TriggerSummary(BaseModel):
     rationale: Optional[str] = None
     stop_anchor_type: Optional[str] = None
     target_anchor_type: Optional[str] = None
+    entry_reference_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    target_price: Optional[float] = None
+    rr_ratio: Optional[float] = None
 
 
 class HypothesisSummary(BaseModel):
@@ -962,6 +966,10 @@ async def get_current_plan(session_id: str):
                 rationale=t.get("rationale") or None,
                 stop_anchor_type=t.get("stop_anchor_type") or None,
                 target_anchor_type=t.get("target_anchor_type") or None,
+                entry_reference_price=t.get("entry_reference_price") if isinstance(t.get("entry_reference_price"), (int, float)) else None,
+                stop_price=t.get("stop_price") if isinstance(t.get("stop_price"), (int, float)) else None,
+                target_price=t.get("target_price") if isinstance(t.get("target_price"), (int, float)) else None,
+                rr_ratio=t.get("rr_ratio") if isinstance(t.get("rr_ratio"), (int, float)) else None,
             )
             for t in raw_triggers
             if isinstance(t, dict)

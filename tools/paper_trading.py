@@ -41,6 +41,7 @@ with workflow.unsafe.imports_passed_through():
         LLMInput,
         PortfolioState,
         StrategyPlan,
+        TriggerCondition,
     )
     from schemas.research_budget import ResearchBudgetState
     from schemas.experiment_spec import ExperimentSpec
@@ -68,6 +69,15 @@ PAPER_TRADING_CONTINUE_EVERY = int(os.environ.get("PAPER_TRADING_CONTINUE_EVERY"
 PAPER_TRADING_HISTORY_LIMIT = int(os.environ.get("PAPER_TRADING_HISTORY_LIMIT", "9000"))
 DEFAULT_PLAN_INTERVAL_HOURS = float(os.environ.get("PAPER_TRADING_PLAN_INTERVAL_HOURS", "4"))
 PLAN_CACHE_DIR = Path(os.environ.get("PAPER_TRADING_PLAN_CACHE", ".cache/paper_trading_plans"))
+
+# Replay-compat overrides for live histories that crossed the deployment where
+# `session_intent_generated` event emission was inserted before plan generation
+# without a Temporal patch marker. These sessions are already stuck in
+# nondeterminism and need an exact compatibility branch to recover.
+_SESSION_INTENT_EVENT_REPLAY_COMPAT: Dict[str, bool] = {
+    "paper-trading-7d9d40a8": False,
+    "paper-trading-774b71a4": True,
+}
 
 
 def _timeframe_to_minutes(tf: str) -> int:
@@ -145,6 +155,27 @@ def _candidate_templates_for_context(regime: str, direction_bias: str) -> List[s
     return ["compression_breakout", "mean_reversion"]
 
 
+def _should_emit_session_intent_generated_event(session_id: str, patch_enabled: bool) -> bool:
+    """Return whether replay should schedule the SessionIntent UI emit activity.
+
+    Why this exists:
+    - An `emit_paper_trading_event_activity("session_intent_generated", ...)`
+      call was inserted before `generate_strategy_plan_activity` without a
+      Temporal versioning guard.
+    - Some live workflow histories recorded that activity; others did not.
+    - A plain `workflow.patched(...)` guard is not enough to recover both
+      populations because neither recorded a patch marker at the time.
+
+    Policy:
+    - New workflows use the patch marker (`patch_enabled=True`) and always emit.
+    - Known stuck legacy workflows use the compatibility override table above.
+    - Other pre-patch histories default to the older behavior: no emit.
+    """
+    if patch_enabled:
+        return True
+    return _SESSION_INTENT_EVENT_REPLAY_COMPAT.get(session_id, False)
+
+
 def _get_latest_structure_snapshot(
     structure_history: Dict[str, List[Dict[str, Any]]], symbol: str
 ) -> "Any | None":
@@ -162,6 +193,103 @@ def _get_latest_structure_snapshot(
         return _StructureSnapshot.model_validate(latest)
     except Exception:
         return None
+
+
+def _safe_float(value: Any) -> float | None:
+    """Return a finite float or None."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 and parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
+
+
+def _compute_rr_ratio(
+    direction: str,
+    entry_price: float,
+    stop_price: float | None,
+    target_price: float | None,
+) -> float | None:
+    """Compute projected R multiple using the preview entry price."""
+    if stop_price is None or target_price is None or entry_price <= 0:
+        return None
+
+    if direction == "long":
+        risk = entry_price - stop_price
+        reward = target_price - entry_price
+    elif direction == "short":
+        risk = stop_price - entry_price
+        reward = entry_price - target_price
+    else:
+        return None
+
+    if risk <= 0 or reward <= 0:
+        return None
+    return reward / risk
+
+
+def _compute_trigger_preview(
+    trigger_dict: Dict[str, Any],
+    indicator_dict: Dict[str, Any] | None,
+    entry_reference_price: float | None = None,
+) -> Dict[str, float | None]:
+    """Project stop / target / R:R for a trigger card using the latest session snapshot.
+
+    These values are previews for observability. They reuse the same anchored
+    stop/target resolution helpers used at fill time, but use the latest known
+    price as the hypothetical entry reference.
+    """
+    if not isinstance(trigger_dict, dict):
+        return {}
+
+    indicator_dict = indicator_dict or {}
+    try:
+        from backtesting.llm_strategist_runner import (
+            _resolve_stop_price_anchored,
+            _resolve_target_price_anchored,
+        )
+        import datetime as _dt
+
+        trigger = TriggerCondition.model_validate(trigger_dict)
+        if trigger.direction not in {"long", "short"}:
+            return {}
+
+        reference_price = _safe_float(entry_reference_price) or _safe_float(indicator_dict.get("close"))
+        if reference_price is None:
+            return {}
+
+        symbol = str(trigger_dict.get("symbol") or indicator_dict.get("symbol") or trigger.symbol or "").upper()
+        timeframe = str(trigger_dict.get("timeframe") or indicator_dict.get("timeframe") or "1h")
+        as_of = indicator_dict.get("as_of") or _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+        snapshot = IndicatorSnapshot.model_validate({
+            **indicator_dict,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "as_of": as_of,
+        })
+        stop_price, _ = _resolve_stop_price_anchored(trigger, reference_price, snapshot, trigger.direction)
+        target_price, _ = _resolve_target_price_anchored(
+            trigger,
+            reference_price,
+            stop_price,
+            snapshot,
+            trigger.direction,
+        )
+        rr_ratio = _compute_rr_ratio(trigger.direction, reference_price, stop_price, target_price)
+        return {
+            "entry_reference_price": reference_price,
+            "stop_price": stop_price,
+            "target_price": target_price,
+            "rr_ratio": rr_ratio,
+        }
+    except Exception:
+        logger.debug(
+            "Could not compute trigger preview",
+            extra={"trigger_id": trigger_dict.get("id"), "symbol": trigger_dict.get("symbol")},
+            exc_info=True,
+        )
+        return {}
 
 
 def _is_missing_stop_validation_error(exc: Exception) -> bool:
@@ -1350,6 +1478,55 @@ def _ohlcv_rows_to_df(rows: list) -> "pd.DataFrame":
     return df.set_index("time").drop(columns=["timestamp"])
 
 
+def _build_structure_snapshot_payloads(
+    symbols: List[str],
+    indicator_snapshots: Dict[str, Any],
+    indicator_timeframe: str,
+    *,
+    raw_ohlcv_data: Optional[Dict[str, Any]] = None,
+    prior_snapshots: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build serialized StructureSnapshot payloads outside the workflow thread."""
+    from services.structure_engine import build_structure_snapshot as _build_ss
+    from schemas.structure_engine import StructureSnapshot as _StructureSnapshot
+
+    snapshots: Dict[str, Any] = {}
+    raw_store = raw_ohlcv_data or {}
+    prior_store = prior_snapshots or {}
+
+    for sym in symbols:
+        snap_raw = indicator_snapshots.get(sym)
+        if not isinstance(snap_raw, dict):
+            continue
+        try:
+            indicator = IndicatorSnapshot.model_validate(snap_raw)
+            prior_raw = prior_store.get(sym)
+            prior_snapshot = (
+                _StructureSnapshot.model_validate(prior_raw)
+                if isinstance(prior_raw, dict)
+                else None
+            )
+            sym_raw = raw_store.get(sym, {}) if isinstance(raw_store, dict) else {}
+            ohlcv_df = _ohlcv_rows_to_df(sym_raw["intraday"]) if isinstance(sym_raw, dict) and sym_raw.get("intraday") else None
+            daily_df = _ohlcv_rows_to_df(sym_raw["daily"]) if isinstance(sym_raw, dict) and sym_raw.get("daily") else None
+            structure_snapshot = _build_ss(
+                indicator,
+                ohlcv_df=ohlcv_df,
+                daily_df=daily_df,
+                ohlcv_timeframe=indicator_timeframe or "1h",
+                prior_snapshot=prior_snapshot,
+            )
+            snapshots[sym] = structure_snapshot.model_dump(mode="json")
+        except Exception as exc:
+            logger.debug(
+                "build_structure_snapshot failed for %s (non-fatal): %s",
+                sym,
+                exc,
+            )
+
+    return snapshots
+
+
 @activity.defn
 async def fetch_indicator_snapshots_activity(
     symbols: List[str],
@@ -1429,6 +1606,24 @@ async def fetch_indicator_snapshots_activity(
 
     results["_raw_ohlcv_data"] = raw_ohlcv_store
     return results
+
+
+@activity.defn
+async def build_structure_snapshots_activity(
+    symbols: List[str],
+    indicator_snapshots: Dict[str, Any],
+    indicator_timeframe: str,
+    raw_ohlcv_data: Optional[Dict[str, Any]] = None,
+    prior_snapshots: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build serialized structure snapshots from indicator and OHLCV payloads."""
+    return _build_structure_snapshot_payloads(
+        symbols,
+        indicator_snapshots,
+        indicator_timeframe,
+        raw_ohlcv_data=raw_ohlcv_data,
+        prior_snapshots=prior_snapshots,
+    )
 
 
 @activity.defn
@@ -1721,11 +1916,9 @@ class PaperTradingWorkflow:
         self.last_live_indicators_refresh: Optional[datetime] = None
         # Bounded per-symbol snapshot history to support UI "selected candle" lookups.
         self.structure_history: Dict[str, List[Dict[str, Any]]] = {}
-        # Live StructureSnapshot cache keyed by symbol — built per plan cycle from the
-        # fetched IndicatorSnapshot via build_structure_snapshot().  Used by both
-        # PolicySnapshot wiring and structural stop/target selection at order entry.
-        # (structure_history stores IndicatorSnapshot dicts for UI; this stores real
-        # StructureSnapshot objects for computation.)
+        # Live StructureSnapshot cache keyed by symbol — stored as serialized dicts.
+        # Built via activity so pandas-heavy structure construction stays out of the
+        # workflow thread. Consumers rehydrate only at use sites when needed.
         self._live_structure_snapshots: Dict[str, Any] = {}
         # Candle-clock: tracks the last candle floor we ran trigger evaluation on,
         # keyed by timeframe string (e.g. "1h").  Prevents re-evaluating within the
@@ -2015,6 +2208,26 @@ class PaperTradingWorkflow:
         if self.current_plan is None:
             return None
         plan_with_meta = dict(self.current_plan)
+        raw_triggers = plan_with_meta.get("triggers", [])
+        if isinstance(raw_triggers, list) and raw_triggers:
+            previewed_triggers: List[Dict[str, Any]] = []
+            indicator_source = self.last_indicators or self.last_indicators_live
+            for trigger in raw_triggers:
+                if not isinstance(trigger, dict):
+                    previewed_triggers.append(trigger)
+                    continue
+                trigger_payload = dict(trigger)
+                symbol = str(trigger_payload.get("symbol") or "").upper()
+                indicator_dict = indicator_source.get(symbol) if isinstance(indicator_source, dict) else None
+                preview = _compute_trigger_preview(
+                    trigger_payload,
+                    indicator_dict if isinstance(indicator_dict, dict) else None,
+                    self.last_known_prices.get(symbol),
+                )
+                if preview:
+                    trigger_payload.update(preview)
+                previewed_triggers.append(trigger_payload)
+            plan_with_meta["triggers"] = previewed_triggers
         if self._current_plan_snapshot_meta:
             plan_with_meta.update(self._current_plan_snapshot_meta)
         return plan_with_meta
@@ -2561,7 +2774,7 @@ class PaperTradingWorkflow:
                     "Regime detection failed (non-fatal): %s", _det_exc
                 )
 
-        self._rebuild_live_structure_snapshots(
+        await self._update_live_structure_snapshots(
             indicator_snapshots,
             raw_ohlcv_data=_raw_ohlcv_data,
         )
@@ -2690,13 +2903,24 @@ class PaperTradingWorkflow:
                             self.symbols,
                             _intent_dict.get("is_fallback", True),
                         )
-                    # Emit event for UI
-                    await self._emit("session_intent_generated", {
-                        "selected_symbols": self.symbols,
-                        "is_fallback": _intent_dict.get("is_fallback", True),
-                        "regime_summary": _intent_dict.get("regime_summary", ""),
-                        "planner_rationale": _intent_dict.get("planner_rationale", ""),
-                    })
+                    # Replay compatibility:
+                    # This emit was inserted after generate_session_intent_activity
+                    # without a version marker, so some live histories have it and
+                    # some do not. New executions record a patch marker; known stuck
+                    # legacy histories are handled by the compatibility map.
+                    _intent_emit_patch = workflow.patched(
+                        "paper-trading-session-intent-generated-event-v2"
+                    )
+                    if _should_emit_session_intent_generated_event(
+                        self.session_id,
+                        patch_enabled=_intent_emit_patch,
+                    ):
+                        await self._emit("session_intent_generated", {
+                            "selected_symbols": self.symbols,
+                            "is_fallback": _intent_dict.get("is_fallback", True),
+                            "regime_summary": _intent_dict.get("regime_summary", ""),
+                            "planner_rationale": _intent_dict.get("planner_rationale", ""),
+                        })
             except Exception as _planner_exc:
                 workflow.logger.warning(
                     "R76: session intent generation failed (non-fatal): %s", _planner_exc
@@ -2714,7 +2938,7 @@ class PaperTradingWorkflow:
             if _primary_snap_sym:
                 _ss_for_plan = self._live_structure_snapshots.get(_primary_snap_sym)
                 if _ss_for_plan:
-                    _plan_market_ctx["structure_snapshot"] = _ss_for_plan.model_dump()
+                    _plan_market_ctx["structure_snapshot"] = dict(_ss_for_plan)
 
             # R68: inject screener regime and htf_direction into global_context so
             # PlaybookRegistry.list_eligible() receives regime-filtered candidates.
@@ -3021,7 +3245,7 @@ class PaperTradingWorkflow:
                 self.last_indicators_live = live_snapshots
                 raw_live_ohlcv = live_snapshots.get("_raw_ohlcv_data", {})
                 # Keep structure levels fresh between plan regeneration cycles.
-                self._rebuild_live_structure_snapshots(
+                await self._update_live_structure_snapshots(
                     live_snapshots,
                     raw_ohlcv_data=raw_live_ohlcv if isinstance(raw_live_ohlcv, dict) else {},
                 )
@@ -3029,44 +3253,32 @@ class PaperTradingWorkflow:
         except Exception as exc:
             workflow.logger.warning(f"Failed to refresh live indicators: {exc}")
 
-    def _rebuild_live_structure_snapshots(
+    async def _update_live_structure_snapshots(
         self,
         indicator_snapshots: Dict[str, Any],
         *,
         raw_ohlcv_data: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Rebuild structure snapshots from current indicators and optional OHLCV rows."""
-        try:
-            from services.structure_engine import build_structure_snapshot as _build_ss
-        except Exception as _ss_exc:
-            workflow.logger.debug("build_structure_snapshot import/setup failed (non-fatal): %s", _ss_exc)
+        """Refresh serialized structure snapshot cache via activity."""
+        if not isinstance(indicator_snapshots, dict) or not indicator_snapshots:
             return
-
-        raw_store = raw_ohlcv_data or {}
-        for _sym in self.symbols:
-            _snap_for_sym = indicator_snapshots.get(_sym)
-            if not _snap_for_sym:
-                continue
-            try:
-                _ind_for_ss = IndicatorSnapshot.model_validate(_snap_for_sym)
-                _prior_ss = self._live_structure_snapshots.get(_sym)
-                _sym_raw = raw_store.get(_sym, {})
-                _ohlcv_df = _ohlcv_rows_to_df(_sym_raw["intraday"]) if _sym_raw.get("intraday") else None
-                _daily_df = _ohlcv_rows_to_df(_sym_raw["daily"]) if _sym_raw.get("daily") else None
-                _computed_ss = _build_ss(
-                    _ind_for_ss,
-                    ohlcv_df=_ohlcv_df,
-                    daily_df=_daily_df,
-                    ohlcv_timeframe=self.indicator_timeframe or "1h",
-                    prior_snapshot=_prior_ss,
-                )
-                self._live_structure_snapshots[_sym] = _computed_ss
-            except Exception as _ss_sym_exc:
-                workflow.logger.debug(
-                    "build_structure_snapshot failed for %s (non-fatal): %s",
-                    _sym,
-                    _ss_sym_exc,
-                )
+        try:
+            rebuilt = await workflow.execute_activity(
+                build_structure_snapshots_activity,
+                args=[
+                    list(self.symbols),
+                    indicator_snapshots,
+                    self.indicator_timeframe or "1h",
+                    raw_ohlcv_data if isinstance(raw_ohlcv_data, dict) else {},
+                    dict(self._live_structure_snapshots),
+                ],
+                schedule_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            if isinstance(rebuilt, dict) and rebuilt:
+                self._live_structure_snapshots.update(rebuilt)
+        except Exception as exc:
+            workflow.logger.warning("Failed to rebuild structure snapshots: %s", exc)
 
     @staticmethod
     def _candle_floor(dt: datetime, tf_minutes: int) -> str:
@@ -3316,7 +3528,10 @@ class PaperTradingWorkflow:
             _open_positions = portfolio_state.get("positions") or {}
             _position_meta = portfolio_state.get("position_meta") or {}
             for _sym, _qty in _open_positions.items():
-                if not _qty or _qty <= 0:
+                if not _qty:
+                    continue
+                _qty_abs = abs(float(_qty))
+                if _qty_abs <= 0:
                     continue
                 _price = float(current_prices.get(_sym) or 0)
                 if not _price:
@@ -3379,7 +3594,7 @@ class PaperTradingWorkflow:
                     _amt_partial_exit_orders.append({
                         "symbol": _sym,
                         "side": _exit_side,
-                        "quantity": _qty,
+                        "quantity": _qty_abs,
                         "price": _price,
                         "trigger_id": f"trail_stop_confirmed_{_sym}",
                         "trigger_category": "stop",
@@ -3395,7 +3610,7 @@ class PaperTradingWorkflow:
                 if _mgmt.partial_fires_pending:
                     _side = _meta.get("entry_side", "long")
                     _exit_side = "sell" if _side == "long" else "buy"
-                    _remaining_qty = float(_qty)
+                    _remaining_qty = _qty_abs
                     _already_fired = set(_mgmt.partial_milestones_fired) - set(_mgmt.partial_fires_pending)
                     # Track how much has already been exited (approximate: assumes equal fractions)
                     for _r_target in _mgmt.partial_fires_pending:
@@ -3618,7 +3833,10 @@ class PaperTradingWorkflow:
         position_meta = portfolio_state.get("position_meta") or {}
 
         for symbol, qty in positions.items():
-            if not qty or qty <= 0:
+            if not qty:
+                continue
+            qty_abs = abs(float(qty))
+            if qty_abs <= 0:
                 continue
 
             price = current_prices.get(symbol, 0)
@@ -3668,7 +3886,7 @@ class PaperTradingWorkflow:
             await self._execute_order({
                 "symbol": symbol,
                 "side": exit_side,
-                "quantity": float(qty),
+                "quantity": qty_abs,
                 "price": price,
                 "timeframe": "1h",
                 "trigger_id": trigger_id,
@@ -3807,23 +4025,9 @@ class PaperTradingWorkflow:
             return None, None
 
         try:
-            from backtesting.llm_strategist_runner import (
-                _resolve_stop_price_anchored,
-                _resolve_target_price_anchored,
-            )
-            from schemas.llm_strategist import TriggerCondition
-            from agents.analytics.indicator_snapshots import IndicatorSnapshot
-            import datetime as _dt
-
-            trigger = TriggerCondition.model_validate(trigger_dict)
-            snap = IndicatorSnapshot.model_validate({
-                **snap_dict,
-                "symbol": symbol,
-                "timeframe": trigger_dict.get("timeframe", "1h"),
-                "as_of": _dt.datetime.now(_dt.timezone.utc),
-            })
-            stop_abs, _ = _resolve_stop_price_anchored(trigger, fill_price, snap, direction)
-            target_abs, _ = _resolve_target_price_anchored(trigger, fill_price, stop_abs, snap, direction)
+            preview = _compute_trigger_preview(trigger_dict, snap_dict, fill_price)
+            stop_abs = preview.get("stop_price")
+            target_abs = preview.get("target_price")
             return stop_abs, target_abs
         except Exception as e:
             workflow.logger.warning(f"Could not resolve stop/target for {trigger_id}: {e}")
@@ -3879,12 +4083,18 @@ class PaperTradingWorkflow:
         if order.get("intent") == "entry":
             _sym = order.get("symbol", "")
             _direction = "long" if order.get("side", "buy").lower() == "buy" else "short"
-            _structure_snap = self._live_structure_snapshots.get(_sym.upper())
-            if _structure_snap:
+            _structure_snap_raw = self._live_structure_snapshots.get(_sym.upper())
+            if _structure_snap_raw:
                 try:
+                    from schemas.structure_engine import StructureSnapshot as _StructureSnapshot
                     from services.structural_target_selector import (
                         select_stop_candidates as _select_stop_candidates,
                         select_target_candidates as _select_target_candidates,
+                    )
+                    _structure_snap = (
+                        _StructureSnapshot.model_validate(_structure_snap_raw)
+                        if isinstance(_structure_snap_raw, dict)
+                        else _structure_snap_raw
                     )
 
                     # --- Stop override (only when stop was not anchored structurally) ---

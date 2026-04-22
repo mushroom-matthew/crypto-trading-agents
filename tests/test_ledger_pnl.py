@@ -53,3 +53,67 @@ def test_entry_price_tracking():
     })
     assert "ETH/USD" not in wf.get_entry_prices()
 
+
+def test_short_entry_updates_signed_position_and_equity():
+    wf = ExecutionLedgerWorkflow()
+    initial_cash = wf.get_cash()
+
+    wf.record_fill({
+        "side": "SELL",
+        "symbol": "BTC/USD",
+        "qty": 2,
+        "fill_price": 100,
+        "cost": 200,
+        "intent": "entry",
+    })
+
+    assert wf.get_positions()["BTC/USD"] == pytest.approx(-2.0)
+    assert wf.get_entry_prices()["BTC/USD"] == pytest.approx(100.0)
+    assert wf.get_cash() == pytest.approx(initial_cash + 200.0)
+
+    wf.last_price["BTC/USD"] = Decimal("90")
+    assert wf.get_unrealized_pnl() == pytest.approx(20.0)
+    assert wf.get_pnl() == pytest.approx(20.0)
+
+
+def test_buy_exit_covers_short_and_realizes_pnl():
+    wf = ExecutionLedgerWorkflow()
+    initial_cash = wf.get_cash()
+
+    wf.record_fill({
+        "side": "SELL",
+        "symbol": "BTC/USD",
+        "qty": 2,
+        "fill_price": 100,
+        "cost": 200,
+        "intent": "entry",
+    })
+    wf.record_fill({
+        "side": "BUY",
+        "symbol": "BTC/USD",
+        "qty": 2,
+        "fill_price": 90,
+        "cost": 180,
+        "intent": "exit",
+    })
+
+    assert wf.get_positions() == {}
+    assert wf.get_entry_prices() == {}
+    assert wf.get_realized_pnl() == pytest.approx(20.0)
+    assert wf.get_cash() == pytest.approx(initial_cash + 20.0)
+
+
+def test_flat_exit_sell_is_ignored_and_not_logged():
+    wf = ExecutionLedgerWorkflow()
+
+    wf.record_fill({
+        "side": "SELL",
+        "symbol": "BTC/USD",
+        "qty": 1,
+        "fill_price": 100,
+        "cost": 100,
+        "intent": "exit",
+    })
+
+    assert wf.get_positions() == {}
+    assert wf.transaction_history == []

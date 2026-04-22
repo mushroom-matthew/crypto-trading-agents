@@ -103,6 +103,10 @@ class ExecutionLedgerWorkflow:
             return
         loop.create_task(task_factory())
 
+    def _is_exit_like_intent(self, intent: Any) -> bool:
+        """Return True for intents that should only reduce or close an existing position."""
+        return str(intent or "").lower() in {"exit", "flat", "conflict_exit", "partial_exit"}
+
     @workflow.signal
     def set_user_preferences(self, preferences: Dict[str, Any]) -> None:
         """Update user preferences including profit scraping percentage."""
@@ -216,14 +220,85 @@ class ExecutionLedgerWorkflow:
         if self.wallet_provider is None:
             # Initialize wallet provider on first fill
             self.wallet_provider = get_wallet_provider({"CASH": self.cash})
+        side = str(fill["side"]).upper()
+        symbol = fill["symbol"]
+        requested_qty = Decimal(str(fill["qty"]))
+        price = Decimal(str(fill["fill_price"]))
+        requested_fee = Decimal(str(fill.get("fee", 0) or 0))
+        trigger_id = fill.get("trigger_id") or fill.get("reason")
+        trigger_category = fill.get("trigger_category")
+        opened_at = self._format_fill_timestamp(fill.get("timestamp"))
+        intent = str(fill.get("intent") or ("entry" if side == "BUY" else "exit")).lower()
+        is_exit_like = self._is_exit_like_intent(intent)
+        current_qty = self.positions.get(symbol, Decimal("0"))
+
+        def _ignore_fill(reason: str) -> None:
+            try:
+                workflow.logger.warning(
+                    "record_fill: %s %s qty=%.6f ignored — %s",
+                    side,
+                    symbol,
+                    float(requested_qty),
+                    reason,
+                )
+            except Exception:
+                logger.warning(
+                    "record_fill: %s %s qty=%.6f ignored — %s",
+                    side,
+                    symbol,
+                    float(requested_qty),
+                    reason,
+                )
+
+        if requested_qty <= 0:
+            _ignore_fill("non-positive quantity")
+            return
+
+        effective_qty = requested_qty
+        if side == "BUY":
+            if current_qty == 0 and is_exit_like:
+                _ignore_fill("no open position")
+                return
+            if current_qty > 0 and is_exit_like:
+                _ignore_fill("buy exit against long position")
+                return
+            if current_qty < 0 and is_exit_like:
+                effective_qty = min(requested_qty, abs(current_qty))
+        else:  # SELL
+            if current_qty == 0 and is_exit_like:
+                _ignore_fill("no open position")
+                return
+            if current_qty < 0 and is_exit_like:
+                _ignore_fill("sell exit against short position")
+                return
+            if current_qty > 0 and is_exit_like:
+                effective_qty = min(requested_qty, current_qty)
+
+        if effective_qty <= 0:
+            _ignore_fill("effective quantity reduced to zero")
+            return
+
+        fee_scale = effective_qty / requested_qty
+        qty = effective_qty
+        cost = price * qty
+        fee = requested_fee * fee_scale
+
+        fill_ts_ms = self._fill_timestamp_ms(fill)
+        trade_pnl = None
+
         if self.enable_real_ledger:
             try:
                 info = workflow.info()
             except Exception:
                 info = None
             if info is not None:
+                adjusted_fill = dict(fill)
+                adjusted_fill["side"] = side
+                adjusted_fill["qty"] = float(qty)
+                adjusted_fill["cost"] = float(cost)
+                adjusted_fill["fee"] = float(fee)
                 payload = {
-                    "fill": dict(fill),
+                    "fill": adjusted_fill,
                     "workflow_id": info.workflow_id,
                     "sequence": sequence,
                     "recorded_at": self._utc_now().timestamp(),
@@ -233,25 +308,6 @@ class ExecutionLedgerWorkflow:
                 }
                 self._start_background_task(lambda: self._persist_fill(payload))
 
-        side = fill["side"]
-        symbol = fill["symbol"]
-        qty = Decimal(str(fill["qty"]))
-        price = Decimal(str(fill["fill_price"]))
-        cost = Decimal(str(fill["cost"]))
-        trigger_id = fill.get("trigger_id") or fill.get("reason")
-        trigger_category = fill.get("trigger_category")
-        opened_at = self._format_fill_timestamp(fill.get("timestamp"))
-        current_qty = self.positions.get(symbol, Decimal("0"))
-
-        # Compute per-trade P&L for sells before state is mutated
-        trade_pnl = None
-        if side == "SELL" and current_qty > 0 and symbol in self.entry_price:
-            _entry_px = self.entry_price[symbol]
-            _fee = Decimal(str(fill.get("fee", 0) or 0))
-            trade_pnl = float((price - _entry_px) * qty - _fee)
-
-        fill_ts_ms = self._fill_timestamp_ms(fill)
-
         # Add transaction to history with deterministic timestamp from fill payload.
         transaction = {
             "timestamp": int(fill_ts_ms // 1000),
@@ -260,21 +316,19 @@ class ExecutionLedgerWorkflow:
             "qty": float(qty),
             "price": float(price),
             "cost": float(cost),
-            "fee": float(fill.get("fee", 0.0) or 0.0),
+            "fee": float(fee),
             "trigger_id": trigger_id,
             "trigger_category": trigger_category,
-            "intent": fill.get("intent", "entry" if side == "BUY" else "exit"),
+            "intent": intent,
             "pnl": trade_pnl,
             "cash_before": float(self.cash),
             "position_before": float(current_qty),
         }
-        self.transaction_history.append(transaction)
-        
+
         # Update price and timestamp
         current_timestamp = int(fill_ts_ms // 1000)
         self.last_price[symbol] = price
         self.last_price_timestamp[symbol] = current_timestamp
-        current_qty = self.positions.get(symbol, Decimal("0"))
         if side == "BUY":
             self.cash -= cost
             try:
@@ -282,66 +336,80 @@ class ExecutionLedgerWorkflow:
                     self.wallet_provider.debit("CASH", cost)
             except Exception:
                 pass
-            new_qty = current_qty + qty
-            
-            # Calculate weighted average entry price
-            if current_qty == 0:
-                # First purchase - entry price is the fill price
-                self.entry_price[symbol] = price
-            else:
-                # Subsequent purchases - weighted average
-                avg_price = self.entry_price.get(symbol, price)
-                self.entry_price[symbol] = (
-                    (avg_price * current_qty + price * qty) / new_qty
-                )
-            
-            self.positions[symbol] = new_qty
-        else:  # SELL
-            # Guard: only credit cash for quantity we actually hold.
-            # A phantom sell (e.g. double-fire from trailing stop + sweep on the same
-            # tick) would have current_qty == 0 and must not inflate cash.
-            actual_sell_qty = min(qty, current_qty) if current_qty > 0 else Decimal("0")
-            actual_cost = price * actual_sell_qty
-            if actual_sell_qty > 0:
-                self.cash += actual_cost
-                try:
-                    if self.wallet_provider:
-                        self.wallet_provider.credit("CASH", actual_cost)
-                except Exception:
-                    pass
-            elif current_qty <= 0:
-                try:
-                    workflow.logger.warning(
-                        "record_fill: SELL %s qty=%.6f ignored — no open position (phantom sell guard)",
-                        symbol, float(qty),
-                    )
-                except Exception:
-                    logger.warning(
-                        "record_fill: SELL %s qty=%.6f ignored — no open position",
-                        symbol, float(qty),
-                    )
-            new_qty = current_qty - qty
 
-            # Calculate realized PnL for the sold quantity
-            if current_qty > 0 and symbol in self.entry_price:
-                entry_price = self.entry_price[symbol]
-                # Realized PnL = (sell_price - entry_price) * quantity_sold
-                position_realized_pnl = (price - entry_price) * qty
-                self.realized_pnl += position_realized_pnl
-                
-                # Apply profit scraping if this was a profitable trade
-                if position_realized_pnl > 0:
-                    scraped_amount = position_realized_pnl * self.profit_scraping_percentage
-                    self.scraped_profits += scraped_amount
-                    # Remove scraped profits from available cash
-                    self.cash -= scraped_amount
-                    message = f"Scraped {scraped_amount:.2f} ({self.profit_scraping_percentage * 100}%) from {position_realized_pnl:.2f} profit"
-                    try:
-                        workflow.logger.info(message)
-                    except Exception:
-                        logger.info(message)
-        
-        if new_qty <= 0:
+            if current_qty < 0:
+                cover_qty = min(qty, abs(current_qty))
+                if cover_qty > 0 and symbol in self.entry_price:
+                    entry_price = self.entry_price[symbol]
+                    trade_pnl = float((entry_price - price) * cover_qty - fee)
+                    self.realized_pnl += (entry_price - price) * cover_qty
+
+                new_qty = current_qty + qty
+                if new_qty > 0:
+                    # Reversal: residual buy opens a fresh long at this price.
+                    self.entry_price[symbol] = price
+            else:
+                new_qty = current_qty + qty
+                if current_qty == 0:
+                    self.entry_price[symbol] = price
+                else:
+                    avg_price = self.entry_price.get(symbol, price)
+                    self.entry_price[symbol] = (
+                        (avg_price * current_qty + price * qty) / new_qty
+                    )
+        else:  # SELL
+            self.cash += cost
+            try:
+                if self.wallet_provider:
+                    self.wallet_provider.credit("CASH", cost)
+            except Exception:
+                pass
+
+            if current_qty > 0:
+                close_qty = min(qty, current_qty)
+                if close_qty > 0 and symbol in self.entry_price:
+                    entry_price = self.entry_price[symbol]
+                    trade_pnl = float((price - entry_price) * close_qty - fee)
+                    position_realized_pnl = (price - entry_price) * close_qty
+                    self.realized_pnl += position_realized_pnl
+
+                    if position_realized_pnl > 0:
+                        scraped_amount = position_realized_pnl * self.profit_scraping_percentage
+                        self.scraped_profits += scraped_amount
+                        self.cash -= scraped_amount
+                        message = (
+                            f"Scraped {scraped_amount:.2f} "
+                            f"({self.profit_scraping_percentage * 100}%) "
+                            f"from {position_realized_pnl:.2f} profit"
+                        )
+                        try:
+                            workflow.logger.info(message)
+                        except Exception:
+                            logger.info(message)
+
+                new_qty = current_qty - qty
+                if new_qty < 0:
+                    # Reversal: residual sell opens a fresh short at this price.
+                    self.entry_price[symbol] = price
+            else:
+                new_qty = current_qty - qty
+                if current_qty == 0:
+                    self.entry_price[symbol] = price
+                else:
+                    current_abs_qty = abs(current_qty)
+                    avg_price = self.entry_price.get(symbol, price)
+                    self.entry_price[symbol] = (
+                        (avg_price * current_abs_qty + price * qty)
+                        / (current_abs_qty + qty)
+                    )
+
+        transaction["pnl"] = trade_pnl
+        self.transaction_history.append(transaction)
+
+        if abs(new_qty) <= Decimal("1e-18"):
+            new_qty = Decimal("0")
+
+        if new_qty == 0:
             self.positions.pop(symbol, None)
             self.entry_price.pop(symbol, None)
             self.position_meta.pop(symbol, None)
@@ -489,28 +557,27 @@ class ExecutionLedgerWorkflow:
         unrealized_pnl = Decimal("0")
         
         for symbol, quantity in self.positions.items():
-            if quantity > 0:  # Only calculate for positions we actually hold
-                # Use live price if available, otherwise fall back to last fill price
-                if live_prices and symbol in live_prices:
-                    current_price = Decimal(str(live_prices[symbol]))
-                    # Validate live price
-                    if not self._validate_price(current_price, symbol):
-                        current_price = self.last_price.get(symbol, Decimal("0"))
-                else:
+            if quantity == 0:
+                continue
+            # Use live price if available, otherwise fall back to last fill price
+            if live_prices and symbol in live_prices:
+                current_price = Decimal(str(live_prices[symbol]))
+                # Validate live price
+                if not self._validate_price(current_price, symbol):
                     current_price = self.last_price.get(symbol, Decimal("0"))
-                
-                entry_price = self.entry_price.get(symbol, Decimal("0"))
-                
-                if current_price > 0 and entry_price > 0:
-                    # Validate price is not stale (this affects accuracy but doesn't stop calculation)
-                    if live_prices is None and self._is_price_stale(symbol):
-                        # Price is stale - continue with calculation but log warning
-                        # Note: In a real system, we'd want to log this via workflow logging
-                        pass
-                    
-                    # Unrealized PnL = (current_price - entry_price) * quantity
-                    position_pnl = (current_price - entry_price) * quantity
-                    unrealized_pnl += position_pnl
+            else:
+                current_price = self.last_price.get(symbol, Decimal("0"))
+
+            entry_price = self.entry_price.get(symbol, Decimal("0"))
+
+            if current_price > 0 and entry_price > 0:
+                # Price staleness affects freshness, not signed mark-to-market math.
+                if live_prices is None and self._is_price_stale(symbol):
+                    pass
+
+                # Signed quantity naturally handles long and short positions.
+                position_pnl = (current_price - entry_price) * quantity
+                unrealized_pnl += position_pnl
         
         return unrealized_pnl
 
@@ -696,7 +763,7 @@ class ExecutionLedgerWorkflow:
         position_concentrations = {}
         for symbol, qty in self.positions.items():
             price = float(self.last_price.get(symbol, Decimal("0")))
-            position_value = float(qty) * price
+            position_value = abs(float(qty) * price)
             concentration = position_value / total_portfolio_value if total_portfolio_value > 0 else 0
             position_concentrations[symbol] = concentration
 
@@ -760,7 +827,7 @@ class ExecutionLedgerWorkflow:
                 price = live_prices[symbol]
             else:
                 price = float(self.last_price.get(symbol, Decimal("0")))
-            position_value = float(qty) * price
+            position_value = abs(float(qty) * price)
             concentration = position_value / total_portfolio_value if total_portfolio_value > 0 else 0
             position_concentrations[symbol] = concentration
 

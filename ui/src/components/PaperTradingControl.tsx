@@ -1690,6 +1690,26 @@ export function PaperTradingControl() {
                             )}
                           </button>
 
+                          {(t.stop_price != null || t.target_price != null || t.rr_ratio != null) && (
+                            <div className="mt-2 pl-5 flex gap-2 flex-wrap">
+                              {t.stop_price != null && (
+                                <span className="px-1.5 py-0.5 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded text-[10px] font-mono">
+                                  stop px: {formatCurrency(t.stop_price)}
+                                </span>
+                              )}
+                              {t.target_price != null && (
+                                <span className="px-1.5 py-0.5 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 rounded text-[10px] font-mono">
+                                  target px: {formatCurrency(t.target_price)}
+                                </span>
+                              )}
+                              {t.rr_ratio != null && (
+                                <span className="px-1.5 py-0.5 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 rounded text-[10px] font-mono">
+                                  R:R {t.rr_ratio.toFixed(2)}
+                                </span>
+                              )}
+                            </div>
+                          )}
+
                           {expandedTriggers[t.id] && (
                             <div className="mt-3 pl-5 space-y-2">
                               {/* Anchor type badges */}

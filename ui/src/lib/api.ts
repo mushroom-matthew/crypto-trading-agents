@@ -843,6 +843,10 @@ export interface PaperTradingTrigger {
   rationale: string | null;
   stop_anchor_type: string | null;
   target_anchor_type: string | null;
+  entry_reference_price?: number | null;
+  stop_price?: number | null;
+  target_price?: number | null;
+  rr_ratio?: number | null;
 }
 
 export interface PaperTradingHypothesis {

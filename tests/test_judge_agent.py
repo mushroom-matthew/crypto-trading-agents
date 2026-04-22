@@ -331,7 +331,8 @@ class TestExecutionLedgerWorkflowEnhancements:
                 "symbol": f"SYMBOL{i}",
                 "qty": 0.1 + i * 0.1,
                 "fill_price": 1000.0 + i * 100,
-                "cost": (0.1 + i * 0.1) * (1000.0 + i * 100)
+                "cost": (0.1 + i * 0.1) * (1000.0 + i * 100),
+                "intent": "entry",
             }
             workflow.record_fill(fill_data)
         
