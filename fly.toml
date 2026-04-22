@@ -1,0 +1,41 @@
+app = "crypto-trading-worker"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Non-secret config — safe to commit.
+# Secrets (TEMPORAL_ADDRESS, OPENAI_API_KEY, etc.) go in: fly secrets set
+[env]
+  TASK_QUEUE                         = "mcp-tools"
+  TEMPORAL_NAMESPACE                 = "default"
+  RUN_MODE                           = "production"
+  TRADING_MODE                       = "paper"
+  HISTORICAL_MINUTES                 = "60"
+  STREAM_CONTINUE_EVERY              = "3600"
+  STREAM_HISTORY_LIMIT               = "9000"
+  VECTOR_CONTINUE_EVERY              = "3600"
+  VECTOR_HISTORY_LIMIT               = "9000"
+  EXECUTION_MIN_PRICE_MOVE_PCT       = "0.5"
+  EXECUTION_MAX_STALENESS_SECONDS    = "1800"
+  EXECUTION_MAX_CALLS_PER_HOUR_PER_SYMBOL = "60"
+  JUDGE_REPLAN_SCORE_THRESHOLD       = "45"
+  JUDGE_REPLAN_COOLDOWN_SECONDS      = "3600"
+  LOG_LEVEL                          = "INFO"
+  LANGFUSE_HOST                      = "https://us.cloud.langfuse.com"
+
+[processes]
+  worker = "uv run python -m worker.main"
+
+# Worker only — no inbound HTTP needed.
+# Disable auto-stop so the worker stays alive between candles.
+[machines]
+  auto_stop_machines  = false
+  auto_start_machines = false
+
+[[vm]]
+  size   = "shared-cpu-1x"
+  memory = "1gb"
+
+[deploy]
+  strategy = "immediate"

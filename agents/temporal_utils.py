@@ -17,10 +17,21 @@ _client_lock = asyncio.Lock()
 def _build_tls_config() -> Optional[TLSConfig]:
     """Build TLSConfig from env vars when Temporal Cloud certs are present.
 
-    Set TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY to paths of the client cert
-    and private key downloaded from cloud.temporal.io.  When neither is set
-    the function returns None and the client connects without TLS (local dev).
+    Supports two modes:
+    - Inline content (Fly.io / ECS): set TEMPORAL_TLS_CERT_CONTENT and
+      TEMPORAL_TLS_KEY_CONTENT to the PEM text directly (no filesystem needed).
+    - File paths (local dev): set TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY to
+      paths of the client cert and private key.
+    When none are set, returns None and the client connects without TLS.
     """
+    cert_content = os.environ.get("TEMPORAL_TLS_CERT_CONTENT")
+    key_content = os.environ.get("TEMPORAL_TLS_KEY_CONTENT")
+    if cert_content and key_content:
+        return TLSConfig(
+            client_cert=cert_content.encode(),
+            client_private_key=key_content.encode(),
+        )
+
     cert_path = os.environ.get("TEMPORAL_TLS_CERT")
     key_path = os.environ.get("TEMPORAL_TLS_KEY")
     if not (cert_path and key_path):

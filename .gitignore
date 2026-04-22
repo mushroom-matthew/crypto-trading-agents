@@ -25,3 +25,4 @@ tmp*/
 *summaries.json
 .runs/
 scripts/mermaid_render/
+.env.fly.db

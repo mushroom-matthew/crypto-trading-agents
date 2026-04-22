@@ -4,7 +4,9 @@
 FROM python:3.11-slim AS base
 
 # System deps (ssl, tz, build tools if needed for wheels)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates tzdata build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,8 +26,8 @@ ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
 COPY pyproject.toml uv.lock* ./
 
 # Create a minimal venv managed by uv and sync deps
-# (If the repo uses extras like [worker], uv handles those via lock)
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 # ---- Now copy source code ----
 COPY . .

@@ -20,7 +20,22 @@ class Settings(BaseSettings):
     )
 
     log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "TRACE"] = "INFO"
-    db_dsn: str = Field(..., alias="DB_DSN")
+    db_dsn: str = Field(default="", alias="DB_DSN")
+
+    @field_validator("db_dsn", mode="before")
+    @classmethod
+    def _resolve_db_dsn(cls, value: str) -> str:
+        """Fall back to DATABASE_URL (set by fly postgres attach) when DB_DSN is absent.
+
+        Fly injects DATABASE_URL as postgres://...; SQLAlchemy async needs
+        postgresql+psycopg:// so we swap the scheme here.
+        """
+        import os
+        if not value:
+            value = os.environ.get("DATABASE_URL", "")
+        if value.startswith("postgres://"):
+            value = "postgresql+psycopg://" + value[len("postgres://"):]
+        return value
 
     coinbase_api_key: Optional[SecretStr] = Field(None, alias="COINBASE_API_KEY")
     coinbase_api_secret: Optional[SecretStr] = Field(None, alias="COINBASE_API_SECRET")

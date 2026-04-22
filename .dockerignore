@@ -5,6 +5,13 @@
 .venv/
 .python-version
 
+# Not needed in the worker image
+ui/
+scripts/
+docs/
+tests/
+infra/
+
 # Python cache/build artifacts
 __pycache__/
 *.py[cod]
