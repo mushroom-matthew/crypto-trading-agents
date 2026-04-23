@@ -677,6 +677,33 @@ def test_target_htf_daily_extreme_short():
     assert price == pytest.approx(48500.0 * 1.002, rel=1e-6)
 
 
+def test_target_htf_daily_close_long():
+    """htf_daily_close target resolves directly from the prior daily close."""
+    trig = _trigger(target_anchor_type="htf_daily_close")
+    snap = _snapshot(htf_daily_close=51250.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "long")
+    assert anchor == "htf_daily_close"
+    assert price == pytest.approx(51250.0, rel=1e-6)
+
+
+def test_target_bollinger_middle_short():
+    """bollinger_middle target is valid for both directions."""
+    trig = _trigger(target_anchor_type="bollinger_middle", direction="short")
+    snap = _snapshot(bollinger_middle=48750.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "short")
+    assert anchor == "bollinger_middle"
+    assert price == pytest.approx(48750.0, rel=1e-6)
+
+
+def test_target_sma_medium_long():
+    """sma_medium target is valid for both directions."""
+    trig = _trigger(target_anchor_type="sma_medium")
+    snap = _snapshot(sma_medium=51500.0)
+    price, anchor = _resolve_target_price_anchored(trig, 50000.0, None, snap, "long")
+    assert anchor == "sma_medium"
+    assert price == pytest.approx(51500.0, rel=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # stop_hit / target_hit — direction-aware (Runbook 42 hotfix)
 # ---------------------------------------------------------------------------

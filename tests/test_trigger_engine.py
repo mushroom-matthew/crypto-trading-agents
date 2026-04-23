@@ -139,6 +139,106 @@ def test_rr_gate_blocks_stretched_target_when_capped_by_htf_structure():
     assert rr_blocks, blocks
 
 
+def test_entry_order_accepts_htf_daily_close_target_when_resolvable():
+    trigger = TriggerCondition(
+        id="btc_mr_long",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="True",
+        exit_rule="target_hit",
+        category="mean_reversion",
+        stop_loss_pct=2.0,
+        target_anchor_type="htf_daily_close",
+    )
+    plan = _plan_with_triggers([trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(plan, risk_engine, min_rr_ratio=1.2, max_triggers_per_symbol_per_bar=2)
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    indicator = IndicatorSnapshot(
+        symbol="BTC-USD",
+        timeframe="1h",
+        as_of=bar.timestamp,
+        close=50000.0,
+        atr_14=500.0,
+        htf_daily_close=52500.0,
+    )
+
+    orders, blocks = engine.on_bar(bar, indicator, _portfolio())
+    assert orders, blocks
+    assert all(b["reason"] != "target_price_unresolvable" for b in blocks)
+
+
+def test_exact_exit_binding_blocks_sibling_trigger_exit():
+    probe_trigger = TriggerCondition(
+        id="btc_mr_probe",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="False",
+        category="mean_reversion",
+        stop_loss_pct=2.0,
+    )
+    sibling_trigger = TriggerCondition(
+        id="btc_mr_primary",
+        symbol="BTC-USD",
+        direction="long",
+        timeframe="1h",
+        entry_rule="False",
+        exit_rule="True",
+        category="mean_reversion",
+        stop_loss_pct=2.0,
+    )
+    plan = _plan_with_triggers([probe_trigger, sibling_trigger])
+    risk_engine = RiskEngine(plan.risk_constraints, {})
+    engine = TriggerEngine(
+        plan,
+        risk_engine,
+        exit_binding_mode="exact",
+        min_hold_bars=0,
+        trade_cooldown_bars=0,
+    )
+    bar = Bar(
+        symbol="BTC-USD",
+        timeframe="1h",
+        timestamp=_portfolio().timestamp,
+        open=50000.0,
+        high=50050.0,
+        low=49950.0,
+        close=50000.0,
+        volume=1.0,
+    )
+    portfolio = _portfolio_with_position()
+    position_meta = {
+        "BTC-USD": {
+            "entry_trigger_id": "btc_mr_probe",
+            "entry_category": "mean_reversion",
+            "entry_price": 50000.0,
+            "entry_side": "long",
+            "opened_at": bar.timestamp.isoformat(),
+        }
+    }
+
+    orders, blocks = engine.on_bar(bar, _indicator(), portfolio, position_meta=position_meta)
+
+    assert not orders
+    mismatch_blocks = [b for b in blocks if b["reason"] == "exit_binding_mismatch"]
+    assert mismatch_blocks
+    assert mismatch_blocks[0]["entry_trigger_id"] == "btc_mr_probe"
+    assert mismatch_blocks[0]["exit_trigger_id"] == "btc_mr_primary"
+    assert mismatch_blocks[0]["exit_binding_mode"] == "exact"
+
+
 def test_emergency_exit_trigger_bypasses_risk_checks():
     trigger = TriggerCondition(
         id="btc_exit",

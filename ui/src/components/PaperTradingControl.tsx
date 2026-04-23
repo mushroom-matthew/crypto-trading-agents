@@ -2097,7 +2097,8 @@ export function PaperTradingControl() {
                   <th className="text-right py-2 px-2">R</th>
                   <th className="text-right py-2 px-2">Plan R:R</th>
                   <th className="text-right py-2 px-2">Net P&L</th>
-                  <th className="text-left py-2 px-2">Setup</th>
+                  <th className="text-left py-2 px-2">Triggers</th>
+                  <th className="text-left py-2 px-2">Rules</th>
                 </tr>
               </thead>
               <tbody>
@@ -2137,8 +2138,55 @@ export function PaperTradingControl() {
                       <td className={cn('py-2 px-2 text-right font-semibold', ts.winner ? 'text-green-600' : 'text-red-600')}>
                         {formatCurrency(ts.net_pnl)}
                       </td>
-                      <td className="py-2 px-2 text-gray-500 font-mono truncate max-w-28" title={ts.entry_trigger ?? ''}>
-                        {ts.category ?? ts.entry_trigger ?? '-'}
+                      <td className="py-2 px-2 text-gray-500 max-w-48 align-top">
+                        <div className="font-mono truncate" title={ts.entry_trigger ?? ''}>
+                          E: {ts.entry_trigger ?? '-'}
+                        </div>
+                        <div className="font-mono truncate text-[10px] text-gray-400" title={ts.exit_trigger ?? ''}>
+                          X: {ts.exit_trigger ?? '-'}
+                        </div>
+                        {ts.category && (
+                          <div className="text-[10px] text-gray-400 uppercase tracking-wide">{ts.category}</div>
+                        )}
+                        {(ts.entry_timeframe || ts.exit_timeframe) && (
+                          <div className="text-[10px] text-gray-400">
+                            {(ts.entry_timeframe ?? '—')} / {(ts.exit_timeframe ?? '—')}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 max-w-xl align-top">
+                        <div className="space-y-1">
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wide text-gray-400">Entry</div>
+                            <div className="font-mono whitespace-pre-wrap break-words text-[11px] text-gray-700 dark:text-gray-200">
+                              {ts.entry_rule ?? '—'}
+                            </div>
+                          </div>
+                          {ts.planned_exit_rule && (
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-gray-400">Planned Exit</div>
+                              <div className="font-mono whitespace-pre-wrap break-words text-[11px] text-gray-700 dark:text-gray-200">
+                                {ts.planned_exit_rule}
+                              </div>
+                            </div>
+                          )}
+                          {ts.executed_exit_rule && ts.executed_exit_rule !== ts.planned_exit_rule && (
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-gray-400">Executed Exit</div>
+                              <div className="font-mono whitespace-pre-wrap break-words text-[11px] text-gray-700 dark:text-gray-200">
+                                {ts.executed_exit_rule}
+                              </div>
+                            </div>
+                          )}
+                          {ts.hold_rule && (
+                            <div>
+                              <div className="text-[10px] uppercase tracking-wide text-gray-400">Hold</div>
+                              <div className="font-mono whitespace-pre-wrap break-words text-[11px] text-gray-700 dark:text-gray-200">
+                                {ts.hold_rule}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -2454,11 +2502,18 @@ function buildStructureRows(
   const close = toNumber(snapshot.close);
   const htfDailyLow = toNumber(snapshot.htf_daily_low);
   const htfDailyHigh = toNumber(snapshot.htf_daily_high);
+  const htfDailyClose = toNumber(snapshot.htf_daily_close);
   const htf5dLow = toNumber(snapshot.htf_5d_low);
   const htf5dHigh = toNumber(snapshot.htf_5d_high);
   const dailyAtr = toNumber(snapshot.htf_daily_atr);
   const priceVsMid = toNumber(snapshot.htf_price_vs_daily_mid);
   const rsi = toNumber(snapshot.rsi_14);
+  const smaMedium = toNumber(snapshot.sma_medium);
+  const bollingerMiddle = toNumber(snapshot.bollinger_middle);
+  const vwap = toNumber(snapshot.vwap);
+  const vwapDistancePct = toNumber(snapshot.vwap_distance_pct);
+  const emaFast = toNumber(snapshot.ema_fast);
+  const emaVeryFast = toNumber(snapshot.ema_very_fast);
   const trend = deriveTrendLabel(snapshot);
   const daysRangePct = toNumber(snapshot.htf_daily_range_pct);
   const prevDailyHigh = toNumber(snapshot.htf_prev_daily_high);
@@ -2494,6 +2549,18 @@ function buildStructureRows(
     },
     { key: 'trend', label: 'Trend State', value: trend.label, valueClassName: trend.className },
     { key: 'close', label: 'Close', value: close != null ? formatCurrency(close) : 'N/A' },
+    { key: 'vwap', label: 'VWAP', value: vwap != null ? formatCurrency(vwap) : 'N/A' },
+    {
+      key: 'vwap_distance_pct',
+      label: 'VWAP Distance %',
+      value: vwapDistancePct != null ? `${vwapDistancePct >= 0 ? '+' : ''}${vwapDistancePct.toFixed(2)}%` : 'N/A',
+      valueClassName: vwapDistancePct == null ? '' : (vwapDistancePct >= 0 ? 'text-green-600' : 'text-red-600'),
+    },
+    { key: 'ema_fast', label: 'EMA Fast', value: emaFast != null ? formatCurrency(emaFast) : 'N/A' },
+    { key: 'ema_very_fast', label: 'EMA Very Fast', value: emaVeryFast != null ? formatCurrency(emaVeryFast) : 'N/A' },
+    { key: 'sma_medium', label: 'SMA Medium', value: smaMedium != null ? formatCurrency(smaMedium) : 'N/A' },
+    { key: 'bollinger_middle', label: 'Bollinger Middle', value: bollingerMiddle != null ? formatCurrency(bollingerMiddle) : 'N/A' },
+    { key: 'daily_close', label: 'D-1 Close (prev session)', value: htfDailyClose != null ? formatCurrency(htfDailyClose) : 'N/A' },
     { key: 'daily_low', label: 'D-1 Low (prev session)', value: htfDailyLow != null ? formatCurrency(htfDailyLow) : 'N/A' },
     { key: 'daily_high', label: 'D-1 High (prev session)', value: htfDailyHigh != null ? formatCurrency(htfDailyHigh) : 'N/A' },
     { key: 'prev_daily_low', label: 'D-2 Low', value: prevDailyLow != null ? formatCurrency(prevDailyLow) : 'N/A' },

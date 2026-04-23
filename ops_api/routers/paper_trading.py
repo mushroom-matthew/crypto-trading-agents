@@ -270,9 +270,9 @@ class PaperTradingSessionConfig(BaseModel):
         default=None,
         description="Min confidence grade for entry to override exit: 'A', 'B', 'C', or null (default: 'A')"
     )
-    exit_binding_mode: Literal["none", "category"] = Field(
-        default="category",
-        description="Exit binding policy: none (global exits) or category (entry/exit category must match). Emergency exits always allowed."
+    exit_binding_mode: Literal["none", "category", "exact"] = Field(
+        default="exact",
+        description="Exit binding policy: none (global exits), category (entry/exit category must match), or exact (only the originating trigger may exit). Emergency exits always allowed."
     )
     conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = Field(
         default="reverse",
@@ -1251,6 +1251,234 @@ def _build_hold_overrides_from_order_events(session_id: str, max_events: int = 1
     return holds_by_symbol
 
 
+def _build_entry_overrides_from_order_events(
+    session_id: str,
+    max_events: int = 10000,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Derive per-symbol FIFO entry metadata from order_executed events.
+
+    This backfills trade-set display fields for legacy sessions where the ledger
+    transaction row does not retain stop/target metadata even though the event
+    feed emitted it at execution time.
+    """
+    from ops_api.event_store import EventStore
+
+    store = EventStore()
+    events = store.list_events_filtered(
+        event_type="order_executed",
+        run_id=session_id,
+        limit=max_events,
+        order="asc",
+    )
+
+    entry_meta_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    for event in events:
+        payload = event.payload or {}
+        symbol = str(payload.get("symbol") or "")
+        if not symbol:
+            continue
+
+        side = str(payload.get("side") or "").lower()
+        intent = str(payload.get("intent") or ("entry" if side == "buy" else "exit")).lower()
+        is_entry = intent == "entry" or side == "buy"
+        if not is_entry:
+            continue
+
+        entry_meta_by_symbol.setdefault(symbol, []).append({
+            "trigger_id": payload.get("trigger_id"),
+            "timeframe": payload.get("timeframe"),
+            "trigger_category": payload.get("trigger_category"),
+            "entry_rule": payload.get("entry_rule"),
+            "planned_exit_rule": payload.get("exit_rule"),
+            "hold_rule": payload.get("hold_rule"),
+            "stop_price_abs": payload.get("stop_price"),
+            "target_price_abs": payload.get("target_price"),
+            "planned_rr": payload.get("planned_rr"),
+        })
+
+    return entry_meta_by_symbol
+
+
+def _build_exit_overrides_from_order_events(
+    session_id: str,
+    max_events: int = 10000,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Derive per-symbol FIFO exit metadata from order_executed events."""
+    from ops_api.event_store import EventStore
+
+    store = EventStore()
+    events = store.list_events_filtered(
+        event_type="order_executed",
+        run_id=session_id,
+        limit=max_events,
+        order="asc",
+    )
+
+    exit_meta_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    for event in events:
+        payload = event.payload or {}
+        symbol = str(payload.get("symbol") or "")
+        if not symbol:
+            continue
+
+        side = str(payload.get("side") or "").lower()
+        intent = str(payload.get("intent") or ("entry" if side == "buy" else "exit")).lower()
+        is_exit = intent in {"exit", "flat", "conflict_exit", "conflict_reverse"} or side == "sell"
+        if not is_exit:
+            continue
+
+        exit_meta_by_symbol.setdefault(symbol, []).append({
+            "trigger_id": payload.get("trigger_id"),
+            "timeframe": payload.get("timeframe"),
+            "trigger_category": payload.get("trigger_category"),
+            "entry_rule": payload.get("entry_rule"),
+            "exit_rule": payload.get("exit_rule"),
+            "hold_rule": payload.get("hold_rule"),
+        })
+
+    return exit_meta_by_symbol
+
+
+def _index_trade_set_triggers(plan_payloads: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Index trigger definitions from plan payloads in chronological order."""
+    trigger_catalog: Dict[str, Dict[str, Any]] = {}
+    for plan in plan_payloads:
+        triggers = plan.get("triggers") or []
+        if not isinstance(triggers, list):
+            continue
+        for trigger in triggers:
+            if not isinstance(trigger, dict):
+                continue
+            trigger_id = str(trigger.get("id") or "").strip()
+            if not trigger_id:
+                continue
+            trigger_catalog[trigger_id] = dict(trigger)
+    return trigger_catalog
+
+
+async def _build_trade_set_trigger_catalog(client: Any, session_id: str) -> Dict[str, Dict[str, Any]]:
+    """Best-effort trigger catalog for entry/exit rule enrichment."""
+    handle = client.get_workflow_handle(session_id)
+    plan_payloads: List[Dict[str, Any]] = []
+    try:
+        plan_history = await asyncio.wait_for(handle.query("get_plan_history"), timeout=2.5)
+        if isinstance(plan_history, list):
+            plan_payloads.extend([p for p in plan_history if isinstance(p, dict)])
+    except Exception as err:
+        logger.debug("Failed to query plan_history for %s: %s", session_id, err)
+    try:
+        current_plan = await asyncio.wait_for(handle.query("get_current_plan"), timeout=2.5)
+        if isinstance(current_plan, dict):
+            plan_payloads.append(current_plan)
+    except Exception as err:
+        logger.debug("Failed to query current_plan for %s: %s", session_id, err)
+    return _index_trade_set_triggers(plan_payloads)
+
+
+def _resolve_trade_set_rule_fields(
+    entry_tx: Dict[str, Any],
+    exit_tx: Dict[str, Any],
+    entry_override: Dict[str, Any],
+    exit_override: Dict[str, Any],
+    trigger_catalog: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Merge rule metadata for a paired trade set."""
+    entry_trigger_id = entry_tx.get("trigger_id") or entry_override.get("trigger_id")
+    exit_trigger_id = exit_tx.get("trigger_id") or exit_override.get("trigger_id")
+    entry_trigger = trigger_catalog.get(str(entry_trigger_id or ""))
+    exit_trigger = trigger_catalog.get(str(exit_trigger_id or ""))
+
+    planned_exit_rule = (
+        entry_tx.get("exit_rule")
+        or entry_override.get("planned_exit_rule")
+        or (entry_trigger or {}).get("exit_rule")
+    )
+    executed_exit_rule = (
+        exit_tx.get("exit_rule")
+        or exit_override.get("exit_rule")
+        or (exit_trigger or {}).get("exit_rule")
+        or planned_exit_rule
+    )
+
+    return {
+        "entry_trigger": entry_trigger_id,
+        "exit_trigger": exit_trigger_id,
+        "category": (
+            entry_tx.get("trigger_category")
+            or entry_override.get("trigger_category")
+            or (entry_trigger or {}).get("category")
+        ),
+        "entry_rule": (
+            entry_tx.get("entry_rule")
+            or entry_override.get("entry_rule")
+            or (entry_trigger or {}).get("entry_rule")
+        ),
+        "planned_exit_rule": planned_exit_rule,
+        "executed_exit_rule": executed_exit_rule,
+        "hold_rule": (
+            entry_tx.get("hold_rule")
+            or entry_override.get("hold_rule")
+            or (entry_trigger or {}).get("hold_rule")
+        ),
+        "entry_timeframe": (
+            entry_tx.get("timeframe")
+            or entry_override.get("timeframe")
+            or (entry_trigger or {}).get("timeframe")
+        ),
+        "exit_timeframe": (
+            exit_tx.get("timeframe")
+            or exit_override.get("timeframe")
+            or (exit_trigger or {}).get("timeframe")
+        ),
+    }
+
+
+async def _resolve_trade_set_preview_fallback(
+    client: Any,
+    session_id: str,
+    symbol: str,
+    as_of_iso: str,
+    entry_price: float,
+    trigger_meta: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Best-effort stop/target preview backfill using session structure history."""
+    if not trigger_meta or entry_price <= 0:
+        return {}
+
+    from tools.paper_trading import _compute_trigger_preview
+
+    handle = client.get_workflow_handle(session_id)
+    try:
+        structure_payload = await asyncio.wait_for(
+            handle.query("get_structure_snapshots", symbol, as_of_iso),
+            timeout=2.5,
+        )
+    except Exception as err:
+        logger.debug("Failed to query structure snapshot for %s @ %s: %s", symbol, as_of_iso, err)
+        return {}
+
+    indicators = {}
+    if isinstance(structure_payload, dict):
+        indicators = structure_payload.get("indicators") or {}
+    indicator_dict = indicators.get(symbol.upper()) or indicators.get(symbol)
+    if not isinstance(indicator_dict, dict):
+        return {}
+
+    try:
+        preview = _compute_trigger_preview(dict(trigger_meta), indicator_dict, entry_price)
+    except Exception as err:
+        logger.debug("Failed to compute trigger preview fallback for %s: %s", symbol, err)
+        return {}
+
+    if not isinstance(preview, dict):
+        return {}
+    return {
+        "stop_price_abs": preview.get("stop_price"),
+        "target_price_abs": preview.get("target_price"),
+        "planned_rr": preview.get("rr_ratio"),
+    }
+
+
 @router.get("/sessions/{session_id}/trade_sets")
 async def get_trade_sets(session_id: str, limit: int = 50):
     """Get completed round-trip trades (entry + exit pairs) for a session.
@@ -1282,6 +1510,9 @@ async def get_trade_sets(session_id: str, limit: int = 50):
         # Sort oldest-first for pairing
         txs = sorted(transactions, key=lambda x: x.get("timestamp", 0))
         hold_overrides = _build_hold_overrides_from_order_events(session_id)
+        entry_overrides = _build_entry_overrides_from_order_events(session_id)
+        exit_overrides = _build_exit_overrides_from_order_events(session_id)
+        trigger_catalog = await _build_trade_set_trigger_catalog(client, session_id)
 
         def _ts_to_iso(raw) -> str:
             if isinstance(raw, (int, float)):
@@ -1317,6 +1548,14 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                 entry_qty = float(entry.get("qty", entry.get("quantity", 0)))
                 entry_ts = entry.get("timestamp", 0)
                 entry_fee = float(entry.get("fee", 0) or 0)
+                entry_override = {}
+                symbol_entry_overrides = entry_overrides.get(symbol)
+                if symbol_entry_overrides and pair_idx < len(symbol_entry_overrides):
+                    entry_override = symbol_entry_overrides[pair_idx]
+                exit_override = {}
+                symbol_exit_overrides = exit_overrides.get(symbol)
+                if symbol_exit_overrides and pair_idx < len(symbol_exit_overrides):
+                    exit_override = symbol_exit_overrides[pair_idx]
 
                 used_qty = min(qty, entry_qty)
                 gross_pnl = (price - entry_price) * used_qty
@@ -1333,10 +1572,37 @@ async def get_trade_sets(session_id: str, limit: int = 50):
 
                 # R-per-hour and R-achieved: net_pnl / initial_risk
                 stop_px = entry.get("stop_price_abs")
+                if stop_px is None:
+                    stop_px = entry_override.get("stop_price_abs")
                 target_px = entry.get("target_price_abs")
+                if target_px is None:
+                    target_px = entry_override.get("target_price_abs")
+                rule_fields = _resolve_trade_set_rule_fields(
+                    entry,
+                    tx,
+                    entry_override,
+                    exit_override,
+                    trigger_catalog,
+                )
+                entry_trigger_meta = trigger_catalog.get(str(rule_fields["entry_trigger"] or ""))
+                if stop_px is None or target_px is None:
+                    preview_fallback = await _resolve_trade_set_preview_fallback(
+                        client,
+                        session_id,
+                        symbol,
+                        _ts_to_iso(entry_ts),
+                        entry_price,
+                        entry_trigger_meta,
+                    )
+                    if stop_px is None:
+                        stop_px = preview_fallback.get("stop_price_abs")
+                    if target_px is None:
+                        target_px = preview_fallback.get("target_price_abs")
                 r_achieved = None
                 r_per_hour = None
-                r_planned = None
+                r_planned = entry.get("planned_rr")
+                if r_planned is None:
+                    r_planned = entry_override.get("planned_rr")
                 if stop_px and entry_price > 0:
                     initial_risk_per_unit = abs(entry_price - float(stop_px))
                     if initial_risk_per_unit > 0:
@@ -1345,7 +1611,7 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                         if hold_minutes > 0:
                             r_per_hour = round(r_achieved / (hold_minutes / 60.0), 4)
                         # Planned R:R from target vs stop
-                        if target_px:
+                        if target_px and r_planned is None:
                             r_planned = round(abs(float(target_px) - entry_price) / initial_risk_per_unit, 2)
 
                 ts_rec: Dict[str, Any] = {
@@ -1361,19 +1627,29 @@ async def get_trade_sets(session_id: str, limit: int = 50):
                     "fee": round(total_fee, 4),
                     "net_pnl": round(net_pnl, 4),
                     "pnl_pct": round(pnl_pct, 3),
-                    "entry_trigger": entry.get("trigger_id"),
-                    "exit_trigger": tx.get("trigger_id"),
-                    "category": entry.get("trigger_category"),
+                    "entry_trigger": rule_fields["entry_trigger"],
+                    "exit_trigger": rule_fields["exit_trigger"],
+                    "category": rule_fields["category"],
+                    "entry_timeframe": rule_fields["entry_timeframe"],
+                    "exit_timeframe": rule_fields["exit_timeframe"],
+                    "entry_rule": rule_fields["entry_rule"],
+                    "planned_exit_rule": rule_fields["planned_exit_rule"],
+                    "executed_exit_rule": rule_fields["executed_exit_rule"],
+                    "hold_rule": rule_fields["hold_rule"],
                     "winner": net_pnl > 0,
                     "stop_price_abs": stop_px,
                     "target_price_abs": target_px,
                     "r_achieved": r_achieved,
-                    "r_planned": r_planned,
+                    "r_planned": round(float(r_planned), 2) if r_planned is not None else None,
                     "r_per_hour": r_per_hour,
                     "target_source": entry.get("target_source"),
                     "target_structural_kind": entry.get("target_structural_kind"),
                     "stop_source": entry.get("stop_source"),
-                    "estimated_bars_to_resolution": entry.get("estimated_bars_to_resolution"),
+                    "estimated_bars_to_resolution": (
+                        entry.get("estimated_bars_to_resolution")
+                        if entry.get("estimated_bars_to_resolution") is not None
+                        else entry_override.get("estimated_bars_to_resolution")
+                    ),
                 }
                 trade_sets.append(ts_rec)
 

@@ -47,7 +47,7 @@ with workflow.unsafe.imports_passed_through():
     from schemas.experiment_spec import ExperimentSpec
     from schemas.position_exit_contract import PositionExitContract, ExitLeg
     from services.exit_contract_builder import build_exit_contract
-    from trading_core.trigger_compiler import compile_plan
+    from trading_core.trigger_compiler import compile_plan, enforce_plan_quality
     from ops_api.event_store import EventStore
     from ops_api.schemas import Event
     # Policy loop cadence (Runbook 61)
@@ -79,11 +79,47 @@ _SESSION_INTENT_EVENT_REPLAY_COMPAT: Dict[str, bool] = {
     "paper-trading-774b71a4": True,
 }
 
+# Replay-compat overrides for live histories that crossed the deployment where
+# `_refresh_live_indicators()` started scheduling
+# `build_structure_snapshots_activity` after `fetch_indicator_snapshots_activity`
+# without a Temporal patch marker. Some executions recorded only the indicator
+# fetch; newer code tried to insert the structure refresh on replay and broke
+# determinism. New workflows use the patch marker and always refresh structure.
+_LIVE_STRUCTURE_REFRESH_REPLAY_COMPAT: Dict[str, bool] = {
+    "paper-trading-06c35370": False,
+}
+
 
 def _timeframe_to_minutes(tf: str) -> int:
     """Convert a Coinbase-style timeframe string to minutes for plan validation."""
     _MAP = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "6h": 360, "1d": 1440}
     return _MAP.get(str(tf).lower(), 60)
+
+
+def _validation_timeframes(base_timeframe: str) -> List[str]:
+    """Return the base timeframe plus compatible higher timeframes for plan validation."""
+    base_minutes = _timeframe_to_minutes(base_timeframe)
+    if base_minutes <= 0:
+        return [base_timeframe]
+
+    candidate_timeframes = ["1m", "5m", "15m", "1h", "6h", "1d"]
+    derived = [base_timeframe]
+    for tf in candidate_timeframes:
+        tf_minutes = _timeframe_to_minutes(tf)
+        if tf_minutes > base_minutes and tf_minutes % base_minutes == 0:
+            ratio = tf_minutes // base_minutes
+            if ratio <= 288:
+                derived.append(tf)
+    return list(dict.fromkeys(derived))
+
+
+def _normalize_live_plan(plan_dict: Dict[str, Any], indicator_timeframe: str) -> Dict[str, Any]:
+    """Apply live plan quality enforcement before persisting a paper-trading plan."""
+    validated_plan = StrategyPlan.model_validate(plan_dict)
+    available_tfs = set(_validation_timeframes(indicator_timeframe))
+    enforce_plan_quality(validated_plan, available_tfs)
+    compile_plan(validated_plan)
+    return validated_plan.model_dump(mode="json")
 
 
 def _normalize_regime_hint(value: Optional[str]) -> str:
@@ -174,6 +210,26 @@ def _should_emit_session_intent_generated_event(session_id: str, patch_enabled: 
     if patch_enabled:
         return True
     return _SESSION_INTENT_EVENT_REPLAY_COMPAT.get(session_id, False)
+
+
+def _should_refresh_live_structure_snapshots(session_id: str, patch_enabled: bool) -> bool:
+    """Return whether live indicator refresh should also rebuild structure snapshots.
+
+    Why this exists:
+    - `_refresh_live_indicators()` originally fetched live indicator snapshots only.
+    - A later deployment added `build_structure_snapshots_activity` immediately after
+      that fetch, but did so without a Temporal versioning marker.
+    - Live sessions that had already executed the older branch now fail replay when
+      the worker tries to insert the new activity into existing history.
+
+    Policy:
+    - New workflows use the patch marker (`patch_enabled=True`) and always rebuild.
+    - Known stuck legacy workflows use the compatibility override table above.
+    - Other pre-patch histories default to the older behavior: skip the rebuild.
+    """
+    if patch_enabled:
+        return True
+    return _LIVE_STRUCTURE_REFRESH_REPLAY_COMPAT.get(session_id, False)
 
 
 def _get_latest_structure_snapshot(
@@ -354,7 +410,7 @@ class PaperTradingConfig(BaseModel):
     enable_symbol_discovery: bool = False
     min_volume_24h: float = 1_000_000
     llm_model: Optional[str] = None
-    exit_binding_mode: Literal["none", "category"] = "category"
+    exit_binding_mode: Literal["none", "category", "exact"] = "exact"
     conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
     # Research budget (Runbook 48)
     research_budget_enabled: bool = True
@@ -398,7 +454,7 @@ class SessionState(BaseModel):
     min_volume_24h: float = 1_000_000
     plan_history: List[Dict[str, Any]] = []
     equity_history: List[Dict[str, Any]] = []
-    exit_binding_mode: Literal["none", "category"] = "category"
+    exit_binding_mode: Literal["none", "category", "exact"] = "exact"
     conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
     trigger_rule_edits: List[Dict[str, Any]] = []
     screener_regime: Optional[str] = None  # R68: screener-derived regime label
@@ -1015,7 +1071,7 @@ def evaluate_triggers_activity(
     plan_dict: Dict[str, Any],
     market_data: Dict[str, Dict[str, Any]],
     portfolio_state: Dict[str, Any],
-    exit_binding_mode: str = "category",
+    exit_binding_mode: str = "exact",
     conflicting_signal_policy: str = "reverse",
     position_originating_plans: Optional[Dict[str, str]] = None,
     min_rr_ratio: Optional[float] = None,
@@ -1062,7 +1118,7 @@ def evaluate_triggers_activity(
         risk_engine,
         trade_risk=TradeRiskEvaluator(risk_engine),
         stop_distance_resolver=resolve_stop_distance,
-        exit_binding_mode=exit_binding_mode if exit_binding_mode else "category",
+        exit_binding_mode=exit_binding_mode if exit_binding_mode else "exact",
         conflicting_signal_policy=conflicting_signal_policy if conflicting_signal_policy else "reverse",
         position_originating_plans=position_originating_plans,  # R65
         min_rr_ratio=min_rr_ratio if min_rr_ratio is not None else 1.75,
@@ -1904,7 +1960,7 @@ class PaperTradingWorkflow:
         self.plan_history: List[Dict[str, Any]] = []
         self.equity_history: List[Dict[str, Any]] = []
         self.last_equity_snapshot: Optional[datetime] = None
-        self.exit_binding_mode: Literal["none", "category"] = "category"
+        self.exit_binding_mode: Literal["none", "category", "exact"] = "exact"
         self.conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = "reverse"
         self.trigger_rule_edits: List[Dict[str, Any]] = []
         # Indicator snapshots from last plan generation (used in trigger evaluation)
@@ -3183,6 +3239,17 @@ class PaperTradingWorkflow:
                 "snapshot_as_of_ts": _snapshot_as_of_ts,
             }
 
+            try:
+                plan_dict = _normalize_live_plan(plan_dict, self.indicator_timeframe)
+            except Exception as exc:
+                workflow.logger.error("Live plan enforcement/compilation failed: %s", exc)
+                await self._emit("plan_stand_down", {
+                    "cycle": len(self.plan_history),
+                    "reason": "plan_enforcement_failed",
+                    "error": str(exc),
+                })
+                return
+
             self.current_plan = plan_dict
             self.last_plan_time = workflow.now()
 
@@ -3244,11 +3311,19 @@ class PaperTradingWorkflow:
             if isinstance(live_snapshots, dict) and live_snapshots:
                 self.last_indicators_live = live_snapshots
                 raw_live_ohlcv = live_snapshots.get("_raw_ohlcv_data", {})
-                # Keep structure levels fresh between plan regeneration cycles.
-                await self._update_live_structure_snapshots(
-                    live_snapshots,
-                    raw_ohlcv_data=raw_live_ohlcv if isinstance(raw_live_ohlcv, dict) else {},
+                # Replay-compat: this structure refresh was added after live fetch
+                # without versioning, so legacy histories may not have the activity.
+                _live_structure_refresh_patch = workflow.patched(
+                    "paper-trading-live-structure-refresh-v1"
                 )
+                if _should_refresh_live_structure_snapshots(
+                    self.session_id,
+                    patch_enabled=_live_structure_refresh_patch,
+                ):
+                    await self._update_live_structure_snapshots(
+                        live_snapshots,
+                        raw_ohlcv_data=raw_live_ohlcv if isinstance(raw_live_ohlcv, dict) else {},
+                    )
                 self._append_structure_history(live_snapshots, origin="live")
         except Exception as exc:
             workflow.logger.warning(f"Failed to refresh live indicators: {exc}")
@@ -4257,9 +4332,16 @@ class PaperTradingWorkflow:
             triggers = (self.current_plan or {}).get("triggers", [])
             tdict = next((t for t in triggers if t.get("id") == trigger_id), None)
             if tdict:
+                for field_name in ("entry_rule", "exit_rule", "hold_rule"):
+                    if tdict.get(field_name):
+                        fill_payload[field_name] = tdict.get(field_name)
                 etb = tdict.get("estimated_bars_to_resolution")
                 if etb is not None:
                     fill_payload["estimated_bars_to_resolution"] = int(etb)
+        elif trigger_dict:
+            for field_name in ("entry_rule", "exit_rule", "hold_rule"):
+                if trigger_dict.get(field_name):
+                    fill_payload[field_name] = trigger_dict.get(field_name)
 
         # Phase M2 (Runbook 60): Materialize PositionExitContract at entry.
         # The contract captures the precommitted exit plan (stop, targets, time expiry)
@@ -4397,6 +4479,19 @@ class PaperTradingWorkflow:
             event_payload["stop_price"] = stop_price_abs
         if target_price_abs is not None:
             event_payload["target_price"] = target_price_abs
+        if trigger_dict:
+            for field_name in ("entry_rule", "exit_rule", "hold_rule"):
+                if trigger_dict.get(field_name):
+                    event_payload[field_name] = trigger_dict.get(field_name)
+        planned_rr = _compute_rr_ratio(
+            "long" if order.get("side", "").lower() == "buy" else "short",
+            fill_price,
+            stop_price_abs,
+            target_price_abs,
+        )
+        if planned_rr is not None:
+            fill_payload["planned_rr"] = planned_rr
+            event_payload["planned_rr"] = planned_rr
         await self._emit("order_executed", event_payload)
 
         workflow.logger.info(f"Executed order: {order['side']} {order['quantity']} {order['symbol']} @ {order['price']}")

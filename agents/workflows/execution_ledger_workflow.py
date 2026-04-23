@@ -30,6 +30,7 @@ class ExecutionLedgerWorkflow:
         self.last_price: Dict[str, Decimal] = {}
         self.last_price_timestamp: Dict[str, int] = {}  # Track when prices were last updated
         self.entry_price: Dict[str, Decimal] = {}
+        self.entry_fee_pool: Dict[str, Decimal] = {}
         self.position_meta: Dict[str, Dict[str, Any]] = {}
         self.fill_count = 0
         self.transaction_history: List[Dict] = []
@@ -191,6 +192,7 @@ class ExecutionLedgerWorkflow:
         self.cash = self.initial_cash
         self.positions = {}
         self.entry_price = {}
+        self.entry_fee_pool = {}
         self.last_price = {}
         self.last_price_timestamp = {}
         self.position_meta = {}
@@ -323,6 +325,21 @@ class ExecutionLedgerWorkflow:
             "pnl": trade_pnl,
             "cash_before": float(self.cash),
             "position_before": float(current_qty),
+            "timeframe": fill.get("timeframe"),
+            "entry_rule": fill.get("entry_rule"),
+            "exit_rule": fill.get("exit_rule"),
+            "hold_rule": fill.get("hold_rule"),
+            "stop_price_abs": float(fill["stop_price_abs"]) if fill.get("stop_price_abs") is not None else None,
+            "target_price_abs": float(fill["target_price_abs"]) if fill.get("target_price_abs") is not None else None,
+            "planned_rr": float(fill["planned_rr"]) if fill.get("planned_rr") is not None else None,
+            "target_source": fill.get("target_source"),
+            "target_structural_kind": fill.get("target_structural_kind"),
+            "stop_source": fill.get("stop_source"),
+            "estimated_bars_to_resolution": (
+                int(fill["estimated_bars_to_resolution"])
+                if fill.get("estimated_bars_to_resolution") is not None
+                else None
+            ),
         }
 
         # Update price and timestamp
@@ -331,9 +348,11 @@ class ExecutionLedgerWorkflow:
         self.last_price_timestamp[symbol] = current_timestamp
         if side == "BUY":
             self.cash -= cost
+            self.cash -= fee
             try:
                 if self.wallet_provider:
                     self.wallet_provider.debit("CASH", cost)
+                    self.wallet_provider.debit("CASH", fee)
             except Exception:
                 pass
 
@@ -341,15 +360,34 @@ class ExecutionLedgerWorkflow:
                 cover_qty = min(qty, abs(current_qty))
                 if cover_qty > 0 and symbol in self.entry_price:
                     entry_price = self.entry_price[symbol]
-                    trade_pnl = float((entry_price - price) * cover_qty - fee)
-                    self.realized_pnl += (entry_price - price) * cover_qty
+                    existing_abs_qty = abs(current_qty)
+                    close_fee = fee * (cover_qty / qty) if qty > 0 else Decimal("0")
+                    fee_pool = self.entry_fee_pool.get(symbol, Decimal("0"))
+                    allocated_entry_fee = (
+                        fee_pool * (cover_qty / existing_abs_qty)
+                        if existing_abs_qty > 0
+                        else Decimal("0")
+                    )
+                    net_realized_pnl = (entry_price - price) * cover_qty - close_fee - allocated_entry_fee
+                    trade_pnl = float(net_realized_pnl)
+                    self.realized_pnl += net_realized_pnl
+                    remaining_fee_pool = fee_pool - allocated_entry_fee
+                    if remaining_fee_pool > Decimal("1e-18"):
+                        self.entry_fee_pool[symbol] = remaining_fee_pool
+                    else:
+                        self.entry_fee_pool.pop(symbol, None)
 
                 new_qty = current_qty + qty
                 if new_qty > 0:
                     # Reversal: residual buy opens a fresh long at this price.
                     self.entry_price[symbol] = price
+                    residual_open_qty = new_qty
+                    open_fee = fee * (residual_open_qty / qty) if qty > 0 else Decimal("0")
+                    self.entry_fee_pool[symbol] = open_fee
             else:
                 new_qty = current_qty + qty
+                existing_fee_pool = self.entry_fee_pool.get(symbol, Decimal("0"))
+                self.entry_fee_pool[symbol] = existing_fee_pool + fee
                 if current_qty == 0:
                     self.entry_price[symbol] = price
                 else:
@@ -359,9 +397,11 @@ class ExecutionLedgerWorkflow:
                     )
         else:  # SELL
             self.cash += cost
+            self.cash -= fee
             try:
                 if self.wallet_provider:
                     self.wallet_provider.credit("CASH", cost)
+                    self.wallet_provider.debit("CASH", fee)
             except Exception:
                 pass
 
@@ -369,18 +409,30 @@ class ExecutionLedgerWorkflow:
                 close_qty = min(qty, current_qty)
                 if close_qty > 0 and symbol in self.entry_price:
                     entry_price = self.entry_price[symbol]
-                    trade_pnl = float((price - entry_price) * close_qty - fee)
-                    position_realized_pnl = (price - entry_price) * close_qty
-                    self.realized_pnl += position_realized_pnl
+                    close_fee = fee * (close_qty / qty) if qty > 0 else Decimal("0")
+                    fee_pool = self.entry_fee_pool.get(symbol, Decimal("0"))
+                    allocated_entry_fee = (
+                        fee_pool * (close_qty / current_qty)
+                        if current_qty > 0
+                        else Decimal("0")
+                    )
+                    net_realized_pnl = (price - entry_price) * close_qty - close_fee - allocated_entry_fee
+                    trade_pnl = float(net_realized_pnl)
+                    self.realized_pnl += net_realized_pnl
+                    remaining_fee_pool = fee_pool - allocated_entry_fee
+                    if remaining_fee_pool > Decimal("1e-18"):
+                        self.entry_fee_pool[symbol] = remaining_fee_pool
+                    else:
+                        self.entry_fee_pool.pop(symbol, None)
 
-                    if position_realized_pnl > 0:
-                        scraped_amount = position_realized_pnl * self.profit_scraping_percentage
+                    if net_realized_pnl > 0:
+                        scraped_amount = net_realized_pnl * self.profit_scraping_percentage
                         self.scraped_profits += scraped_amount
                         self.cash -= scraped_amount
                         message = (
                             f"Scraped {scraped_amount:.2f} "
                             f"({self.profit_scraping_percentage * 100}%) "
-                            f"from {position_realized_pnl:.2f} profit"
+                            f"from {net_realized_pnl:.2f} profit"
                         )
                         try:
                             workflow.logger.info(message)
@@ -391,8 +443,13 @@ class ExecutionLedgerWorkflow:
                 if new_qty < 0:
                     # Reversal: residual sell opens a fresh short at this price.
                     self.entry_price[symbol] = price
+                    residual_open_qty = abs(new_qty)
+                    open_fee = fee * (residual_open_qty / qty) if qty > 0 else Decimal("0")
+                    self.entry_fee_pool[symbol] = open_fee
             else:
                 new_qty = current_qty - qty
+                existing_fee_pool = self.entry_fee_pool.get(symbol, Decimal("0"))
+                self.entry_fee_pool[symbol] = existing_fee_pool + fee
                 if current_qty == 0:
                     self.entry_price[symbol] = price
                 else:
@@ -412,6 +469,7 @@ class ExecutionLedgerWorkflow:
         if new_qty == 0:
             self.positions.pop(symbol, None)
             self.entry_price.pop(symbol, None)
+            self.entry_fee_pool.pop(symbol, None)
             self.position_meta.pop(symbol, None)
         else:
             self.positions[symbol] = new_qty

@@ -50,7 +50,7 @@ def _try_select_structural_targets(indicator: IndicatorSnapshot, direction: str)
     except Exception:
         return {}
 
-ExitBindingMode = Literal["none", "category"]
+ExitBindingMode = Literal["none", "category", "exact"]
 ConflictResolution = Literal["ignore", "exit", "reverse", "defer"]
 
 
@@ -115,6 +115,9 @@ def validate_plan_target_semantics(
                 "htf_5d_high": "htf_5d_high",
                 "htf_5d_low": "htf_5d_low",
                 "htf_5d_extreme": "htf_5d_high" if direction == "long" else "htf_5d_low",
+                "htf_daily_close": "htf_daily_close",
+                "bollinger_middle": "bollinger_middle",
+                "sma_medium": "sma_medium",
             }
             field_name = htf_field_map.get(anchor)
             if field_name:
@@ -237,7 +240,7 @@ class TriggerEngine:
                 once max_triggers_per_symbol_per_bar is reached. None disables bypass.
             judge_constraints: Optional JudgeConstraints with disabled_trigger_ids and
                 disabled_categories to block specific triggers from firing.
-            exit_binding_mode: Exit binding policy ("none" or "category").
+            exit_binding_mode: Exit binding policy ("none", "category", or "exact").
             conflicting_signal_policy: Resolver policy when opposing entries fire ("ignore", "exit", "reverse", "defer").
             risk_off_latch: When True, risk_off exits get Tier 1 priority (preempt entries).
                 When False, risk_off competes like normal exits unless plan regime is "risk_off".
@@ -602,11 +605,20 @@ class TriggerEngine:
         meta = position_meta.get(symbol) or {}
         return meta.get("entry_trigger_id") or meta.get("reason")
 
-    def _exit_binding_allows(self, trigger: TriggerCondition, entry_category: str | None) -> bool:
+    def _exit_binding_allows(
+        self,
+        trigger: TriggerCondition,
+        entry_category: str | None,
+        entry_trigger_id: str | None,
+    ) -> bool:
         if self.exit_binding_mode == "none":
             return True
         if trigger.category == "emergency_exit":
             return True
+        if self.exit_binding_mode == "exact":
+            if not entry_trigger_id:
+                return True
+            return trigger.id == entry_trigger_id
         if trigger.direction == "exit" and getattr(trigger, "exit_binding_exempt", False):
             return True
         if not entry_category or not trigger.category:
@@ -825,6 +837,9 @@ class TriggerEngine:
             "htf_5d_high": "htf_5d_high",
             "htf_5d_low": "htf_5d_low",
             "htf_5d_extreme": "htf_5d_high" if direction == "long" else "htf_5d_low",
+            "htf_daily_close": "htf_daily_close",
+            "bollinger_middle": "bollinger_middle",
+            "sma_medium": "sma_medium",
         }
         field_name = htf_field_map.get(anchor)
         if field_name:
@@ -938,6 +953,12 @@ class TriggerEngine:
         elif anchor in {"htf_5d_low", "htf_5d_extreme"} and direction == "short":
             level = indicator.htf_5d_low
             target_price = level * 1.002 if level else None
+        elif anchor == "htf_daily_close":
+            target_price = _to_float(getattr(indicator, "htf_daily_close", None))
+        elif anchor == "bollinger_middle":
+            target_price = _to_float(getattr(indicator, "bollinger_middle", None))
+        elif anchor == "sma_medium":
+            target_price = _to_float(getattr(indicator, "sma_medium", None))
         else:
             return None
 
@@ -989,10 +1010,18 @@ class TriggerEngine:
         side: Literal["buy", "sell"] = "buy" if desired == "long" else "sell"
         # R:R gate: when a target anchor is defined, the prospective reward/risk ratio
         # must meet the minimum threshold before capital is committed.
-        if trigger.target_anchor_type and stop_distance and stop_distance > 0 and self.min_rr_ratio > 0:
+        if trigger.target_anchor_type and stop_distance and stop_distance > 0:
             direction_str = "long" if side == "buy" else "short"
             target_dist = self._compute_target_distance(trigger, indicator, bar.close, stop_distance, direction_str)
-            if target_dist is not None:
+            if target_dist is None and "target_hit" in (trigger.exit_rule or ""):
+                if block_entries is not None:
+                    detail = (
+                        f"Target anchor '{trigger.target_anchor_type}' could not be resolved "
+                        f"from current indicator snapshot"
+                    )
+                    self._record_block(block_entries, trigger, "target_price_unresolvable", detail, bar)
+                return None
+            if target_dist is not None and self.min_rr_ratio > 0:
                 rr = target_dist / stop_distance
                 if rr < self.min_rr_ratio:
                     if block_entries is not None:
@@ -1229,9 +1258,18 @@ class TriggerEngine:
                     self._record_block(block_entries, trigger, reason, detail, bar, extra=extra)
                     continue
                 entry_category = self._entry_category(position_meta, trigger.symbol)
-                if not self._exit_binding_allows(trigger, entry_category):
-                    entry_trigger_id = self._entry_trigger_id(position_meta, trigger.symbol)
-                    detail = f"Exit category {trigger.category} does not match entry category {entry_category}"
+                entry_trigger_id = self._entry_trigger_id(position_meta, trigger.symbol)
+                if not self._exit_binding_allows(trigger, entry_category, entry_trigger_id):
+                    if self.exit_binding_mode == "exact":
+                        detail = (
+                            f"Exit trigger {trigger.id} does not match entry trigger "
+                            f"{entry_trigger_id}"
+                        )
+                    else:
+                        detail = (
+                            f"Exit category {trigger.category} does not match entry "
+                            f"category {entry_category}"
+                        )
                     self._record_block(
                         block_entries,
                         trigger,
@@ -1243,6 +1281,7 @@ class TriggerEngine:
                             "entry_trigger_id": entry_trigger_id,
                             "exit_category": trigger.category,
                             "exit_trigger_id": trigger.id,
+                            "exit_binding_mode": self.exit_binding_mode,
                         },
                     )
                     continue
@@ -1472,6 +1511,9 @@ class TriggerEngine:
                 "htf_5d_high": "htf_5d_high",
                 "htf_5d_low": "htf_5d_low",
                 "htf_5d_extreme": "htf_5d_high" if direction == "long" else "htf_5d_low",
+                "htf_daily_close": "htf_daily_close",
+                "bollinger_middle": "bollinger_middle",
+                "sma_medium": "sma_medium",
             }
             field_name = htf_field_map.get(anchor)
             if field_name and getattr(indicator, field_name, None) is None:

@@ -316,6 +316,8 @@ class TriggerCondition(SerializableModel):
                     "Long-only (target above entry): 'htf_daily_high', 'htf_5d_high'. "
                     "Short-only (target below entry): 'htf_daily_low', 'htf_5d_low'. "
                     "Direction-auto (family): 'htf_daily_extreme', 'htf_5d_extreme'. "
+                    "Bidirectional mean-reversion levels: 'htf_daily_close', "
+                    "'bollinger_middle', 'sma_medium'. "
                     "Both directions: 'measured_move' (Donchian range height), "
                     "'r_multiple_2' (2R from entry), 'r_multiple_3' (3R from entry). "
                     "Null/absent means no stored target; exits via exit_rule only.",

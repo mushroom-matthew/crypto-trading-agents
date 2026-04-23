@@ -87,7 +87,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       end_date: '2024-01-18',
       initial_cash: 10000,
       strategy: 'llm_strategist',
-      strategy_id: 'aggressive_active',
+      strategy_id: 'scalper_fast',
       // Aggressive risk settings
       max_position_risk_pct: 4.0,
       max_symbol_exposure_pct: 50.0,
@@ -120,7 +120,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       end_date: '2024-01-22',
       initial_cash: 10000,
       strategy: 'llm_strategist',
-      strategy_id: 'aggressive_active',
+      strategy_id: 'scalper_fast',
       // Moderate-aggressive risk settings
       max_position_risk_pct: 3.0,
       max_symbol_exposure_pct: 40.0,
@@ -153,7 +153,7 @@ export const BACKTEST_PRESETS: BacktestPreset[] = [
       end_date: '2024-01-22',
       initial_cash: 10000,
       strategy: 'llm_strategist',
-      strategy_id: 'aggressive_active',
+      strategy_id: 'scalper_fast',
       // 2x leverage via portfolio exposure
       max_position_risk_pct: 3.0,
       max_symbol_exposure_pct: 100.0,

@@ -297,9 +297,9 @@ class BacktestConfig(BaseModel):
         default=None,
         description="Min confidence grade for entry to override exit: 'A', 'B', 'C', or null (default: 'A')"
     )
-    exit_binding_mode: Literal["none", "category"] = Field(
-        default="category",
-        description="Exit binding policy: none (global exits) or category (entry/exit category must match). Emergency exits always allowed."
+    exit_binding_mode: Literal["none", "category", "exact"] = Field(
+        default="exact",
+        description="Exit binding policy: none (global exits), category (entry/exit category must match), or exact (only the originating trigger may exit). Emergency exits always allowed."
     )
     conflicting_signal_policy: Literal["ignore", "exit", "reverse", "defer"] = Field(
         default="reverse",

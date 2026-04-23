@@ -11,15 +11,20 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ops_api.prompt_registry import (
+    PROMPTS_DIR,
+    STRATEGIES_DIR,
+    current_strategist_prompt_path,
+    strategy_template_meta,
+    strategy_template_visible,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
 
 # Prompt file paths
-PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 VERSIONS_DIR = PROMPTS_DIR / "versions"
-STRATEGIES_DIR = PROMPTS_DIR / "strategies"
-STRATEGIST_PROMPT_FILE = PROMPTS_DIR / "llm_strategist_prompt.txt"
 JUDGE_PROMPT_FILE = PROMPTS_DIR / "llm_judge_prompt.txt"
 
 
@@ -61,48 +66,13 @@ class StrategyInfo(BaseModel):
     name: str
     description: str
     file_path: str
+    status: Optional[str] = None
+    visible_in_ui: Optional[bool] = None
 
 
 class StrategiesListResponse(BaseModel):
     """Response model for listing available strategies."""
     strategies: List[StrategyInfo]
-
-
-# Strategy metadata - maps file names to display info
-STRATEGY_METADATA = {
-    "momentum_trend_following": {
-        "name": "Momentum / Trend Following",
-        "description": "Ride strong trends with wide stops, let winners run. Best for trending markets.",
-    },
-    "mean_reversion": {
-        "name": "Mean Reversion",
-        "description": "Buy oversold, sell overbought with quick profits at the mean. Best for ranging markets.",
-    },
-    "volatility_breakout": {
-        "name": "Volatility Breakout",
-        "description": "Trade range expansions and squeeze breakouts. Best after consolidation periods.",
-    },
-    "conservative_defensive": {
-        "name": "Conservative / Defensive",
-        "description": "Capital preservation focus with strict filters and small positions. Lower risk.",
-    },
-    "aggressive_active": {
-        "name": "Aggressive / Active",
-        "description": "Many trades in both directions with higher risk tolerance. Higher potential returns.",
-    },
-    "balanced_hybrid": {
-        "name": "Balanced / Hybrid",
-        "description": "Adapts to market regime with core + tactical positions. Well-rounded approach.",
-    },
-    "compression_breakout": {
-        "name": "Compression Breakout",
-        "description": "Wait for BB bandwidth compression, then trade the expansion breakout with volume confirmation. Ideal for range/consolidation markets.",
-    },
-    "default": {
-        "name": "Default (Current)",
-        "description": "The current strategist prompt with full feature set.",
-    },
-}
 
 
 # Default judge prompt (extracted from judge_agent_client.py)
@@ -202,7 +172,7 @@ def _create_version(prompt_name: str, source_file: Path) -> str:
 def _get_prompt_file(prompt_name: str) -> Path:
     """Get the file path for a prompt name."""
     if prompt_name == "strategist":
-        return STRATEGIST_PROMPT_FILE
+        return current_strategist_prompt_path()
     elif prompt_name == "judge":
         return JUDGE_PROMPT_FILE
     else:
@@ -214,7 +184,7 @@ async def list_prompts() -> PromptListResponse:
     """List available prompts."""
     _ensure_judge_prompt_exists()
     prompts = []
-    if STRATEGIST_PROMPT_FILE.exists():
+    if current_strategist_prompt_path().exists():
         prompts.append("strategist")
     if JUDGE_PROMPT_FILE.exists():
         prompts.append("judge")
@@ -231,13 +201,14 @@ async def get_prompt(prompt_name: str) -> PromptResponse:
     _ensure_judge_prompt_exists()
 
     if prompt_name == "strategist":
-        if not STRATEGIST_PROMPT_FILE.exists():
+        strategist_file = current_strategist_prompt_path()
+        if not strategist_file.exists():
             raise HTTPException(status_code=404, detail="Strategist prompt not found")
-        content = STRATEGIST_PROMPT_FILE.read_text()
+        content = strategist_file.read_text()
         return PromptResponse(
             name="strategist",
             content=content,
-            file_path=str(STRATEGIST_PROMPT_FILE)
+            file_path=str(strategist_file)
         )
     elif prompt_name == "judge":
         if not JUDGE_PROMPT_FILE.exists():
@@ -415,27 +386,34 @@ async def restore_version(prompt_name: str, version_id: str) -> PromptResponse:
 async def list_strategies() -> StrategiesListResponse:
     """List all available strategy templates."""
     strategies = []
+    strategist_file = current_strategist_prompt_path()
 
     # Add default strategy (current prompt)
-    if STRATEGIST_PROMPT_FILE.exists():
-        meta = STRATEGY_METADATA.get("default", {})
+    if strategist_file.exists():
+        meta = strategy_template_meta("default")
         strategies.append(StrategyInfo(
             id="default",
-            name=meta.get("name", "Default"),
-            description=meta.get("description", "Current strategist prompt"),
-            file_path=str(STRATEGIST_PROMPT_FILE)
+            name=meta.name if meta else "Default",
+            description=meta.description if meta else "Current strategist prompt",
+            file_path=str(strategist_file),
+            status=meta.status if meta else None,
+            visible_in_ui=meta.visible_in_ui if meta else True,
         ))
 
     # Add strategies from the strategies directory
     if STRATEGIES_DIR.exists():
         for strategy_file in sorted(STRATEGIES_DIR.glob("*.txt")):
             strategy_id = strategy_file.stem  # filename without extension
-            meta = STRATEGY_METADATA.get(strategy_id, {})
+            if not strategy_template_visible(strategy_id):
+                continue
+            meta = strategy_template_meta(strategy_id)
             strategies.append(StrategyInfo(
                 id=strategy_id,
-                name=meta.get("name", strategy_id.replace("_", " ").title()),
-                description=meta.get("description", f"Strategy template: {strategy_id}"),
-                file_path=str(strategy_file)
+                name=meta.name if meta else strategy_id.replace("_", " ").title(),
+                description=meta.description if meta else f"Strategy template: {strategy_id}",
+                file_path=str(strategy_file),
+                status=meta.status if meta else None,
+                visible_in_ui=meta.visible_in_ui if meta else True,
             ))
 
     return StrategiesListResponse(strategies=strategies)
@@ -449,13 +427,14 @@ async def get_strategy(strategy_id: str) -> PromptResponse:
         strategy_id: Strategy identifier (e.g., 'default', 'momentum_trend_following')
     """
     if strategy_id == "default":
-        if not STRATEGIST_PROMPT_FILE.exists():
+        strategist_file = current_strategist_prompt_path()
+        if not strategist_file.exists():
             raise HTTPException(status_code=404, detail="Default strategy not found")
-        content = STRATEGIST_PROMPT_FILE.read_text()
+        content = strategist_file.read_text()
         return PromptResponse(
             name="default",
             content=content,
-            file_path=str(STRATEGIST_PROMPT_FILE)
+            file_path=str(strategist_file)
         )
 
     strategy_file = STRATEGIES_DIR / f"{strategy_id}.txt"
@@ -466,10 +445,10 @@ async def get_strategy(strategy_id: str) -> PromptResponse:
         )
 
     content = strategy_file.read_text()
-    meta = STRATEGY_METADATA.get(strategy_id, {})
+    meta = strategy_template_meta(strategy_id)
 
     return PromptResponse(
-        name=meta.get("name", strategy_id),
+        name=meta.name if meta else strategy_id,
         content=content,
         file_path=str(strategy_file)
     )

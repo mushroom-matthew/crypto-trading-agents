@@ -64,7 +64,7 @@ export interface BacktestConfig {
   min_hold_hours?: number;
   min_flat_hours?: number;
   confidence_override_threshold?: string | null;
-  exit_binding_mode?: 'none' | 'category';
+  exit_binding_mode?: 'none' | 'category' | 'exact';
   conflicting_signal_policy?: 'ignore' | 'exit' | 'reverse' | 'defer';
 
   // Execution Gating
@@ -737,7 +737,7 @@ export interface PaperTradingSessionConfig {
   min_hold_hours?: number;
   min_flat_hours?: number;
   confidence_override_threshold?: string | null;
-  exit_binding_mode?: 'none' | 'category';
+  exit_binding_mode?: 'none' | 'category' | 'exact';
   conflicting_signal_policy?: 'ignore' | 'exit' | 'reverse' | 'defer';
 
   // Execution Gating
@@ -977,6 +977,12 @@ export interface PaperTradingTradeSet {
   entry_trigger: string | null;
   exit_trigger: string | null;
   category: string | null;
+  entry_timeframe?: string | null;
+  exit_timeframe?: string | null;
+  entry_rule?: string | null;
+  planned_exit_rule?: string | null;
+  executed_exit_rule?: string | null;
+  hold_rule?: string | null;
   winner: boolean;
   // Risk / R-tracking
   stop_price_abs?: number | null;

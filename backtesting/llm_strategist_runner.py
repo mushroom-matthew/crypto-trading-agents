@@ -290,6 +290,7 @@ def _resolve_target_price_anchored(
       Long-only:  htf_daily_high, htf_5d_high
       Short-only: htf_daily_low, htf_5d_low
       Both (auto-select): htf_daily_extreme, htf_5d_extreme
+      Both (mean-reversion levels): htf_daily_close, bollinger_middle, sma_medium
       Both (computed):    measured_move, r_multiple_2, r_multiple_3
     """
     anchor = getattr(trigger, "target_anchor_type", None)
@@ -354,6 +355,21 @@ def _resolve_target_price_anchored(
             if level:
                 price = level * 1.002
                 return _cap_target_price_to_structure(price, fill_price, snapshot, direction), "htf_5d_extreme"
+
+    elif anchor == "htf_daily_close":
+        level = getattr(snapshot, "htf_daily_close", None)
+        if level:
+            return _cap_target_price_to_structure(level, fill_price, snapshot, direction), "htf_daily_close"
+
+    elif anchor == "bollinger_middle":
+        level = getattr(snapshot, "bollinger_middle", None)
+        if level:
+            return _cap_target_price_to_structure(level, fill_price, snapshot, direction), "bollinger_middle"
+
+    elif anchor == "sma_medium":
+        level = getattr(snapshot, "sma_medium", None)
+        if level:
+            return _cap_target_price_to_structure(level, fill_price, snapshot, direction), "sma_medium"
 
     # Direction-aware computed targets --------------------------------------
     elif anchor == "measured_move":
@@ -1045,7 +1061,7 @@ class LLMStrategistBacktester:
         judge_check_after_trades: int = 3,  # Check judge after this many trades
         replan_on_day_boundary: bool = True,
         use_judge_shim: bool = False,
-        exit_binding_mode: ExitBindingMode = "category",
+        exit_binding_mode: ExitBindingMode = "exact",
         conflicting_signal_policy: ConflictResolution = "reverse",
         execution_settings: ExecutionModelSettings | None = None,
         trade_mgmt_config: "TradeManagementConfig | None" = None,

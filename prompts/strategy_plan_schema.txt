@@ -243,6 +243,11 @@ LEVEL-ANCHORED STOP/TARGET FIELDS (Runbook 42):
       'htf_daily_low'  — 0.2% above prior session low (shorts only)
       'htf_5d_low'     — 0.2% above 5-day rolling low (shorts only)
 
+    Mean-reversion anchors (both directions):
+      'htf_daily_close'  — prior completed daily close
+      'bollinger_middle' — Bollinger midpoint
+      'sma_medium'       — medium simple moving average
+
     Fallback computed (use ONLY when structural anchors are unavailable):
       'measured_move' — Donchian range height projected from entry
       'r_multiple_2'  — 2R from entry (arithmetic, not structural)
