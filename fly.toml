@@ -35,7 +35,7 @@ primary_region = "iad"
   auto_start_machines = false
 
 [[vm]]
-  size   = "performance-cpu-1x"
+  size   = "performance-1x"
   memory = "2gb"
 
 [deploy]
