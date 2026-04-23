@@ -35,8 +35,8 @@ primary_region = "iad"
   auto_start_machines = false
 
 [[vm]]
-  size   = "shared-cpu-1x"
-  memory = "1gb"
+  size   = "performance-cpu-1x"
+  memory = "2gb"
 
 [deploy]
   strategy = "immediate"
