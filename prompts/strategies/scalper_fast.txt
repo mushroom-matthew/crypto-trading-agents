@@ -55,10 +55,11 @@ Trigger Composition Requirements:
 
 VALID entry_rule EXPRESSION EXAMPLES:
 NOTE: Use fast indicators (ema_fast, ema_very_fast, ewma_vol, vwap, vol_burst) instead of standard slow indicators.
-- entry_rule = "vwap_distance_pct < -0.8 and ema_fast > ema_very_fast and position == 'flat'"
-- entry_rule = "close > donchian_upper_short and vol_burst == true and ema_fast > ema_very_fast and position == 'flat'"
-- entry_rule = "vwap_distance_pct > 0.8 and ema_fast < ema_very_fast and position == 'flat'"
-- entry_rule = "close < bollinger_lower and vwap_distance_pct < -1.0 and ewma_vol < realized_vol_fast * 1.5 and position == 'flat'"
+NOTE: Use `is_flat` (boolean) for fresh-entry guard — NOT `position == 'flat'`.
+- entry_rule = "is_flat and vwap_distance_pct < -0.8 and ema_fast > ema_very_fast"
+- entry_rule = "is_flat and close > donchian_upper_short and vol_burst == true and ema_fast > ema_very_fast"
+- entry_rule = "is_flat and vwap_distance_pct > 0.8 and ema_fast < ema_very_fast"
+- entry_rule = "is_flat and close < bollinger_lower and vwap_distance_pct < -1.0 and ewma_vol < realized_vol_fast * 1.5"
 
 VALID exit_rule EXPRESSION EXAMPLES:
 - exit_rule = "vwap_distance_pct > 0.3 or ema_fast < ema_very_fast"

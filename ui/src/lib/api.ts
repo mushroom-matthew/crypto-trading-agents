@@ -624,6 +624,8 @@ export interface StrategyInfo {
   name: string;
   description: string;
   file_path: string;
+  status?: string;
+  visible_in_ui?: boolean;
 }
 
 export interface StrategiesListResponse {

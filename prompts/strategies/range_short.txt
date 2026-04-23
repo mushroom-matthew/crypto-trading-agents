@@ -4,7 +4,7 @@ DIRECTION: SHORT (mean reversion from resistance / sell). All entry triggers mus
 
 STRATEGY PHILOSOPHY: RANGE RESISTANCE FADE
 - Primary thesis: Sideways market with price at upper band — sell into resistance, target the mean.
-- price_position_in_range >= 0.70 confirms price is at range resistance.
+- close > bollinger_upper confirms price is at range resistance.
 - This is a mean-reversion trade, NOT a trend trade. Target is the range midpoint (bollinger_middle or sma_medium).
 - Stop: Tight — 0.5× ATR above entry. Resistance invalidation is clear and swift.
 - Target: bollinger_middle or sma_medium. REQUIRED — every entry trigger must declare target_anchor_type or target_price_abs.
@@ -13,9 +13,8 @@ STRATEGY PHILOSOPHY: RANGE RESISTANCE FADE
 SETUP CONDITIONS:
 - trend_state == "range" (sideways regime confirmed)
 - vol_state not "extreme" (extreme vol invalidates range trades)
-- close > bollinger_upper (price at upper band)
+- close > bollinger_upper (price at upper band — confirms resistance proximity)
 - rsi_14 > 62 (overbought confirmation)
-- price_position_in_range >= 0.70
 
 TRIGGER CONDITIONS (short only):
 - close > bollinger_upper

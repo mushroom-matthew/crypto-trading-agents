@@ -4,7 +4,7 @@ DIRECTION: LONG (mean reversion from support / buy). All entry triggers must be 
 
 STRATEGY PHILOSOPHY: RANGE SUPPORT BOUNCE
 - Primary thesis: Sideways market with price at lower band — buy into support, target the mean.
-- price_position_in_range <= 0.30 confirms price is at range support.
+- close < bollinger_lower confirms price is at range support.
 - This is a mean-reversion trade, NOT a trend trade. Target is the range midpoint (bollinger_middle or sma_medium).
 - Stop: Tight — 0.5× ATR below entry. Support invalidation is clear and swift.
 - Target: bollinger_middle or sma_medium. REQUIRED — every entry trigger must declare target_anchor_type or target_price_abs.
@@ -13,9 +13,8 @@ STRATEGY PHILOSOPHY: RANGE SUPPORT BOUNCE
 SETUP CONDITIONS:
 - trend_state == "range" (sideways regime confirmed)
 - vol_state not "extreme" (extreme vol invalidates range trades)
-- close < bollinger_lower (price at lower band)
+- close < bollinger_lower (price at lower band — confirms support proximity)
 - rsi_14 < 38 (oversold confirmation)
-- price_position_in_range <= 0.30
 
 TRIGGER CONDITIONS (long only):
 - close < bollinger_lower
