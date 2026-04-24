@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, Iterable, List
 
 from schemas.llm_strategist import LLMInput
@@ -40,9 +39,10 @@ def build_prompt_context(llm_input: LLMInput) -> str:
     if timeframes_str:
         sections.append(f"AVAILABLE_TIMEFRAMES:\n{timeframes_str}")
 
+    # LLM_STRATEGIST_PROMPT env var is handled by plan_provider._resolve_prompt_template()
+    # and injected as prompt_template into _build_system_prompt. Do NOT also read it here
+    # — that would produce two STRATEGY_GUIDANCE blocks when the env var is set.
     strategy_guidance = _stringify(ctx.get("strategy_guidance") or ctx.get("strategy_profile"))
-    if not strategy_guidance:
-        strategy_guidance = _stringify(os.environ.get("LLM_STRATEGIST_PROMPT"))
     if strategy_guidance:
         sections.append(_section("STRATEGY_GUIDANCE", strategy_guidance) or "")
 

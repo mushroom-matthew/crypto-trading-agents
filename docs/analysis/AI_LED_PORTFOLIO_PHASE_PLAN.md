@@ -1,6 +1,6 @@
 # AI-Led Portfolio — Full Phase Plan
 
-_Last updated: 2026-03-13. Supersedes runbook order in `AI_LED_PORTFOLIO_SESSION_PLAN_V0.md`._
+_Last updated: 2026-04-24. Supersedes runbook order in `AI_LED_PORTFOLIO_SESSION_PLAN_V0.md`._
 
 ---
 
@@ -8,14 +8,43 @@ _Last updated: 2026-03-13. Supersedes runbook order in `AI_LED_PORTFOLIO_SESSION
 
 | Phase | Runbooks | Status |
 |-------|----------|--------|
-| 0 — Instrumentation & invariants | R69–R73 | ✅ Implemented — controlled re-run pending |
-| 1 — Opportunity scanner | R74, R75 | ✅ Implemented (2026-03-13) |
-| 2 — AI portfolio planner | R76 | Not started |
-| 3a — Round-trip hypothesis model | R78 | ✅ Implemented (2026-03-13) |
-| 3b — Hypothesis synthesis + cadence | R77 (reframed) | Not started |
-| 4 — Hypothesis feedback loop | R79 | Not started |
+| 0 — Instrumentation & invariants | R69–R73 | ✅ Complete |
+| 1 — Opportunity scanner | R74, R75 | ✅ Complete (2026-03-13) |
+| 2 — AI portfolio planner | R76 | ✅ Complete — SessionIntent + use_ai_planner wired |
+| 3a — Round-trip hypothesis model | R78 | ✅ Complete (2026-03-13) |
+| 3b — Hypothesis synthesis + cadence | R77 | ✅ Complete — CadenceGovernor wired |
+| 4 — Hypothesis feedback loop | R79 | ✅ Complete — attribution + playbook evidence |
+| 4+ — Trailing stops + risk management | R80–R85 | ✅ Complete (5 trailing modes, CaN size fix) |
+| **5 — Prompt hygiene** | Audit phases 1–4 | **Next up** |
+| **6 — SOTA foundation** | R88, R90 | Queued — depends on Phase 5 |
+| **7 — Memory closure** | R91, R93, R97 | Queued — depends on Phase 6 |
+| **8 — Generation quality** | R89, R92 | Queued — expensive; validate Phase 6/7 first |
+| **9 — Operational improvements** | R94, R95 | Queued — can run parallel with Phase 8 |
+| **10 — Trigger architecture** | R96 | Queued — highest architectural lift; last |
 
-**Dependency order (revised):**
+**Dependency order (full, revised):**
+```
+[Phases 0–4+: ✅ Complete]
+       ↓
+  Phase 5 (prompt hygiene — prerequisite for all prompt-touching work)
+       ↓
+  Phase 6: R88 (scratchpad) + R90 (hallucination scorer)
+       ↓
+  Phase 7: R91 (reflexion) + R93 (uncertainty) + R97 (logprob)
+       ↓
+  Phase 8: R89 (best-of-N) ─── R92 (debate)          Phase 9: R94 ─── R95 (parallel with Phase 8)
+       ↓
+  Phase 10: R96 (trigger catalog — depends on all prior prompt/plan stability)
+```
+
+**Companion workstream:**
+`docs/analysis/TRADE_LIFECYCLE_REPLAY_ALIGNMENT_PLAN.md` is a cross-cutting
+support track for lifecycle identity, replay, and pattern retrieval. It does
+not change the phase order above. It starts after Phase 5 prompt hygiene, then
+supports Phase 7 memory closure, Phase 9 operator transparency, and Phase 10
+trigger architecture.
+
+**Legacy dependency order (Phases 0–4, for reference):**
 ```
 [Phase 0 re-run gate]
        ↓
@@ -627,3 +656,219 @@ even for minimal/fallback snapshots.
 | Dead sessions (zero actionable triggers) | < 5% of sessions |
 | `rr_ratio` on all opened hypotheses | ≥ 1.2 (enforced by compiler) |
 | Attribution coverage | 100% of round trips have attribution tags |
+| Schema pass rate by prompt template (Phase 5) | Tracked and improving |
+| Hallucination findings per plan (Phase 6) | < 1 REVISE finding per 10 plans |
+| Judge approval rate (Phase 7) | Within 10% of target base rate |
+
+---
+
+## Phase 5 — Prompt Hygiene
+
+*Source: `docs/analysis/PROMPT_AUDIT_2026-04-23.md`*
+*Prerequisite for: Phase 6 (scratchpad, hallucination scorer) — you want the prompt surface clean before adding new sections to it.*
+
+### 5.1 — Clean Up the Live Path (immediate)
+
+Three changes, no new features:
+
+1. **Re-point prompt API to runtime default.** `ops_api/routers/prompts.py` currently exposes `prompts/llm_strategist_prompt.txt` as the editable strategist prompt, but `llm_client.py` defaults to `prompts/llm_strategist_simple.txt`. Align them — make the ops API serve and accept `llm_strategist_simple.txt`.
+
+2. **Collapse duplicate schema files.** `strategy_plan_schema.txt` and `strategy_plan_schema_core.txt` are currently identical. Delete `strategy_plan_schema.txt` and make `STRATEGIST_SCHEMA_MODE` env var point to `strategy_plan_schema_core.txt` in both branches. Remove the dead `verbose` branch.
+
+3. **Remove duplicate `STRATEGY_GUIDANCE` injection.** `prompt_builder.py` can append guidance that `llm_client.py` also appends from `LLM_STRATEGIST_PROMPT`. Consolidate to one path; `prompt_builder.py` is the canonical appender; `llm_client.py` delegates.
+
+### 5.2 — Prune the Template Surface
+
+1. Gate these templates behind `PROMPT_ENABLE_BROAD_ARCHETYPE_TEMPLATES=false` (default off):
+   - `aggressive_active`, `balanced_hybrid`, `mean_reversion`, `momentum_trend_following`, `volatility_breakout`
+2. Update `ui/src/lib/presets.ts` fast-timeframe presets to use `scalper_fast` not `aggressive_active`.
+3. Gate directional breakout variants behind `PROMPT_ENABLE_DIRECTIONAL_BREAKOUT_TEMPLATES=false` until stale identifiers are fixed (Phase 5.3).
+
+**Prompt registry manifest** — introduce `prompts/registry.yaml` with metadata per prompt/template:
+
+```yaml
+- id: llm_strategist_simple
+  kind: strategist_base
+  status: active
+  enabled_by_default: true
+  visible_in_ui: true
+
+- id: scalper_fast
+  kind: template
+  status: active
+  enabled_by_default: true
+  visible_in_ui: true
+
+- id: aggressive_active
+  kind: template
+  status: legacy
+  enabled_by_default: false
+  visible_in_ui: false
+  flag: PROMPT_ENABLE_BROAD_ARCHETYPE_TEMPLATES
+```
+
+The ops API and UI both read this manifest for the allowed template list.
+
+### 5.3 — Strengthen the Surviving Prompts
+
+Rewrite three templates against the current allowed-identifier contract:
+
+1. **`scalper_fast`** — tighten to fast-timeframe realism; explicit VWAP/mid-band/SMA mean targets; remove generic breakout language; update `position == 'flat'` → `is_flat`.
+
+2. **`range_long` + `range_short`** — valid allowed identifiers only; explicit invalidation behavior; target toward `bollinger_middle` and `sma_medium`; remove `price_position_in_range` references.
+
+3. **One breakout family** — choose `compression_breakout_long/short`, fix stale identifiers, re-enable; archive the others until needed.
+
+### 5.4 — Add Prompt Evaluation Telemetry
+
+Track per-prompt-template:
+- Schema pass rate
+- Validation pass rate (judge approval)
+- Blocked-trigger rate
+- Empty-plan rate
+- Stand-down rate
+- Realized R multiple (when trades close)
+
+Emit `prompt_cohort_id` (hash of prompt template name + version) on every `plan_generated` event. The ops API aggregates by cohort for comparison dashboards.
+
+**Exit criteria for Phase 5:**
+- Prompt API edits land in the actual runtime default
+- UI shows only first-class templates by default
+- `cmp strategy_plan_schema.txt strategy_plan_schema_core.txt` shows a diff (one is canonical, one is deleted)
+- `prompt_cohort_id` present on `plan_generated` events
+
+---
+
+## Phase 6 — SOTA Foundation
+
+*Source: `docs/analysis/AGENTIC_SOTA_ALIGNMENT_PLAN.md` — Runbooks R88, R90*
+*Prerequisite for: Phases 7, 8, 9, 10.*
+
+### R88 — Strategist Chain-of-Thought Scratchpad
+
+Add a `<reasoning>…</reasoning>` block to the LLM response before the JSON plan. The scratchpad is a short (4–8 sentence) derivation covering regime rationale, playbook selection, and primary risk. The judge gate stores it for downstream hallucination checking and reflexion memory.
+
+**Key files:** `prompts/llm_strategist_simple.txt`, `agents/strategies/llm_client.py::_extract_plan_json()`, `agents/strategies/plan_provider.py`, `schemas/llm_strategist.py` (add `scratchpad: str | None`).
+
+**Exit criteria:** `plan_generated` events contain non-empty `scratchpad_text`.
+
+### R90 — Trading-Domain Hallucination Taxonomy + Section Scorer
+
+Deterministic fine-grained hallucination scorer covering all six FG-PRM types adapted to the trading domain. Runs as Layer 0 before the 5-layer judge gate at zero additional LLM cost.
+
+| Type | Check |
+|---|---|
+| Context Inconsistency | `plan.regime` conflicts with majority-vote regime from `LLMInput.assets` |
+| Logical Inconsistency | Opposite-direction triggers on same symbol without mutually exclusive entry conditions |
+| Instruction Inconsistency | Trigger category ∈ `judge_constraints.disabled_categories` |
+| Calculation Error | `stop_loss_pct` outside allowed band or R:R below floor |
+| Factual Inconsistency | `plan.allowed_symbols` contains symbol not in `LLMInput.assets` |
+| Fabrication | `plan.playbook_id` not in `PlaybookRegistry` |
+
+**Key files:** `services/plan_hallucination_scorer.py` (new), `schemas/judge_feedback.py`, `services/judge_validation_service.py`.
+
+**Exit criteria:** Unit tests cover all 6 types; REJECT findings propagate to structural_violation.
+
+---
+
+## Phase 7 — Memory Closure
+
+*Source: `docs/analysis/AGENTIC_SOTA_ALIGNMENT_PLAN.md` — Runbooks R91, R93, R97*
+*Depends on: Phase 6 (scratchpad required for reflexion; hallucination scorer required for logprob integration).*
+*Companion support track: `docs/analysis/TRADE_LIFECYCLE_REPLAY_ALIGNMENT_PLAN.md`
+— use lifecycle identity + replay packs to improve loser/winner episode linkage
+before broadening retrieval scope.*
+
+### R91 — Reflexion Memory: Structured Self-Critique Persistence
+
+When a position closes, synthesise a `PlanReflexionSummary` from the scratchpad, revision history, and outcome. Persist as a new memory record type. Inject top-3 reflexion summaries from loser episodes into future strategist prompts as `## Lessons from Similar Episodes`.
+
+**Key files:** `schemas/episode_memory.py`, `services/episode_memory_service.py`, `services/memory_retrieval_service.py`, `agents/strategies/llm_client.py`.
+
+### R93 — Per-Field Uncertainty Quantification
+
+Extend scratchpad to include a `confidence_map` JSON (`{"regime": 0.0–1.0, "stance": 0.0–1.0, "allowed_directions": 0.0–1.0}`). Cross-reference LLM-stated confidence with cluster win-rate from memory bundle. Scale `risk_multiplier` down proportionally to mean field uncertainty.
+
+**Key files:** `prompts/llm_strategist_simple.txt`, `agents/strategies/llm_client.py`, `services/plan_hallucination_scorer.py`, `services/judge_feedback_service.py`.
+
+### R97 — Logprob-Based Token-Level Uncertainty Extraction
+
+Enable `logprobs=True` on the strategist LLM call. Extract mean log-probability per token for `regime`, `stop_loss_pct`, and `target_pct`. Threshold < −1.5 mean logprob → `Factual Inconsistency` finding. Feeds into `PlanHallucinationReport` (R90) and `FieldUncertaintyScore` (R93) as a zero-training hardware-level cross-check.
+
+**Key files:** `agents/strategies/llm_client.py`, `services/logprob_extractor.py` (new), `services/plan_hallucination_scorer.py`.
+
+**Exit criteria for Phase 7:** Losing trade produces non-empty `## Lessons from Similar Episodes` in next plan; `field_logprobs` present on `plan_generated` event; `risk_multiplier` scales below 1.0 on low-confidence plans.
+
+---
+
+## Phase 8 — Generation Quality
+
+*Source: `docs/analysis/AGENTIC_SOTA_ALIGNMENT_PLAN.md` — Runbooks R89, R92*
+*Depends on: Phase 6/7 (need hallucination scorer and uncertainty scores to rank candidates).*
+*Cost: ~2–4× LLM calls per policy loop. Gate behind env vars; validate Phase 6/7 value first.*
+
+### R89 — Multi-Candidate Plan Generation + Best-of-N Selection
+
+Generate N=3 candidate plans per policy loop (temperatures 0.10/0.15/0.20). Score each with `JudgePlanValidationService`. Select highest-confidence approved plan.
+
+Gate: `STRATEGIST_BEST_OF_N=1` (default). Set to `3` to enable.
+
+### R92 — Challenger Debate Pass (Two-Hypothesis Deliberation)
+
+After primary plan, generate one challenger plan arguing the opposite or defensive stance. Run both through hallucination scorer. If challenger scores equally or higher, escalate approval threshold.
+
+Gate: `STRATEGIST_DEBATE=false` (default).
+
+**Note (open question):** "argue opposite stance" can produce degenerate flat/null plans that trivially win on hallucination score. Prompt engineering for meaningful contrasting hypotheses is required before enabling in production.
+
+---
+
+## Phase 9 — Operational Improvements
+
+*Source: `docs/analysis/AGENTIC_SOTA_ALIGNMENT_PLAN.md` — Runbooks R94, R95*
+*Can run in parallel with Phase 8.*
+
+### R94 — Proactive Intra-Session Goal Reformulation
+
+Extend `CadenceGovernor` to detect regime drift mid-session (cosine similarity of fingerprints). On drift signal during non-`THESIS_ARMED` state, trigger lightweight `SessionIntent` refresh without a full strategist plan cycle.
+
+### R95 — FG-PRM-Style Aggregate Confidence Score + Operator Transparency Surface
+
+Aggregate per-section hallucination scores + field uncertainty into a single `PlanConfidenceScore` (log-sum of non-hallucination probabilities, following FG-PRM's R_Φ formula). Expose via `GET /plan-audit/{plan_id}` — returns scratchpad, hallucination report, deliberation verdict, confidence score, revision history.
+
+The companion lifecycle/replay workstream should provide the operator-facing
+link from `plan_id` to executed `trade_set_id` lifecycles so `plan-audit`
+surfaces can show not just a plan verdict, but the concrete entries/exits and
+replay artifacts derived from that plan.
+
+---
+
+## Phase 10 — Trigger Architecture
+
+*Source: `docs/analysis/AGENTIC_SOTA_ALIGNMENT_PLAN.md` — Runbook R96*
+*Depends on: all prior phases (requires stable prompt surface and validated plan quality before changing the trigger model).*
+*Architectural lift: highest of all phases. Implement last.*
+*Companion support track: `docs/analysis/TRADE_LIFECYCLE_REPLAY_ALIGNMENT_PLAN.md`
+— use lifecycle identity and replay packs as the acceptance harness for trigger
+catalog + registry continuity across replans.*
+
+### R96 — Canonical Trigger Catalog + Incremental Trigger Registry
+
+Replace free-form trigger list generation with:
+1. A **canonical trigger catalog** — 9 pre-defined archetypes with stable IDs (`mean_reversion_long`, `breakout_long`, `momentum_long`, `emergency_exit`, etc.)
+2. A **stateful `TriggerRegistry`** — the LLM outputs a diff (`triggers_to_add`, `triggers_to_remove`, `triggers_to_modify`) not a full replacement
+3. **`PolicyStateMachine` guard** — in `POSITION_OPEN`, exit trigger removal is blocked
+
+This closes the gap where accumulated thesis confidence evaporates on every replan, and prevents the LLM's tendency to recompose slightly different phrasings of the same trigger that defeat deduplication and audit trails.
+
+**Exit criteria:** Open position survives a mid-session replan without losing its stop/exit trigger binding; registry state serialises deterministically for Temporal CaN.
+
+---
+
+## Reference Documents
+
+| Document | Contents |
+|---|---|
+| `docs/analysis/PROMPT_AUDIT_2026-04-23.md` | Full prompt inventory, findings, and execution order for Phase 5 |
+| `docs/analysis/AGENTIC_SOTA_ALIGNMENT_PLAN.md` | Gap analysis, FG-PRM/LLM-as-a-Judge integration, and full R88–R97 runbook specs |
+| `docs/analysis/TRADE_LIFECYCLE_REPLAY_ALIGNMENT_PLAN.md` | Companion workstream for lifecycle identity, replay packs, and pattern retrieval supporting R91, R95, and R96 |

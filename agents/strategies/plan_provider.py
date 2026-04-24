@@ -331,6 +331,7 @@ class StrategyPlanProvider:
             self._emit_plan_generated(
                 plan, llm_input, run_id, event_ts=emit_ts,
                 policy_snapshot=policy_snapshot,
+                prompt_meta=metadata,
             )
         return plan
 
@@ -561,6 +562,7 @@ class StrategyPlanProvider:
         *,
         event_ts: datetime | None = None,
         policy_snapshot: "PolicySnapshot | None" = None,
+        prompt_meta: dict | None = None,
     ) -> None:
         try:
             trigger_summary = [
@@ -592,6 +594,9 @@ class StrategyPlanProvider:
                 "source": (self.last_generation_info or {}).get("source"),
                 "retrieved_template_id": (self.last_generation_info or {}).get("retrieved_template_id"),
                 "llm_meta": self.last_generation_info,
+                # Phase 5.4 prompt cohort telemetry
+                "prompt_cohort_id": (prompt_meta or {}).get("prompt_template_id"),
+                "prompt_cohort_hash": (prompt_meta or {}).get("prompt_template_hash"),
                 # R49 snapshot provenance
                 "snapshot_id": policy_snapshot.provenance.snapshot_id if policy_snapshot else None,
                 "snapshot_hash": policy_snapshot.provenance.snapshot_hash if policy_snapshot else None,
