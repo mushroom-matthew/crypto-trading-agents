@@ -597,6 +597,9 @@ class StrategyPlanProvider:
                 # Phase 5.4 prompt cohort telemetry
                 "prompt_cohort_id": (prompt_meta or {}).get("prompt_template_id"),
                 "prompt_cohort_hash": (prompt_meta or {}).get("prompt_template_hash"),
+                # R88 scratchpad + R93 confidence map
+                "scratchpad_text": (self.last_generation_info or {}).get("scratchpad_text"),
+                "confidence_map": (self.last_generation_info or {}).get("confidence_map"),
                 # R49 snapshot provenance
                 "snapshot_id": policy_snapshot.provenance.snapshot_id if policy_snapshot else None,
                 "snapshot_hash": policy_snapshot.provenance.snapshot_hash if policy_snapshot else None,

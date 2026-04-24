@@ -51,6 +51,17 @@ Stance guidance:
 - defensive: Reduced exposure — fewer triggers (3-4), A-grade only, halved target_risk_pct in sizing_rules, no speculative categories (reversal, volatility_breakout). Include risk_reduce/risk_off exits but remove aggressive entries.
 - wait: No triggers — market conditions unfavorable, unclear signals
 
+OUTPUT FORMAT:
+Before the JSON plan, output a brief reasoning block:
+
+<reasoning>
+4-6 sentences covering: (1) which indicator signals drove the regime classification, (2) which playbook or template was selected and why, (3) the primary risk or uncertainty in this setup. Then on its own line:
+confidence_map: {"regime": 0.0-1.0, "stance": 0.0-1.0, "allowed_directions": 0.0-1.0}
+(1.0 = very confident, 0.0 = highly uncertain)
+</reasoning>
+
+Then output the JSON plan on the next line.
+
 Example wait response:
 {
   "generated_at": "2024-06-01T00:00:00Z",

@@ -285,8 +285,14 @@ class LLMClient:
                     raw_output = content
                     if span:
                         span.end(output=content)
-                    plan_dict = self._extract_plan_json(content)
+                    scratchpad_text, confidence_map, cleaned_content = self._extract_scratchpad(content)
+                    plan_dict = self._extract_plan_json(cleaned_content)
                     plan_dict = self._sanitize_plan_dict(plan_dict)
+                    # R88: persist scratchpad and confidence_map onto the plan dict
+                    if scratchpad_text:
+                        plan_dict.setdefault("scratchpad", scratchpad_text)
+                    if confidence_map:
+                        plan_dict.setdefault("field_uncertainty", confidence_map)
                     plan = StrategyPlan.model_validate(plan_dict)
                     duration_ms = int((time.monotonic() - start_time) * 1000)
                     self.last_generation_info = {
@@ -297,6 +303,8 @@ class LLMClient:
                         "raw_output": raw_output,
                         "prompt_hash": input_hash,
                         "retrieved_template_id": retrieved_template_id,
+                        "scratchpad_text": scratchpad_text,
+                        "confidence_map": confidence_map,
                     }
                     _emit_llm_event(
                         {
@@ -348,6 +356,30 @@ class LLMClient:
             }
         )
         return plan
+
+    @staticmethod
+    def _extract_scratchpad(content: str) -> tuple[str | None, dict | None, str]:
+        """Extract <reasoning>…</reasoning> block from LLM output.
+
+        Returns (scratchpad_text, confidence_map, cleaned_content) where
+        cleaned_content has the block removed so JSON extraction still works.
+        """
+        import re
+        match = re.search(r"<reasoning>(.*?)</reasoning>", content, re.DOTALL | re.IGNORECASE)
+        if not match:
+            return None, None, content
+        scratchpad_text = match.group(1).strip()
+        cleaned = content[: match.start()] + content[match.end() :]
+        confidence_map: dict | None = None
+        cm_match = re.search(
+            r"confidence_map\s*:\s*(\{[^}]+\})", scratchpad_text, re.IGNORECASE
+        )
+        if cm_match:
+            try:
+                confidence_map = json.loads(cm_match.group(1))
+            except Exception:
+                pass
+        return scratchpad_text, confidence_map, cleaned.strip()
 
     def _extract_plan_json(self, content: str) -> Dict[str, Any]:
         """Strip fences/prose and return parsed JSON with light validation."""

@@ -474,6 +474,10 @@ class StrategyPlan(SerializableModel):
     regime_alerts: List[RegimeAlert] = Field(default_factory=list)
     sizing_hints: List[SizingHint] = Field(default_factory=list)
     rationale: str | None = None
+    # R88: chain-of-thought scratchpad (extracted from <reasoning>…</reasoning> block)
+    scratchpad: str | None = None
+    # R93: per-field LLM-stated confidence (parsed from confidence_map in scratchpad)
+    field_uncertainty: dict[str, float] | None = None
     max_trades_per_day: int | None = Field(default=None, ge=0)
     min_trades_per_day: int | None = Field(default=None, ge=0)
     max_triggers_per_symbol_per_day: int | None = Field(default=None, ge=0)
