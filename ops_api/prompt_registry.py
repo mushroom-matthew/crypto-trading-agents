@@ -52,16 +52,12 @@ STRATEGY_TEMPLATES: dict[str, StrategyTemplateMeta] = {
     "compression_breakout_long": StrategyTemplateMeta(
         id="compression_breakout_long",
         name="Compression Breakout Long",
-        description="Directional long breakout template. Hidden until refreshed against the current schema.",
-        status="flagged",
-        visible_in_ui=False,
+        description="Long breakout from compression range. Entry on Donchian upper breach with vol confirmation.",
     ),
     "compression_breakout_short": StrategyTemplateMeta(
         id="compression_breakout_short",
         name="Compression Breakout Short",
-        description="Directional short breakout template. Hidden until refreshed against the current schema.",
-        status="flagged",
-        visible_in_ui=False,
+        description="Short breakdown from compression range. Entry on Donchian lower breach with vol confirmation.",
     ),
     "conservative_defensive": StrategyTemplateMeta(
         id="conservative_defensive",
