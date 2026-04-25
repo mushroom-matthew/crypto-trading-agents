@@ -600,6 +600,13 @@ class StrategyPlanProvider:
                 # R88 scratchpad + R93 confidence map
                 "scratchpad_text": (self.last_generation_info or {}).get("scratchpad_text"),
                 "confidence_map": (self.last_generation_info or {}).get("confidence_map"),
+                # R90 hallucination report (attached to plan by judge_validation_service)
+                "hallucination_findings": [
+                    {"section": f.section_id, "type": f.hallucination_type,
+                     "severity": f.severity, "detail": f.detail}
+                    for f in (getattr(plan, "_hallucination_report", None) or
+                               type("R", (), {"findings": []})()).findings
+                ],
                 # R49 snapshot provenance
                 "snapshot_id": policy_snapshot.provenance.snapshot_id if policy_snapshot else None,
                 "snapshot_hash": policy_snapshot.provenance.snapshot_hash if policy_snapshot else None,

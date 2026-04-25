@@ -376,12 +376,44 @@ class JudgePlanValidationService:
         # Proposal context
         stated_conviction: Optional[str] = None,
         revision_count: int = 0,
+        # R90: hallucination scorer inputs (optional — scorer silently skips checks it can't run)
+        llm_input=None,
+        judge_constraints=None,
+        risk_params: Optional[dict] = None,
     ) -> JudgeValidationVerdict:
         """Run layered validation and return a typed verdict.
 
         All checks are deterministic; no LLM calls are made in this method.
         Memory bundle consumption is bounded to the pre-fetched bundle.
         """
+        # Layer 0: R90 hallucination scorer — runs before all other gates at zero LLM cost.
+        # REJECT findings are promoted to structural violations; REVISE findings flow into
+        # the deterministic reasons list for the revision path.
+        hallucination_reasons: List[str] = []
+        hallucination_hard_reject = False
+        try:
+            from services.plan_hallucination_scorer import PlanHallucinationScorer
+            h_report = PlanHallucinationScorer().score(
+                plan, llm_input=llm_input, judge_constraints=judge_constraints,
+                risk_params=risk_params,
+            )
+            object.__setattr__(plan, "_hallucination_report", h_report)
+            hallucination_reasons = h_report.as_reason_strings()
+            hallucination_hard_reject = h_report.has_reject
+        except Exception:
+            logger.debug("R90 hallucination scorer failed (non-fatal)", exc_info=True)
+
+        if hallucination_hard_reject:
+            return JudgeValidationVerdict(
+                decision="reject",
+                finding_class="structural_violation",
+                reasons=hallucination_reasons,
+                judge_confidence_score=0.95,
+                cited_episode_ids=[],
+                confidence_calibration="unsupported",
+                revision_count=revision_count,
+            )
+
         # Step 1: Deterministic constraints
         det_reasons, hard_reject = _check_deterministic(
             is_thesis_armed=is_thesis_armed,
@@ -392,6 +424,9 @@ class JudgePlanValidationService:
             has_safety_override=has_safety_override,
             plan=plan,
         )
+
+        # Merge REVISE-severity hallucination reasons into det_reasons for downstream flow
+        det_reasons = det_reasons + [r for r in hallucination_reasons if r.startswith("REVISE:")]
 
         if hard_reject:
             cited_ep_ids: List[str] = []

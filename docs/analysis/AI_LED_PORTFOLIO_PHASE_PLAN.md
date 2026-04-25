@@ -15,8 +15,8 @@ _Last updated: 2026-04-24. Supersedes runbook order in `AI_LED_PORTFOLIO_SESSION
 | 3b — Hypothesis synthesis + cadence | R77 | ✅ Complete — CadenceGovernor wired |
 | 4 — Hypothesis feedback loop | R79 | ✅ Complete — attribution + playbook evidence |
 | 4+ — Trailing stops + risk management | R80–R85 | ✅ Complete (5 trailing modes, CaN size fix) |
-| **5 — Prompt hygiene** | Audit phases 1–4 | **Next up** |
-| **6 — SOTA foundation** | R88, R90 | Queued — depends on Phase 5 |
+| **5 — Prompt hygiene** | Audit phases 1–4 | ✅ Complete (2026-04-24) — dedup fix, cohort telemetry, breakout templates refreshed |
+| **6 — SOTA foundation** | R88, R90 | **Next up** |
 | **7 — Memory closure** | R91, R93, R97 | Queued — depends on Phase 6 |
 | **8 — Generation quality** | R89, R92 | Queued — expensive; validate Phase 6/7 first |
 | **9 — Operational improvements** | R94, R95 | Queued — can run parallel with Phase 8 |

@@ -235,6 +235,42 @@ class JudgeAction(SerializableModel):
 
 
 #: Valid decisions produced by the plan-level judge validation gate.
+# R90: Fine-grained hallucination finding types (FG-PRM domain adaptation).
+# Defined here (schemas layer) so services/plan_hallucination_scorer.py can import
+# them without creating a schemas→services circular dependency.
+
+class SectionHallucinationFinding(SerializableModel):
+    """A single hallucination finding for one section of a StrategyPlan."""
+    section_id: str
+    hallucination_type: str  # one of the six FG-PRM types
+    severity: Literal["REJECT", "REVISE"]
+    detail: str
+
+
+class PlanHallucinationReport(SerializableModel):
+    """All hallucination findings for one plan generation cycle."""
+    findings: List[SectionHallucinationFinding] = Field(default_factory=list)
+
+    @property
+    def reject_findings(self) -> List[SectionHallucinationFinding]:
+        return [f for f in self.findings if f.severity == "REJECT"]
+
+    @property
+    def revise_findings(self) -> List[SectionHallucinationFinding]:
+        return [f for f in self.findings if f.severity == "REVISE"]
+
+    @property
+    def has_reject(self) -> bool:
+        return bool(self.reject_findings)
+
+    def as_reason_strings(self) -> List[str]:
+        prefix = {"REJECT": "STRUCTURAL:", "REVISE": "REVISE:"}
+        return [
+            f"{prefix.get(f.severity, 'REVISE:')} [{f.hallucination_type}] {f.detail}"
+            for f in self.findings
+        ]
+
+
 JudgeValidationDecision = Literal["approve", "revise", "reject", "stand_down"]
 
 #: Finding classes that distinguish the nature of a non-approve verdict.
