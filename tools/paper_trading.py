@@ -494,6 +494,8 @@ class SessionState(BaseModel):
     min_rr_ratio: float = 1.75
     # R77: CadenceGovernor state
     cadence_governor_state: Optional[Dict[str, Any]] = None
+    # Portfolio state cache across continue-as-new
+    last_portfolio_state: Dict[str, Any] = {}
 
 
 # ============================================================================
@@ -1682,15 +1684,20 @@ async def build_structure_snapshots_activity(
     )
 
 
+_LEDGER_QUERY_CLIENT: Optional[Any] = None
+
+
 @activity.defn
 async def query_ledger_portfolio_activity(ledger_workflow_id: str) -> Dict[str, Any]:
     """Query the execution ledger for current portfolio status (must run as activity for Temporal client access)."""
+    global _LEDGER_QUERY_CLIENT
     from temporalio.client import Client
 
-    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
-    client = await Client.connect(address, namespace=namespace)
-    handle = client.get_workflow_handle(ledger_workflow_id)
+    if _LEDGER_QUERY_CLIENT is None:
+        address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+        namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
+        _LEDGER_QUERY_CLIENT = await Client.connect(address, namespace=namespace)
+    handle = _LEDGER_QUERY_CLIENT.get_workflow_handle(ledger_workflow_id)
     return await handle.query("get_portfolio_status")
 
 
@@ -2017,6 +2024,8 @@ class PaperTradingWorkflow:
         self._default_trailing_config: Optional[Dict[str, Any]] = None
         # R77: CadenceGovernor
         self._cadence_governor_state: Dict[str, Any] = {}
+        # Portfolio state cache — last successful query_ledger_portfolio_activity result
+        self._last_portfolio_state: Dict[str, Any] = {}
 
     # -------------------------------------------------------------------------
     # Signals
@@ -3492,11 +3501,29 @@ class PaperTradingWorkflow:
 
         # Query portfolio once — used by both the stop/target sweep and (if
         # a new candle) the full indicator evaluation below.
-        portfolio_state = await workflow.execute_activity(
-            query_ledger_portfolio_activity,
-            args=[self.ledger_workflow_id],
-            schedule_to_close_timeout=timedelta(minutes=2),
-        )
+        # Non-fatal: a slow VPS or network blip should not kill the session.
+        # Falls back to last known state so stops/targets still fire this tick.
+        try:
+            portfolio_state = await workflow.execute_activity(
+                query_ledger_portfolio_activity,
+                args=[self.ledger_workflow_id],
+                schedule_to_close_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    initial_interval=timedelta(seconds=10),
+                    backoff_coefficient=2.0,
+                    maximum_interval=timedelta(seconds=60),
+                ),
+            )
+            self._last_portfolio_state = portfolio_state
+        except Exception as _portfolio_exc:
+            workflow.logger.warning(
+                "portfolio query failed, using cached state: %s", _portfolio_exc
+            )
+            portfolio_state = self._last_portfolio_state or {
+                "cash": 0, "positions": {}, "position_meta": {},
+                "total_equity": 0, "unrealized_pnl": 0, "realized_pnl": 0,
+            }
 
         # R78: Hypothesis executor tick (fast path — stop/target sweep for hypothesis-mode plans)
         _use_hypothesis_model = os.environ.get("PAPER_TRADING_USE_HYPOTHESIS_MODEL", "false").lower() in ("1", "true", "yes")
@@ -4595,6 +4622,8 @@ class PaperTradingWorkflow:
             min_rr_ratio=self.min_rr_ratio,
             # R77: CadenceGovernor
             cadence_governor_state=dict(self._cadence_governor_state) if self._cadence_governor_state else None,
+            # Portfolio state cache
+            last_portfolio_state=dict(self._last_portfolio_state) if self._last_portfolio_state else {},
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -4655,6 +4684,8 @@ class PaperTradingWorkflow:
         self.min_rr_ratio = parsed.min_rr_ratio
         # R77: CadenceGovernor
         self._cadence_governor_state = dict(parsed.cadence_governor_state) if parsed.cadence_governor_state else {}
+        # Portfolio state cache
+        self._last_portfolio_state = dict(parsed.last_portfolio_state) if parsed.last_portfolio_state else {}
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)
