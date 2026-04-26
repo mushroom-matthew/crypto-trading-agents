@@ -151,6 +151,8 @@ class LLMClient:
         use_vector_store: bool = False,
         event_ts: datetime | None = None,
         eligible_playbooks: List[Any] | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> StrategyPlan:
         def _emit_llm_event(payload: Dict[str, Any]) -> None:
             try:
@@ -273,6 +275,8 @@ class LLMClient:
                         _logprob_kwargs = {"logprobs": True}
                     except Exception:
                         pass
+                    _temp = temperature if temperature is not None else 0.1
+                    _effort = reasoning_effort if reasoning_effort is not None else "low"
                     completion = self.client.responses.create(
                         model=self.model,
                         input=[
@@ -280,8 +284,8 @@ class LLMClient:
                             {"role": "user", "content": llm_input.to_json()},
                         ],
                         **output_token_args(self.model, 2500),
-                        **temperature_args(self.model, 0.1),
-                        **reasoning_args(self.model, effort="low"),
+                        **temperature_args(self.model, _temp),
+                        **reasoning_args(self.model, effort=_effort),
                         **_logprob_kwargs,
                     )
                     content = completion.output_text
@@ -385,6 +389,74 @@ class LLMClient:
             }
         )
         return plan
+
+    # ------------------------------------------------------------------
+    # R89 — Multi-candidate generation (Best-of-N)
+    # ------------------------------------------------------------------
+
+    def generate_candidates(
+        self,
+        n: int,
+        llm_input: LLMInput,
+        **kwargs,
+    ) -> List[StrategyPlan]:
+        """Generate N candidate plans with varied sampling parameters.
+
+        For non-reasoning models: temperatures 0.10 / 0.15 / 0.20 (up to N).
+        For reasoning models: natural variance; second+ calls use effort="medium".
+        All kwargs are forwarded to generate_plan() (e.g. prompt_template, run_id).
+        Failures per candidate are swallowed — caller handles an empty list.
+        """
+        from agents.llm.model_utils import is_reasoning_model
+        temps = [0.10, 0.15, 0.20]
+        efforts = ["low", "low", "medium"]
+        plans: List[StrategyPlan] = []
+        for i in range(n):
+            try:
+                plan = self.generate_plan(
+                    llm_input,
+                    temperature=temps[i] if not is_reasoning_model(self.model) else None,
+                    reasoning_effort=efforts[i] if is_reasoning_model(self.model) else None,
+                    **kwargs,
+                )
+                plans.append(plan)
+            except Exception as exc:
+                logging.warning("generate_candidates: candidate %d/%d failed: %s", i + 1, n, exc)
+        return plans
+
+    # ------------------------------------------------------------------
+    # R92 — Challenger plan generation
+    # ------------------------------------------------------------------
+
+    def generate_challenger(
+        self,
+        primary_plan: StrategyPlan,
+        llm_input: LLMInput,
+        prompt_template: str | None = None,
+        **kwargs,
+    ) -> StrategyPlan:
+        """Generate a challenger plan that argues the opposing or defensive stance.
+
+        The challenger prompt instructs the LLM to argue against the primary regime
+        assessment and produce a contrasting or flat/defensive plan. Uses a higher
+        temperature (0.20) or medium reasoning effort to encourage exploration.
+        """
+        from agents.llm.model_utils import is_reasoning_model
+        challenger_prefix = (
+            f"CHALLENGER_DEBATE: The primary plan assessed regime='{primary_plan.regime}'. "
+            "Your task: argue the OPPOSING or DEFENSIVE position. "
+            "Assume the primary regime assessment is wrong or overstated. "
+            "Produce a contrarian or flat/defensive plan with explicit reasoning. "
+            "This is a structured debate to test plan robustness — not a trading instruction.\n\n"
+        )
+        effective_template = challenger_prefix + (prompt_template or "")
+        return self.generate_plan(
+            llm_input,
+            prompt_template=effective_template.strip() or None,
+            temperature=0.20 if not is_reasoning_model(self.model) else None,
+            reasoning_effort="medium" if is_reasoning_model(self.model) else None,
+            **kwargs,
+        )
 
     @staticmethod
     def _extract_scratchpad(content: str) -> tuple[str | None, dict | None, str]:

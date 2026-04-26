@@ -365,6 +365,26 @@ class RevisionLoopResult(SerializableModel):
 
 
 # ---------------------------------------------------------------------------
+# R92 — Challenger Debate deliberation verdict
+# ---------------------------------------------------------------------------
+
+DeliberationOutcome = Literal["primary_wins", "challenger_wins", "inconclusive"]
+
+
+class DeliberationVerdict(SerializableModel):
+    """Result of a two-hypothesis debate between primary and challenger plans.
+
+    challenger_wins / inconclusive → judge escalates approval threshold.
+    """
+
+    outcome: DeliberationOutcome
+    confidence_margin: float = 0.0   # primary_score - challenger_score (signed)
+    primary_score: float = 0.0
+    challenger_score: float = 0.0
+    divergence_points: List[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # R80 — JudgeGuidanceVector: structured judge output that closes the ii loop
 # ---------------------------------------------------------------------------
 

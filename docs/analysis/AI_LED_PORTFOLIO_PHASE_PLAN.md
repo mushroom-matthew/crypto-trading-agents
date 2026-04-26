@@ -834,7 +834,9 @@ Extend `CadenceGovernor` to detect regime drift mid-session (cosine similarity o
 
 ### R95 — FG-PRM-Style Aggregate Confidence Score + Operator Transparency Surface
 
-Aggregate per-section hallucination scores + field uncertainty into a single `PlanConfidenceScore` (log-sum of non-hallucination probabilities, following FG-PRM's R_Φ formula). Expose via `GET /plan-audit/{plan_id}` — returns scratchpad, hallucination report, deliberation verdict, confidence score, revision history.
+Aggregate per-section hallucination scores + field uncertainty + logprob signal into a single `PlanConfidenceScore` (log-sum of non-hallucination probabilities, following FG-PRM's R_Φ formula). Expose via `GET /plan-audit/{plan_id}` — returns scratchpad, hallucination_findings (R90), field_uncertainty (R93), field_logprobs (R97), deliberation verdict, aggregate confidence score, revision history.
+
+All input signals are already written to `plan_generated` events as of Phase 7 (fcaf197). R95 is read-path only — no new inference costs.
 
 The companion lifecycle/replay workstream should provide the operator-facing
 link from `plan_id` to executed `trade_set_id` lifecycles so `plan-audit`

@@ -288,8 +288,10 @@ class StrategyPlanProvider:
                         logger.warning("R80: all playbooks penalized — retaining original eligible set")
             except Exception:
                 logger.debug("R80: WorldState playbook filtering failed (non-fatal)", exc_info=True)
-        plan = self.llm_client.generate_plan(
-            llm_input,
+        # R89: Best-of-N plan generation — env-gated via STRATEGIST_BEST_OF_N (default 1)
+        _best_of_n = int(os.environ.get("STRATEGIST_BEST_OF_N", "1"))
+        _best_of_n_meta: dict = {}
+        _base_kwargs = dict(
             prompt_template=resolved_prompt,
             run_id=run_id,
             prompt_hash=input_hash,
@@ -298,6 +300,67 @@ class StrategyPlanProvider:
             event_ts=emit_ts,
             eligible_playbooks=eligible_playbooks,
         )
+        if _best_of_n > 1:
+            try:
+                from services.judge_validation_service import JudgePlanValidationService
+                _candidates = self.llm_client.generate_candidates(_best_of_n, llm_input, **_base_kwargs)
+                if _candidates:
+                    _validator = JudgePlanValidationService()
+                    _verdicts = _validator.batch_validate(_candidates)
+                    # Prefer highest-confidence approved plan; fall back to highest score overall
+                    _approved = [
+                        (v.judge_confidence_score, p)
+                        for p, v in zip(_candidates, _verdicts)
+                        if v.decision == "approve"
+                    ]
+                    if _approved:
+                        _approved.sort(key=lambda x: x[0], reverse=True)
+                        plan = _approved[0][1]
+                        _selected_idx = _candidates.index(plan)
+                    else:
+                        _all_scored = list(zip([v.judge_confidence_score for v in _verdicts], _candidates))
+                        _all_scored.sort(key=lambda x: x[0], reverse=True)
+                        plan = _all_scored[0][1]
+                        _selected_idx = _candidates.index(plan)
+                    _best_of_n_meta = {
+                        "candidate_count": len(_candidates),
+                        "selected_candidate_index": _selected_idx,
+                        "candidate_confidence_scores": [v.judge_confidence_score for v in _verdicts],
+                    }
+                    logger.info(
+                        "R89 best-of-%d: selected idx=%d score=%.3f (%d approved)",
+                        _best_of_n, _selected_idx, _verdicts[_selected_idx].judge_confidence_score,
+                        len(_approved),
+                    )
+                else:
+                    plan = self.llm_client.generate_plan(llm_input, **_base_kwargs)
+            except Exception as exc:
+                logger.warning("R89 best-of-N failed (non-fatal, falling back): %s", exc)
+                plan = self.llm_client.generate_plan(llm_input, **_base_kwargs)
+        else:
+            plan = self.llm_client.generate_plan(llm_input, **_base_kwargs)
+
+        # R92: Challenger debate — env-gated via STRATEGIST_DEBATE=true
+        _deliberation_verdict = None
+        if os.environ.get("STRATEGIST_DEBATE", "false").lower() == "true":
+            try:
+                from services.plan_deliberation_service import DeliberationService
+                _challenger = self.llm_client.generate_challenger(
+                    plan, llm_input,
+                    prompt_template=resolved_prompt,
+                    run_id=run_id,
+                )
+                _deliberation_verdict = DeliberationService().deliberate(
+                    _challenger, plan, llm_input=llm_input,
+                )
+                logger.info(
+                    "R92 deliberation outcome=%s margin=%+.3f",
+                    _deliberation_verdict.outcome,
+                    _deliberation_verdict.confidence_margin,
+                )
+            except Exception as exc:
+                logger.warning("R92 challenger debate failed (non-fatal): %s", exc)
+
         # R62: post-LLM validation — clear playbook_id if not in eligible set
         if plan.playbook_id and eligible_playbooks:
             eligible_ids = {pb.playbook_id for pb in eligible_playbooks}
@@ -325,13 +388,18 @@ class StrategyPlanProvider:
         self.daily_counts[date_key] += 1
         self.cost_tracker.record(llm_input.to_json(), plan.to_json())
         meta = getattr(self.llm_client, "last_generation_info", {}) or {}
-        self.last_generation_info = meta
-        object.__setattr__(plan, "_llm_meta", meta)
+        self.last_generation_info = {**meta, **_best_of_n_meta}
+        object.__setattr__(plan, "_llm_meta", self.last_generation_info)
+        # Attach deliberation verdict as a transient attribute for downstream use
+        if _deliberation_verdict is not None:
+            object.__setattr__(plan, "_deliberation_verdict", _deliberation_verdict)
         if emit_events:
             self._emit_plan_generated(
                 plan, llm_input, run_id, event_ts=emit_ts,
                 policy_snapshot=policy_snapshot,
                 prompt_meta=metadata,
+                deliberation_verdict=_deliberation_verdict,
+                best_of_n_meta=_best_of_n_meta,
             )
         return plan
 
@@ -563,6 +631,8 @@ class StrategyPlanProvider:
         event_ts: datetime | None = None,
         policy_snapshot: "PolicySnapshot | None" = None,
         prompt_meta: dict | None = None,
+        deliberation_verdict=None,
+        best_of_n_meta: dict | None = None,
     ) -> None:
         try:
             trigger_summary = [
@@ -601,6 +671,10 @@ class StrategyPlanProvider:
                 "scratchpad_text": (self.last_generation_info or {}).get("scratchpad_text"),
                 "confidence_map": (self.last_generation_info or {}).get("confidence_map"),
                 "field_logprobs": (self.last_generation_info or {}).get("field_logprobs"),
+                # R89 best-of-N telemetry
+                **(best_of_n_meta or {}),
+                # R92 challenger debate
+                "deliberation_verdict": deliberation_verdict.model_dump() if deliberation_verdict else None,
                 # R90 hallucination report (attached to plan by judge_validation_service)
                 "hallucination_findings": [
                     {"section": f.section_id, "type": f.hallucination_type,

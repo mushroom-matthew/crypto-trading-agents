@@ -58,7 +58,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from services.policy_loop_gate import PolicyLoopGate
     from services.policy_state_machine import PolicyStateMachine
-    from schemas.policy_state import PolicyStateMachineRecord
+    from schemas.policy_state import PolicyStateMachineRecord, PolicyStateTransition
     from schemas.reasoning_cadence import PolicyLoopTriggerEvent
     from schemas.trailing_stop import TrailingStopConfig
 
@@ -2066,6 +2066,131 @@ class PaperTradingWorkflow:
         if len(self.trigger_rule_edits) > 500:
             self.trigger_rule_edits = self.trigger_rule_edits[-500:]
 
+    def _derived_last_plan_time_iso(self) -> Optional[str]:
+        """Return the best-available plan timestamp for session status queries."""
+        if self.last_plan_time is not None:
+            return self.last_plan_time.isoformat()
+        if isinstance(self.current_plan, dict):
+            generated_at = self.current_plan.get("generated_at")
+            if isinstance(generated_at, str) and generated_at:
+                return generated_at
+        if self.plan_history:
+            generated_at = self.plan_history[-1].get("generated_at")
+            if isinstance(generated_at, str) and generated_at:
+                return generated_at
+        return None
+
+    def _reconcile_policy_state_to_idle(
+        self,
+        state_record: "PolicyStateMachineRecord",
+        *,
+        reason: str,
+    ) -> "PolicyStateMachineRecord":
+        """Reset a stale policy state to IDLE when the portfolio is already flat."""
+        now = workflow.now()
+        transition = PolicyStateTransition(
+            from_state=state_record.current_state,
+            to_state="IDLE",
+            transitioned_at=now,
+            reason=reason,
+            triggered_by="portfolio_reconciliation",
+        )
+        return state_record.model_copy(update={
+            "current_state": "IDLE",
+            "entered_at": now,
+            "position_id": None,
+            "activation_window": None,
+            "cooldown_started_at": None,
+            "cooldown_expires_at": None,
+            "transitions": list(state_record.transitions) + [transition],
+        })
+
+    @staticmethod
+    def _coerce_float(value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def _handle_full_exit_bookkeeping(
+        self,
+        *,
+        symbol: str,
+        exit_price: float,
+        portfolio_state: Dict[str, Any],
+        position_meta: Dict[str, Any],
+    ) -> None:
+        """Run close-path bookkeeping for a fully closed position."""
+        direction = str(position_meta.get("entry_side") or "long").lower()
+        if direction not in {"long", "short"}:
+            direction = "long"
+
+        entry_price = self._coerce_float(
+            position_meta.get("signal_entry_price")
+            or (portfolio_state.get("entry_prices") or {}).get(symbol)
+            or exit_price
+        ) or float(exit_price)
+        stop_px = self._coerce_float(position_meta.get("stop_price_abs"))
+
+        signed_move = (float(exit_price) - entry_price) if direction == "long" else (entry_price - float(exit_price))
+        if signed_move > 1e-9:
+            outcome = "win"
+        elif signed_move < -1e-9:
+            outcome = "loss"
+        else:
+            outcome = "neutral"
+
+        default_stop = entry_price * (0.98 if direction == "long" else 1.02)
+        risk_denominator = abs(entry_price - (stop_px if stop_px is not None else default_stop))
+        r_achieved = (signed_move / risk_denominator) if risk_denominator > 0 else 0.0
+
+        self.episode_memory_store_state = (self.episode_memory_store_state or [])[-99:]
+        self.episode_memory_store_state.append({
+            "episode_id": f"paper_{symbol}_{workflow.now().isoformat()}",
+            "signal_id": position_meta.get("signal_id"),
+            "symbol": symbol,
+            "direction": direction,
+            "timeframe": self.indicator_timeframe,
+            "playbook_id": position_meta.get("playbook_id"),
+            "template_id": position_meta.get("template_id"),
+            "outcome_class": outcome,
+            "r_achieved": round(r_achieved, 4),
+            "exit_ts": workflow.now().isoformat(),
+            "failure_modes": [],
+        })
+
+        self.adaptive_management_states.pop(symbol, None)
+        self._live_r_tracking.pop(symbol, None)
+        self.exit_contracts.pop(symbol, None)
+        self._position_closed_since_last_eval = True
+
+        try:
+            from services.cadence_governor import CadenceGovernor as _CG, CadenceGovernorState as _CGS
+            _gov_s = _CGS.model_validate(self._cadence_governor_state) if self._cadence_governor_state else _CGS()
+            _gov = _CG(state=_gov_s)
+            _gov.record_round_trip_complete(
+                symbol=symbol,
+                outcome=outcome,
+                r_achieved=round(r_achieved, 4),
+                playbook_id=position_meta.get("playbook_id"),
+            )
+            self._cadence_governor_state = _gov.state.model_dump(mode="json")
+        except Exception as _cg_exc:
+            workflow.logger.debug("R77: CadenceGovernor.record_round_trip failed (non-fatal): %s", _cg_exc)
+
+        try:
+            _sm = PolicyStateMachine()
+            _sm_record = PolicyStateMachineRecord.model_validate(
+                self.policy_state_machine_record or {}
+            )
+            if _sm_record.current_state in ("POSITION_OPEN", "HOLD_LOCK"):
+                _sm_record = _sm.close_position(_sm_record)
+                self.policy_state_machine_record = _sm_record.model_dump()
+        except Exception as _sm_exc:
+            workflow.logger.warning(
+                "State machine close_position failed (non-fatal): %s", _sm_exc
+            )
+
     @workflow.signal
     def apply_judge_guidance(self, guidance_dict: Dict[str, Any]) -> None:
         """Apply structured JudgeGuidanceVector to WorldState (R80 ii-loop).
@@ -2247,7 +2372,7 @@ class PaperTradingWorkflow:
             "symbols": self.symbols,
             "stopped": self.stopped,
             "cycle_count": self.cycle_count,
-            "last_plan_time": self.last_plan_time.isoformat() if self.last_plan_time else None,
+            "last_plan_time": self._derived_last_plan_time_iso(),
             "has_plan": self.current_plan is not None,
             "plan_interval_hours": self.plan_interval_hours,
             "indicator_timeframe": self.indicator_timeframe,
@@ -2866,13 +2991,11 @@ class PaperTradingWorkflow:
             self.policy_state_machine_record or {}
         )
 
-        # Auto-reset COOLDOWN → IDLE when there are no open positions.
-        # Without this, a double-exit bug (or any other stray state corruption)
-        # would leave the state machine stuck in COOLDOWN forever, because
-        # reset_to_idle is the only COOLDOWN→IDLE transition and it is never
-        # called externally.  It is safe to reset here: if we're in COOLDOWN
-        # with no positions the cooldown has effectively served its purpose.
-        if _state_record.current_state == "COOLDOWN":
+        # Reconcile stale policy states when the portfolio is already flat.
+        # This covers:
+        # - COOLDOWN that never reset after a close
+        # - HOLD_LOCK / POSITION_OPEN that missed the close bookkeeping path
+        if _state_record.current_state in {"COOLDOWN", "HOLD_LOCK", "POSITION_OPEN"}:
             try:
                 _live_positions = await workflow.execute_activity(
                     query_ledger_portfolio_activity,
@@ -2880,15 +3003,26 @@ class PaperTradingWorkflow:
                     schedule_to_close_timeout=timedelta(minutes=2),
                 )
                 if not (_live_positions.get("positions") or {}):
-                    _sm_reset = PolicyStateMachine()
-                    _state_record = _sm_reset.reset_to_idle(_state_record)
+                    if _state_record.current_state == "COOLDOWN":
+                        _sm_reset = PolicyStateMachine()
+                        _state_record = _sm_reset.reset_to_idle(_state_record)
+                        workflow.logger.info(
+                            "Policy state machine auto-reset COOLDOWN→IDLE (no open positions)"
+                        )
+                    else:
+                        _from_state = _state_record.current_state
+                        _state_record = self._reconcile_policy_state_to_idle(
+                            _state_record,
+                            reason="reconciled_flat_portfolio",
+                        )
+                        workflow.logger.warning(
+                            "Policy state machine reconciled %s→IDLE (no open positions)",
+                            _from_state,
+                        )
                     self.policy_state_machine_record = _state_record.model_dump()
-                    workflow.logger.info(
-                        "Policy state machine auto-reset COOLDOWN→IDLE (no open positions)"
-                    )
             except Exception as _cooldown_exc:
                 workflow.logger.debug(
-                    "COOLDOWN→IDLE auto-reset check failed (non-fatal): %s", _cooldown_exc
+                    "Policy state reconciliation check failed (non-fatal): %s", _cooldown_exc
                 )
 
         _last_eval_at = (
@@ -3921,7 +4055,7 @@ class PaperTradingWorkflow:
                     _sym, _reason,
                 )
                 continue
-            await self._execute_order(order)
+            await self._execute_order(order, portfolio_state=portfolio_state)
 
     async def _sweep_stop_target(
         self,
@@ -3989,6 +4123,12 @@ class PaperTradingWorkflow:
             })
 
             # Execute the exit order
+            _entry_price = self._coerce_float(
+                meta.get("signal_entry_price")
+                or portfolio_state.get("entry_prices", {}).get(symbol)
+                or price
+            ) or float(price)
+            _fill_ts = meta.get("opened_at") or workflow.now().isoformat()
             await self._execute_order({
                 "symbol": symbol,
                 "side": exit_side,
@@ -3999,23 +4139,10 @@ class PaperTradingWorkflow:
                 "trigger_category": category,
                 "intent": "exit",
                 "reason": trigger_id,
-            })
-
-            # Remove the position from the local portfolio_state copy so that
-            # the R85 adaptive-management trailing-stop loop (which runs later
-            # on the same tick using the same dict) does not see a stale open
-            # position and fire a duplicate exit for the same symbol.
-            portfolio_state.get("positions", {}).pop(symbol, None)
-            portfolio_state.get("position_meta", {}).pop(symbol, None)
+            }, portfolio_state=portfolio_state)
 
             # A4: Build episode record after position close (non-fatal).
             try:
-                _entry_price = float(
-                    meta.get("signal_entry_price")
-                    or portfolio_state.get("entry_prices", {}).get(symbol)
-                    or price
-                )
-                _fill_ts = meta.get("opened_at") or workflow.now().isoformat()
                 # R82: pass WorldState regime fingerprint for cross-session retrieval scoring
                 _ws_fp = (self._world_state or {}).get("regime_fingerprint") or {}
                 await workflow.execute_activity(
@@ -4042,66 +4169,6 @@ class PaperTradingWorkflow:
                 )
             except Exception:
                 pass  # episode construction is non-critical
-
-            # R63: Append lightweight episode record to in-session store for next plan gen.
-            try:
-                _ep_entry = float(
-                    meta.get("signal_entry_price")
-                    or portfolio_state.get("entry_prices", {}).get(symbol)
-                    or price
-                )
-                _ep_risk = abs(_ep_entry - (stop_px or _ep_entry * (0.98 if direction == "long" else 1.02)))
-                _ep_r = (
-                    (float(price) - _ep_entry) / _ep_risk if direction == "long" else (_ep_entry - float(price)) / _ep_risk
-                ) if _ep_risk > 0 else 0.0
-                self.episode_memory_store_state = (self.episode_memory_store_state or [])[-99:]
-                self.episode_memory_store_state.append({
-                    "episode_id": f"paper_{symbol}_{workflow.now().isoformat()}",
-                    "signal_id": meta.get("signal_id"),
-                    "symbol": symbol,
-                    "direction": direction,
-                    "timeframe": self.indicator_timeframe,
-                    "playbook_id": meta.get("playbook_id"),
-                    "template_id": meta.get("template_id"),
-                    "outcome_class": "win" if hit == "target" else "loss",
-                    "r_achieved": round(_ep_r, 4),
-                    "exit_ts": workflow.now().isoformat(),
-                    "failure_modes": [],
-                })
-                # Also clear adaptive management state for this symbol on close
-                self.adaptive_management_states.pop(symbol, None)
-
-                # R77: record round trip in CadenceGovernor
-                try:
-                    from services.cadence_governor import CadenceGovernor as _CG, CadenceGovernorState as _CGS
-                    _gov_s = _CGS.model_validate(self._cadence_governor_state) if self._cadence_governor_state else _CGS()
-                    _gov = _CG(state=_gov_s)
-                    _gov.record_round_trip_complete(
-                        symbol=symbol,
-                        outcome="win" if hit == "target" else "loss",
-                        r_achieved=round(_ep_r, 4),
-                        playbook_id=meta.get("playbook_id"),
-                    )
-                    self._cadence_governor_state = _gov.state.model_dump(mode="json")
-                except Exception as _cg_exc:
-                    workflow.logger.debug("R77: CadenceGovernor.record_round_trip failed (non-fatal): %s", _cg_exc)
-            except Exception as _ep_exc:
-                workflow.logger.debug("episode_memory_store_state append failed (non-fatal): %s", _ep_exc)
-
-            # Runbook 61: transition state machine to COOLDOWN on position close.
-            self._position_closed_since_last_eval = True
-            try:
-                _sm = PolicyStateMachine()
-                _sm_record = PolicyStateMachineRecord.model_validate(
-                    self.policy_state_machine_record or {}
-                )
-                if _sm_record.current_state in ("POSITION_OPEN", "HOLD_LOCK"):
-                    _sm_record = _sm.close_position(_sm_record)
-                    self.policy_state_machine_record = _sm_record.model_dump()
-            except Exception as _sm_exc:
-                workflow.logger.warning(
-                    "State machine close_position failed (non-fatal): %s", _sm_exc
-                )
 
     def _resolve_order_stop_target(
         self, order: Dict[str, Any], fill_price: float
@@ -4139,12 +4206,29 @@ class PaperTradingWorkflow:
             workflow.logger.warning(f"Could not resolve stop/target for {trigger_id}: {e}")
             return None, None
 
-    async def _execute_order(self, order: Dict[str, Any]) -> None:
+    async def _execute_order(
+        self,
+        order: Dict[str, Any],
+        *,
+        portfolio_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Execute a single order."""
         ledger_handle = workflow.get_external_workflow_handle(self.ledger_workflow_id)
         # Record fill in ledger
         fill_price = float(order.get("price", 0.0) or 0.0)
         quantity = float(order.get("quantity", 0.0) or 0.0)
+        _portfolio_state = portfolio_state or {}
+        _fill_symbol = order.get("symbol", "")
+        _fill_intent = order.get("intent")
+        _pre_positions = _portfolio_state.get("positions") or {}
+        _pre_position_qty = abs(float(_pre_positions.get(_fill_symbol, 0) or 0))
+        _pre_position_meta = dict(((_portfolio_state.get("position_meta") or {}).get(_fill_symbol) or {}))
+        _is_close_intent = _fill_intent in ("exit", "flat", "conflict_exit", "conflict_reverse")
+        _is_full_close = (
+            _is_close_intent
+            and _pre_position_qty > 0
+            and quantity >= (_pre_position_qty - 1e-9)
+        )
 
         # R84: apply WorldState judge risk_multiplier to entry order sizing.
         # Exits are never scaled — only entries are affected.
@@ -4446,13 +4530,11 @@ class PaperTradingWorkflow:
         await ledger_handle.signal("record_fill", fill_payload)
 
         # R65: Exit contract enforcement — track which plan opened each position.
-        _fill_symbol = order.get("symbol", "")
-        _fill_intent = order.get("intent")
         if _fill_intent == "entry":
             _origin_plan_id = (self.current_plan or {}).get("plan_id")
             if _origin_plan_id and _fill_symbol:
                 self.position_originating_plans[_fill_symbol] = _origin_plan_id
-        elif _fill_intent in ("exit", "flat", "conflict_exit", "conflict_reverse"):
+        elif _is_full_close:
             # Clear originating plan when position closes
             self.position_originating_plans.pop(_fill_symbol, None)
 
@@ -4524,6 +4606,17 @@ class PaperTradingWorkflow:
             fill_payload["planned_rr"] = planned_rr
             event_payload["planned_rr"] = planned_rr
         await self._emit("order_executed", event_payload)
+
+        if _is_full_close and _fill_symbol:
+            _portfolio_state.get("positions", {}).pop(_fill_symbol, None)
+            _portfolio_state.get("position_meta", {}).pop(_fill_symbol, None)
+            _portfolio_state.get("entry_prices", {}).pop(_fill_symbol, None)
+            await self._handle_full_exit_bookkeeping(
+                symbol=_fill_symbol,
+                exit_price=fill_price,
+                portfolio_state=_portfolio_state,
+                position_meta=_pre_position_meta,
+            )
 
         workflow.logger.info(f"Executed order: {order['side']} {order['quantity']} {order['symbol']} @ {order['price']}")
 

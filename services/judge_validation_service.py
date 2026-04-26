@@ -26,6 +26,7 @@ from typing import List, Optional
 
 from schemas.episode_memory import DiversifiedMemoryBundle, EpisodeMemoryRecord
 from schemas.judge_feedback import (
+    DeliberationVerdict,
     JudgeConfidenceCalibration,
     JudgePlanRevisionRequest,
     JudgeValidationDecision,
@@ -380,6 +381,8 @@ class JudgePlanValidationService:
         llm_input=None,
         judge_constraints=None,
         risk_params: Optional[dict] = None,
+        # R92: challenger debate verdict — escalates approval threshold when inconclusive
+        deliberation_verdict: Optional[DeliberationVerdict] = None,
     ) -> JudgeValidationVerdict:
         """Run layered validation and return a typed verdict.
 
@@ -486,6 +489,16 @@ class JudgePlanValidationService:
             failure_mode_count=len(failure_modes),
         )
 
+        # R92: deliberation escalation — if challenger won or debate was inconclusive,
+        # require at least "weakly_supported" calibration (reject "unsupported" approval).
+        if deliberation_verdict is not None and deliberation_verdict.outcome in ("challenger_wins", "inconclusive"):
+            if calibration == "unsupported":
+                calibration = "weakly_supported"  # escalate: unsupported → requires more evidence
+            det_reasons = det_reasons + [
+                f"REVISE: R92 debate outcome='{deliberation_verdict.outcome}' "
+                f"(margin={deliberation_verdict.confidence_margin:+.2f}) — raised approval bar"
+            ]
+
         # Derive final verdict
         decision, finding_class, confidence_score = _derive_verdict(
             deterministic_reasons=det_reasons,
@@ -537,3 +550,30 @@ class JudgePlanValidationService:
             requested_revisions=revise_reasons,
             revision_count=revision_count,
         )
+
+    def batch_validate(
+        self,
+        plans: List[StrategyPlan],
+        **kwargs,
+    ) -> List[JudgeValidationVerdict]:
+        """Validate a list of candidate plans with shared kwargs (R89).
+
+        Returns one verdict per plan in input order.
+        Failures per plan produce a minimal reject verdict so callers
+        can always zip plans with verdicts.
+        """
+        verdicts: List[JudgeValidationVerdict] = []
+        for plan in plans:
+            try:
+                verdict = self.validate_plan(plan, **kwargs)
+            except Exception as exc:
+                logger.warning("batch_validate: plan %s failed validation: %s", plan.plan_id, exc)
+                verdict = JudgeValidationVerdict(
+                    decision="reject",
+                    finding_class="structural_violation",
+                    reasons=[f"STRUCTURAL: validation error — {exc}"],
+                    judge_confidence_score=0.0,
+                    confidence_calibration="unsupported",
+                )
+            verdicts.append(verdict)
+        return verdicts
