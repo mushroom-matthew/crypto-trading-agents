@@ -49,22 +49,52 @@ async def _verify_session_exists(client: Any, session_id: str) -> None:
         raise
 
 
+def _count_completed_trade_sets(transactions: List[Dict[str, Any]]) -> int:
+    """Count FIFO entry/exit pairs from ledger transaction history."""
+    txs = sorted(transactions, key=lambda x: x.get("timestamp", 0))
+    open_entries: Dict[str, List[Dict[str, Any]]] = {}
+    completed = 0
+
+    for tx in txs:
+        symbol = tx.get("symbol", "")
+        side = (tx.get("side", "") or "").upper()
+        intent = tx.get("intent", "entry" if side == "BUY" else "exit")
+        if side == "BUY" or intent == "entry":
+            open_entries.setdefault(symbol, []).append(tx)
+        elif side == "SELL" or intent == "exit":
+            entries = open_entries.get(symbol, [])
+            if not entries:
+                continue
+            entries.pop(0)
+            completed += 1
+
+    return completed
+
+
 async def _get_session_list_summary(client: Any, session_id: str) -> Optional[Dict[str, Any]]:
     """Best-effort summary for the sessions dropdown."""
     try:
-        handle = client.get_workflow_handle(session_id)
-        session_status = await handle.query("get_session_status")
-        equity_history = await handle.query("get_equity_history")
+        from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+        from temporalio.service import RPCError, RPCStatusCode
 
-        latest_snapshot = equity_history[-1] if equity_history else {}
-        positions = latest_snapshot.get("positions") or {}
+        ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+        ledger_handle = client.get_workflow_handle(ledger_workflow_id)
+        try:
+            portfolio = await ledger_handle.query("get_portfolio_status")
+            transactions = await ledger_handle.query("get_transaction_history", {"limit": 2000})
+        except RPCError as err:
+            if err.status != RPCStatusCode.NOT_FOUND:
+                raise
+            legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+            portfolio = await legacy_ledger_handle.query("get_portfolio_status")
+            transactions = await legacy_ledger_handle.query("get_transaction_history", {"limit": 2000})
+
+        positions = portfolio.get("positions") or {}
         open_positions = sum(1 for qty in positions.values() if abs(float(qty or 0)) > 1e-12)
+        completed_positions = _count_completed_trade_sets(transactions or [])
 
-        cadence_summary = session_status.get("cadence_summary") or {}
-        completed_positions = int(cadence_summary.get("round_trips_completed", 0) or 0)
-
-        realized_pnl = float(latest_snapshot.get("realized_pnl", 0) or 0)
-        unrealized_pnl = float(latest_snapshot.get("unrealized_pnl", 0) or 0)
+        realized_pnl = float(portfolio.get("realized_pnl", 0) or 0)
+        unrealized_pnl = float(portfolio.get("unrealized_pnl", 0) or 0)
         total_pnl = realized_pnl + unrealized_pnl
 
         return {

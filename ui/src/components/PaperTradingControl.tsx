@@ -1289,7 +1289,7 @@ export function PaperTradingControl() {
                 </div>
                 <div>
                   <p className="text-gray-500">Last Plan</p>
-                  <p>{session.last_plan_time ? formatDateTime(session.last_plan_time) : 'Pending...'}</p>
+                  <p>{session.last_plan_time || plan?.generated_at ? formatDateTime(session.last_plan_time || plan?.generated_at || '') : 'Pending...'}</p>
                 </div>
               </div>
             </div>
