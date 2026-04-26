@@ -4152,7 +4152,9 @@ class PaperTradingWorkflow:
         positions = portfolio_state.get("positions") or {}
         position_meta = portfolio_state.get("position_meta") or {}
 
-        for symbol, qty in positions.items():
+        # Exit execution can mutate portfolio_state["positions"], so iterate over
+        # a snapshot instead of the live dict to avoid mid-loop size changes.
+        for symbol, qty in list(positions.items()):
             if not qty:
                 continue
             qty_abs = abs(float(qty))
