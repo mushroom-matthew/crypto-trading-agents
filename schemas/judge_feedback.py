@@ -273,6 +273,26 @@ class PlanHallucinationReport(SerializableModel):
 
 JudgeValidationDecision = Literal["approve", "revise", "reject", "stand_down"]
 
+# ---------------------------------------------------------------------------
+# R95 — Aggregate confidence score (FG-PRM log-sum analogue)
+# ---------------------------------------------------------------------------
+
+class PlanConfidenceScore(SerializableModel):
+    """Aggregate plan quality score combining hallucination + uncertainty signals.
+
+    Follows FG-PRM's R_Φ(x,y) = Σ log(1 - p_hallucination_i) formula.
+    Populated by PlanHallucinationScorer.aggregate_score().
+    """
+
+    aggregate_log_reward: float         # Σ log(1 - p_i) over all sections; 0 = perfect
+    per_section_scores: List[Dict[str, Any]] = Field(default_factory=list)
+    interpretation: str = ""            # human-readable summary
+    reject_count: int = 0
+    revise_count: int = 0
+    field_uncertainty_mean: Optional[float] = None
+    field_logprobs_flagged: List[str] = Field(default_factory=list)
+
+
 #: Finding classes that distinguish the nature of a non-approve verdict.
 JudgeValidationFindingClass = Literal[
     "structural_violation",    # hard reject — deterministic invariant or playbook contract

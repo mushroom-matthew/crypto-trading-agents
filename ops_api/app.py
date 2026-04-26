@@ -34,6 +34,7 @@ from ops_api.routers import analytics as analytics_router
 from ops_api.routers import structure as structure_router
 from ops_api.routers import exit_contracts as exit_contracts_router
 from ops_api.routers import scanner as scanner_router
+from ops_api.routers import plan_audit as plan_audit_router
 from ops_api.websocket_manager import manager as ws_manager
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
@@ -147,6 +148,7 @@ app.include_router(analytics_router.router)
 app.include_router(structure_router.router)
 app.include_router(exit_contracts_router.router)
 app.include_router(scanner_router.router)
+app.include_router(plan_audit_router.router)
 
 
 # Legacy endpoints (for backward compatibility)

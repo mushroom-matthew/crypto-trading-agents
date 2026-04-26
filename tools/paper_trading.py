@@ -496,6 +496,9 @@ class SessionState(BaseModel):
     cadence_governor_state: Optional[Dict[str, Any]] = None
     # Portfolio state cache across continue-as-new
     last_portfolio_state: Dict[str, Any] = {}
+    # R94: drift detection
+    intent_creation_fp: Optional[Dict[str, Any]] = None
+    last_intent_refresh_cycle: int = 0
 
 
 # ============================================================================
@@ -2024,6 +2027,9 @@ class PaperTradingWorkflow:
         # R76: AI-led portfolio planner
         self.use_ai_planner: bool = False
         self._session_intent: Optional[Dict[str, Any]] = None
+        # R94: fingerprint at last session intent creation; used for drift detection
+        self._intent_creation_fp: Optional[Dict[str, float]] = None
+        self._last_intent_refresh_cycle: int = 0
         # R85: trailing stop session defaults (serialised TrailingStopConfig dict)
         self._default_trailing_config: Optional[Dict[str, Any]] = None
         # R77: CadenceGovernor
@@ -3097,6 +3103,11 @@ class PaperTradingWorkflow:
                 )
                 if _intent_dict:
                     self._session_intent = _intent_dict
+                    # R94: snapshot fingerprint at intent creation for drift detection
+                    _ws_fp = (self._world_state or {}).get("regime_fingerprint") or {}
+                    if _ws_fp:
+                        self._intent_creation_fp = {k: float(v) for k, v in _ws_fp.items() if isinstance(v, (int, float))}
+                    self._last_intent_refresh_cycle = self.cycle_count
                     # Override session symbols with planner selection
                     _selected = _intent_dict.get("selected_symbols") or []
                     if _selected:
@@ -3128,6 +3139,75 @@ class PaperTradingWorkflow:
                 workflow.logger.warning(
                     "R76: session intent generation failed (non-fatal): %s", _planner_exc
                 )
+
+        # R94: proactive regime drift detection — refresh SessionIntent mid-session
+        # when fingerprint has drifted significantly since intent was created.
+        # Guard: not in THESIS_ARMED, not a repair pass, cooldown elapsed.
+        if (
+            self.use_ai_planner
+            and self._session_intent is not None
+            and self._intent_creation_fp
+            and not repair_instructions
+            and (self.cycle_count - self._last_intent_refresh_cycle) >= 12
+        ):
+            _current_policy_state = (policy_state_machine_record or {}).get("current_state", "IDLE")
+            if _current_policy_state not in ("THESIS_ARMED", "HOLD_LOCK"):
+                try:
+                    from services.cadence_governor import CadenceGovernor as _CG
+                    from schemas.reasoning_cadence import get_cadence_config as _gcc
+                    _drift_threshold = _gcc().regime_drift_threshold
+                    _current_ws_fp = {
+                        k: float(v)
+                        for k, v in ((self._world_state or {}).get("regime_fingerprint") or {}).items()
+                        if isinstance(v, (int, float))
+                    }
+                    _drift_signal = _CG.detect_regime_drift(
+                        prior_fingerprint=self._intent_creation_fp,
+                        current_fingerprint=_current_ws_fp,
+                        threshold=_drift_threshold,
+                        prior_regime=(self._session_intent or {}).get("regime_summary", "")[:20],
+                        current_regime=(self._world_state or {}).get("regime", ""),
+                        cycle_count=self.cycle_count,
+                    )
+                    if _drift_signal is not None:
+                        workflow.logger.info(
+                            "R94: regime drift detected (distance=%.3f) — refreshing SessionIntent",
+                            _drift_signal.cosine_distance,
+                        )
+                        _drift_raw_snaps = {
+                            sym: dict(indicator_snapshots.get(sym) or {})
+                            for sym in self.symbols
+                            if indicator_snapshots.get(sym)
+                        }
+                        _refreshed_intent = await workflow.execute_activity(
+                            generate_session_intent_activity,
+                            args=[
+                                self.symbols,
+                                _drift_raw_snaps,
+                                {},
+                                portfolio_state,
+                                {"indicator_timeframe": self.indicator_timeframe,
+                                 "screener_regime": self.screener_regime,
+                                 "direction_bias": self.direction_bias,
+                                 "drift_triggered": True},
+                                None,
+                            ],
+                            schedule_to_close_timeout=timedelta(minutes=2),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+                        if _refreshed_intent:
+                            _refreshed_intent["drift_triggered"] = True
+                            self._session_intent = _refreshed_intent
+                            self._intent_creation_fp = _current_ws_fp or self._intent_creation_fp
+                            self._last_intent_refresh_cycle = self.cycle_count
+                            await self._emit("regime_drift_refresh", {
+                                "cosine_distance": _drift_signal.cosine_distance,
+                                "prior_regime": _drift_signal.prior_regime,
+                                "current_regime": _drift_signal.current_regime,
+                                "cycle_count": self.cycle_count,
+                            })
+                except Exception as _drift_exc:
+                    workflow.logger.debug("R94: drift detection failed (non-fatal): %s", _drift_exc)
 
         # Generate plan (guarded by PolicyLoopGate — gate acquired above)
         try:
@@ -4608,15 +4688,15 @@ class PaperTradingWorkflow:
         await self._emit("order_executed", event_payload)
 
         if _is_full_close and _fill_symbol:
-            _portfolio_state.get("positions", {}).pop(_fill_symbol, None)
-            _portfolio_state.get("position_meta", {}).pop(_fill_symbol, None)
-            _portfolio_state.get("entry_prices", {}).pop(_fill_symbol, None)
             await self._handle_full_exit_bookkeeping(
                 symbol=_fill_symbol,
                 exit_price=fill_price,
                 portfolio_state=_portfolio_state,
                 position_meta=_pre_position_meta,
             )
+            _portfolio_state.get("positions", {}).pop(_fill_symbol, None)
+            _portfolio_state.get("position_meta", {}).pop(_fill_symbol, None)
+            _portfolio_state.get("entry_prices", {}).pop(_fill_symbol, None)
 
         workflow.logger.info(f"Executed order: {order['side']} {order['quantity']} {order['symbol']} @ {order['price']}")
 
@@ -4713,6 +4793,9 @@ class PaperTradingWorkflow:
             # R76: AI planner
             use_ai_planner=self.use_ai_planner,
             session_intent=dict(self._session_intent) if self._session_intent else None,
+            # R94: drift detection state
+            intent_creation_fp=dict(self._intent_creation_fp) if self._intent_creation_fp else None,
+            last_intent_refresh_cycle=self._last_intent_refresh_cycle,
             # R85: trailing stop defaults
             default_trailing_config=dict(self._default_trailing_config) if self._default_trailing_config else None,
             # R:R gate
@@ -4775,6 +4858,9 @@ class PaperTradingWorkflow:
         # R76: AI planner
         self.use_ai_planner = parsed.use_ai_planner
         self._session_intent = dict(parsed.session_intent) if parsed.session_intent else None
+        # R94: drift detection state
+        self._intent_creation_fp = dict(parsed.intent_creation_fp) if getattr(parsed, "intent_creation_fp", None) else None
+        self._last_intent_refresh_cycle = getattr(parsed, "last_intent_refresh_cycle", None) or 0
         # R85: trailing stop defaults
         self._default_trailing_config = dict(parsed.default_trailing_config) if parsed.default_trailing_config else None
         # R:R gate

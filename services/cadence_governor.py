@@ -262,3 +262,55 @@ class CadenceGovernor:
             "last_adaptation_action": self._state.last_adaptation_action,
             "added_symbols": list(self._state.added_symbols),
         }
+
+    @staticmethod
+    def detect_regime_drift(
+        prior_fingerprint: Dict[str, float],
+        current_fingerprint: Dict[str, float],
+        threshold: float = 0.35,
+        prior_regime: Optional[str] = None,
+        current_regime: Optional[str] = None,
+        cycle_count: Optional[int] = None,
+    ) -> "Optional[Any]":
+        """Return a RegimeDriftSignal when cosine distance exceeds threshold, else None.
+
+        Args:
+            prior_fingerprint: Regime fingerprint at session intent creation time.
+            current_fingerprint: Current bar's regime fingerprint.
+            threshold: Cosine distance above which drift is declared (default 0.35).
+            prior_regime / current_regime: Optional regime label strings for telemetry.
+            cycle_count: Current workflow cycle for telemetry.
+
+        Returns:
+            RegimeDriftSignal if drift detected; None otherwise.
+        """
+        try:
+            from schemas.reasoning_cadence import RegimeDriftSignal
+            if not prior_fingerprint or not current_fingerprint:
+                return None
+
+            shared = set(prior_fingerprint) & set(current_fingerprint)
+            if not shared:
+                return None
+
+            import math
+            dot = sum(prior_fingerprint[k] * current_fingerprint[k] for k in shared)
+            mag_a = math.sqrt(sum(prior_fingerprint[k] ** 2 for k in shared))
+            mag_b = math.sqrt(sum(current_fingerprint[k] ** 2 for k in shared))
+            if mag_a == 0.0 or mag_b == 0.0:
+                return None
+
+            cosine_sim = dot / (mag_a * mag_b)
+            distance = 1.0 - max(-1.0, min(1.0, cosine_sim))
+
+            if distance < threshold:
+                return None
+
+            return RegimeDriftSignal(
+                prior_regime=prior_regime,
+                current_regime=current_regime,
+                cosine_distance=round(distance, 4),
+                detected_at_bar=cycle_count,
+            )
+        except Exception:
+            return None

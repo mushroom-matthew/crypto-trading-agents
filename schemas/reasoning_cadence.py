@@ -141,6 +141,10 @@ class CadenceConfig:
     regime_fingerprint_relearn_days: int
     regime_fingerprint_drift_threshold: float
 
+    # --- R94: Intra-session regime drift detection ---
+    regime_drift_threshold: float          # cosine distance threshold (default 0.35)
+    regime_drift_min_cycles_between_refresh: int  # guard against thrashing (default 12)
+
     def __init__(self) -> None:
         self.tick_engine_deterministic_only = _env_bool("TICK_ENGINE_DETERMINISTIC_ONLY", True)
         self.tick_validation_timeout_ms = _env_int("TICK_VALIDATION_TIMEOUT_MS", 50)
@@ -198,6 +202,12 @@ class CadenceConfig:
             "REGIME_FINGERPRINT_DRIFT_THRESHOLD", 0.30
         )
 
+        # R94: intra-session regime drift threshold for proactive goal reformulation
+        self.regime_drift_threshold = _env_float("REGIME_DRIFT_THRESHOLD", 0.35)
+        self.regime_drift_min_cycles_between_refresh = _env_int(
+            "REGIME_DRIFT_MIN_CYCLES_BETWEEN_REFRESH", 12
+        )
+
     def heartbeat_for_timeframe(self, indicator_timeframe: str) -> int:
         """Return the policy-loop heartbeat in seconds for the given indicator timeframe."""
         if indicator_timeframe in {"1m", "1min"}:
@@ -216,6 +226,24 @@ def get_cadence_config() -> CadenceConfig:
     if _default_config is None:
         _default_config = CadenceConfig()
     return _default_config
+
+
+# ---------------------------------------------------------------------------
+# R94 — Regime drift signal
+# ---------------------------------------------------------------------------
+
+class RegimeDriftSignal(BaseModel):
+    """Emitted when the current regime fingerprint diverges significantly from
+    the fingerprint at session intent creation (R94 intra-session reformulation).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    prior_regime: Optional[str] = None      # regime label at intent creation
+    current_regime: Optional[str] = None    # regime label now
+    cosine_distance: float                  # 0 = identical, 1 = orthogonal
+    confidence: float = 1.0                 # confidence in the drift (reserved for future)
+    detected_at_bar: Optional[int] = None   # cycle_count when detected
 
 
 # ---------------------------------------------------------------------------

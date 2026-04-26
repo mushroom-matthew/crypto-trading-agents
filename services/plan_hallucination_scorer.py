@@ -10,7 +10,9 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from schemas.judge_feedback import PlanHallucinationReport, SectionHallucinationFinding
+import math
+
+from schemas.judge_feedback import PlanConfidenceScore, PlanHallucinationReport, SectionHallucinationFinding
 
 logger = logging.getLogger(__name__)
 
@@ -363,3 +365,79 @@ class PlanHallucinationScorer:
         except Exception:
             logger.debug("R97 logprob_pass failed (non-fatal)", exc_info=True)
         return findings
+
+    # ------------------------------------------------------------------
+    # R95 — Aggregate confidence score (FG-PRM log-sum)
+    # ------------------------------------------------------------------
+
+    def aggregate_score(
+        self,
+        report: PlanHallucinationReport,
+        field_uncertainty: "dict[str, float] | None" = None,
+        field_logprobs: "dict[str, float] | None" = None,
+    ) -> PlanConfidenceScore:
+        """Aggregate all signals into a single PlanConfidenceScore.
+
+        Score = Σ log(1 - p_hallucination_i) over all findings.
+        Each REJECT finding contributes log(1 - 0.90) = -2.30.
+        Each REVISE finding contributes log(1 - 0.60) = -0.92.
+        A plan with no findings scores 0.0 (maximum).
+        """
+        try:
+            # Per-section penalties
+            _REJECT_P = 0.90  # probability of being a true hallucination
+            _REVISE_P = 0.60
+            total_log_reward = 0.0
+            per_section: list[dict] = []
+            reject_count = sum(1 for f in report.findings if f.severity == "REJECT")
+            revise_count = sum(1 for f in report.findings if f.severity == "REVISE")
+
+            for f in report.findings:
+                p = _REJECT_P if f.severity == "REJECT" else _REVISE_P
+                contribution = math.log(1.0 - p)
+                total_log_reward += contribution
+                per_section.append({
+                    "section": f.section_id,
+                    "type": f.hallucination_type,
+                    "severity": f.severity,
+                    "log_contribution": round(contribution, 4),
+                })
+
+            # Field uncertainty mean (R93)
+            uncertainty_mean: float | None = None
+            if field_uncertainty:
+                vals = [float(v) for v in field_uncertainty.values() if isinstance(v, (int, float))]
+                if vals:
+                    uncertainty_mean = round(sum(vals) / len(vals), 4)
+
+            # Logprob-flagged fields (R97)
+            flagged_logprob_fields = [
+                k for k, v in (field_logprobs or {}).items()
+                if isinstance(v, (int, float)) and float(v) < -1.5
+            ]
+
+            # Human-readable interpretation
+            if total_log_reward == 0.0 and not flagged_logprob_fields:
+                interpretation = "No hallucination signals detected. Plan appears internally consistent."
+            elif reject_count > 0:
+                interpretation = f"Plan has {reject_count} REJECT finding(s) — likely structurally invalid."
+            elif revise_count > 0:
+                interpretation = f"Plan has {revise_count} REVISE finding(s) — revision recommended."
+            else:
+                interpretation = "Logprob uncertainty flagged but no structural violations."
+
+            return PlanConfidenceScore(
+                aggregate_log_reward=round(total_log_reward, 4),
+                per_section_scores=per_section,
+                interpretation=interpretation,
+                reject_count=reject_count,
+                revise_count=revise_count,
+                field_uncertainty_mean=uncertainty_mean,
+                field_logprobs_flagged=flagged_logprob_fields,
+            )
+        except Exception as exc:
+            logger.debug("aggregate_score failed (non-fatal): %s", exc)
+            return PlanConfidenceScore(
+                aggregate_log_reward=0.0,
+                interpretation="Score computation failed (non-fatal).",
+            )
