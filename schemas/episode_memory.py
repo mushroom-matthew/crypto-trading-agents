@@ -123,6 +123,10 @@ class EpisodeMemoryRecord(BaseModel):
     timing_accuracy: Optional[float] = None       # expected_bars / bars_held (1.0 = perfect)
     source_session_id: Optional[str] = None       # cross-session indexing
 
+    # R91: structured reflexion summaries — lesson sentences extracted from LLM scratchpad
+    # at episode resolution time.  Populated only for losing/neutral episodes.
+    reflexion_summaries: List[str] = Field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Retrieval metadata
@@ -166,6 +170,8 @@ class DiversifiedMemoryBundle(BaseModel):
     losing_contexts: List[EpisodeMemoryRecord] = Field(default_factory=list)
     failure_mode_patterns: List[EpisodeMemoryRecord] = Field(default_factory=list)
     retrieval_meta: MemoryRetrievalMeta
+    # R91: top-3 lesson strings extracted from losing episodes' reflexion_summaries
+    reflexion_lessons: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -478,6 +478,8 @@ class StrategyPlan(SerializableModel):
     scratchpad: str | None = None
     # R93: per-field LLM-stated confidence (parsed from confidence_map in scratchpad)
     field_uncertainty: dict[str, float] | None = None
+    # R97: per-field mean log-probability from the Responses API token stream
+    field_logprobs: dict[str, float] | None = None
     max_trades_per_day: int | None = Field(default=None, ge=0)
     min_trades_per_day: int | None = Field(default=None, ge=0)
     max_triggers_per_symbol_per_day: int | None = Field(default=None, ge=0)

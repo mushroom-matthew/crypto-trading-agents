@@ -749,6 +749,10 @@ async def generate_strategy_plan_activity(
                                 ",".join(r.failure_modes[:2]) for r in _failures if r.failure_modes
                             )
                         )
+                    # R91: inject reflexion lessons from prior losing episodes
+                    _reflexion = getattr(_bundle, "reflexion_lessons", None) or []
+                    for _lesson in _reflexion[:3]:
+                        _memory_lines.append(f"  REFLEXION: {_lesson}")
             if _memory_lines:
                 effective_prompt = (
                     (effective_prompt or "")

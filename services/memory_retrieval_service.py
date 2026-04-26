@@ -278,6 +278,7 @@ class MemoryRetrievalService:
                     losing_contexts=list(prior_bundle.losing_contexts),
                     failure_mode_patterns=list(prior_bundle.failure_mode_patterns),
                     retrieval_meta=reused_meta,
+                    reflexion_lessons=list(prior_bundle.reflexion_lessons),
                 )
 
         # --- Symbol-local candidates ---
@@ -335,6 +336,19 @@ class MemoryRetrievalService:
             similarity_spec_version=_SIMILARITY_SPEC_VERSION,
         )
 
+        # R91: collect top-3 unique reflexion lessons from losing episodes
+        reflexion_lessons: List[str] = []
+        seen: set = set()
+        for ep in losses + failure_modes:
+            for lesson in (ep.reflexion_summaries or []):
+                if lesson and lesson not in seen:
+                    reflexion_lessons.append(lesson)
+                    seen.add(lesson)
+                if len(reflexion_lessons) >= 3:
+                    break
+            if len(reflexion_lessons) >= 3:
+                break
+
         return DiversifiedMemoryBundle(
             bundle_id=str(uuid4()),
             symbol=request.symbol,
@@ -343,6 +357,7 @@ class MemoryRetrievalService:
             losing_contexts=losses,
             failure_mode_patterns=failure_modes,
             retrieval_meta=retrieval_meta,
+            reflexion_lessons=reflexion_lessons,
         )
 
     # -----------------------------------------------------------------------

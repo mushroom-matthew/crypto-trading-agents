@@ -278,3 +278,88 @@ class PlanHallucinationScorer:
                 ))
         except Exception:
             logger.debug("Fabrication check skipped (PlaybookRegistry unavailable)", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # R93 — Uncertainty cross-check
+    # ------------------------------------------------------------------
+
+    def uncertainty_pass(
+        self,
+        plan,
+        memory_bundle=None,
+    ) -> "list[SectionHallucinationFinding]":
+        """Cross-reference LLM-stated confidence against memory cluster win-rate.
+
+        High stated confidence + memory showing mostly losses for this regime →
+        FieldUncertaintyFinding (REVISE severity).  All failures are non-fatal.
+        """
+        findings: list[SectionHallucinationFinding] = []
+        try:
+            field_uncertainty = getattr(plan, "field_uncertainty", None) or {}
+            if not field_uncertainty:
+                return findings
+
+            # Compute cluster support from memory bundle (loss rate for current regime)
+            cluster_support: float | None = None
+            if memory_bundle is not None:
+                wins = len(getattr(memory_bundle, "winning_contexts", None) or [])
+                losses = len(getattr(memory_bundle, "losing_contexts", None) or [])
+                total = wins + losses
+                if total >= 3:
+                    cluster_support = wins / total  # fraction that are wins
+
+            for field, lm_confidence in field_uncertainty.items():
+                if not isinstance(lm_confidence, (int, float)):
+                    continue
+                lm_confidence = float(lm_confidence)
+                if lm_confidence <= 0.7:
+                    continue  # only flag when LLM is highly confident
+                if cluster_support is None:
+                    continue  # no memory data — can't cross-check
+                if cluster_support >= 0.4:
+                    continue  # memory supports the trade — no conflict
+                # High LLM confidence + low memory win-rate = suspicious
+                findings.append(SectionHallucinationFinding(
+                    section_id=field,
+                    hallucination_type=FACTUAL_INCONSISTENCY,
+                    severity="REVISE",
+                    detail=(
+                        f"R93: field='{field}' lm_confidence={lm_confidence:.2f} "
+                        f"cluster_support={cluster_support:.2f} (memory win-rate below 40%)"
+                    ),
+                ))
+        except Exception:
+            logger.debug("R93 uncertainty_pass failed (non-fatal)", exc_info=True)
+        return findings
+
+    # ------------------------------------------------------------------
+    # R97 — Logprob-based factual inconsistency
+    # ------------------------------------------------------------------
+
+    def logprob_pass(
+        self,
+        field_logprobs: "dict[str, float]",
+    ) -> "list[SectionHallucinationFinding]":
+        """Flag high-entropy fields: mean logprob < -1.5 → Factual Inconsistency.
+
+        Threshold: per-field mean logprob < -1.5 (≈ 22% avg probability per token).
+        Severity is REVISE — informs risk scaling but does not hard-reject.
+        """
+        findings: list[SectionHallucinationFinding] = []
+        try:
+            for field, mean_lp in (field_logprobs or {}).items():
+                if not isinstance(mean_lp, (int, float)):
+                    continue
+                if float(mean_lp) < -1.5:
+                    findings.append(SectionHallucinationFinding(
+                        section_id=field,
+                        hallucination_type=FACTUAL_INCONSISTENCY,
+                        severity="REVISE",
+                        detail=(
+                            f"R97: field='{field}' mean_logprob={mean_lp:.3f} "
+                            f"(<-1.5 threshold — model was uncertain about this value)"
+                        ),
+                    ))
+        except Exception:
+            logger.debug("R97 logprob_pass failed (non-fatal)", exc_info=True)
+        return findings

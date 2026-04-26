@@ -393,10 +393,21 @@ class JudgePlanValidationService:
         hallucination_hard_reject = False
         try:
             from services.plan_hallucination_scorer import PlanHallucinationScorer
-            h_report = PlanHallucinationScorer().score(
+            _scorer = PlanHallucinationScorer()
+            h_report = _scorer.score(
                 plan, llm_input=llm_input, judge_constraints=judge_constraints,
                 risk_params=risk_params,
             )
+            # R93: uncertainty cross-check (non-fatal, REVISE-only)
+            _uncertainty_findings = _scorer.uncertainty_pass(plan, memory_bundle=memory_bundle)
+            for _uf in _uncertainty_findings:
+                h_report.findings.append(_uf)
+            # R97: logprob-based uncertainty (non-fatal, REVISE-only)
+            _field_logprobs = getattr(plan, "field_logprobs", None) or {}
+            if _field_logprobs:
+                _lp_findings = _scorer.logprob_pass(_field_logprobs)
+                for _lf in _lp_findings:
+                    h_report.findings.append(_lf)
             object.__setattr__(plan, "_hallucination_report", h_report)
             hallucination_reasons = h_report.as_reason_strings()
             hallucination_hard_reject = h_report.has_reject

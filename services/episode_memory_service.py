@@ -185,6 +185,24 @@ def _detect_failure_modes(
 # Builder
 # ---------------------------------------------------------------------------
 
+def _extract_reflexion_lesson(
+    scratchpad_text: str,
+    outcome_class: str,
+    r_achieved: Optional[float],
+) -> Optional[str]:
+    """Extract a one-sentence lesson from an LLM scratchpad for a losing episode."""
+    if not scratchpad_text or outcome_class == "win":
+        return None
+    # Strip <reasoning> tags if present
+    text = scratchpad_text
+    for tag in ("<reasoning>", "</reasoning>"):
+        text = text.replace(tag, "").strip()
+    # Take first 200 chars as the excerpt
+    excerpt = text[:200].replace("\n", " ").strip()
+    r_str = f"r={r_achieved:.2f}" if r_achieved is not None else "r=n/a"
+    return f"outcome={outcome_class} {r_str}: {excerpt}"
+
+
 def build_episode_record(
     signal_event: SignalEvent,
     regime_fingerprint: Optional[Dict[str, float]] = None,
@@ -205,6 +223,7 @@ def build_episode_record(
     stance: Optional[str] = None,
     trigger_category: Optional[str] = None,
     episode_source: "EpisodeSource" = "live",
+    scratchpad_text: Optional[str] = None,
 ) -> EpisodeMemoryRecord:
     """Build an EpisodeMemoryRecord from a resolved SignalEvent.
 
@@ -244,6 +263,13 @@ def build_episode_record(
         mae_pct=mae_pct,
     )
 
+    # R91: extract reflexion lesson from scratchpad for losing/neutral episodes
+    reflexion_summaries: List[str] = []
+    if scratchpad_text:
+        lesson = _extract_reflexion_lesson(scratchpad_text, outcome_class, r_achieved)
+        if lesson:
+            reflexion_summaries = [lesson]
+
     return EpisodeMemoryRecord(
         episode_id=str(uuid4()),
         signal_id=signal_event.signal_id,
@@ -274,6 +300,7 @@ def build_episode_record(
         failure_modes=failure_modes,
         episode_source=episode_source,
         retrieval_scope=None,
+        reflexion_summaries=reflexion_summaries,
     )
 
 

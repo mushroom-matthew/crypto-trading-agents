@@ -267,6 +267,12 @@ class LLMClient:
                     "schema_mode": os.environ.get("STRATEGIST_SCHEMA_MODE", "core"),
                 }
                 with langfuse_span("llm_strategist.backtest", metadata={"model": self.model}) as span:
+                    # R97: request logprobs for token-level uncertainty extraction
+                    _logprob_kwargs: dict = {}
+                    try:
+                        _logprob_kwargs = {"logprobs": True}
+                    except Exception:
+                        pass
                     completion = self.client.responses.create(
                         model=self.model,
                         input=[
@@ -276,6 +282,7 @@ class LLMClient:
                         **output_token_args(self.model, 2500),
                         **temperature_args(self.model, 0.1),
                         **reasoning_args(self.model, effort="low"),
+                        **_logprob_kwargs,
                     )
                     content = completion.output_text
                     if not content:
@@ -293,6 +300,26 @@ class LLMClient:
                         plan_dict.setdefault("scratchpad", scratchpad_text)
                     if confidence_map:
                         plan_dict.setdefault("field_uncertainty", confidence_map)
+                    # R97: extract per-field mean logprob from token stream
+                    _field_logprobs: dict = {}
+                    try:
+                        from services.logprob_extractor import extract_field_logprobs
+                        _raw_logprobs = None
+                        # Responses API: output[0].content[0].logprobs
+                        _output = getattr(completion, "output", None) or []
+                        if _output:
+                            _first_output = _output[0] if isinstance(_output, list) else _output
+                            _content_list = getattr(_first_output, "content", None) or []
+                            if _content_list:
+                                _first_content = _content_list[0] if isinstance(_content_list, list) else _content_list
+                                _raw_logprobs = getattr(_first_content, "logprobs", None)
+                        if _raw_logprobs is not None:
+                            _plan_json_for_lp = json.dumps(plan_dict)
+                            _field_logprobs = extract_field_logprobs(_raw_logprobs, _plan_json_for_lp)
+                    except Exception:
+                        pass
+                    if _field_logprobs:
+                        plan_dict["field_logprobs"] = _field_logprobs
                     plan = StrategyPlan.model_validate(plan_dict)
                     duration_ms = int((time.monotonic() - start_time) * 1000)
                     self.last_generation_info = {
@@ -305,6 +332,7 @@ class LLMClient:
                         "retrieved_template_id": retrieved_template_id,
                         "scratchpad_text": scratchpad_text,
                         "confidence_map": confidence_map,
+                        "field_logprobs": _field_logprobs,
                     }
                     _emit_llm_event(
                         {
@@ -317,6 +345,7 @@ class LLMClient:
                             "plan_id": plan_id,
                             "duration_ms": duration_ms,
                             "prompt_budget": _prompt_budget,
+                            "field_logprobs": _field_logprobs,
                             **(metadata or {}),
                         }
                     )

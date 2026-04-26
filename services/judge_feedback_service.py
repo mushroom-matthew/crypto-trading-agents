@@ -623,6 +623,7 @@ class JudgeFeedbackService:
         self,
         heuristics: HeuristicAnalysis,
         trade_metrics: TradeMetrics | None = None,
+        field_uncertainty: Dict[str, float] | None = None,
     ) -> JudgeGuidanceVector:
         """Build a JudgeGuidanceVector from heuristic analysis (R80).
 
@@ -631,6 +632,10 @@ class JudgeFeedbackService:
         - score < 50  → risk_multiplier=0.8 (reduce sizing 20%)
         - score >= 70 → risk_multiplier=1.2 (allow slightly larger sizing)
         - else         → risk_multiplier=1.0 (neutral)
+
+        R93: when field_uncertainty is provided (LLM-stated confidence per field),
+        the risk_multiplier is further scaled by max(0.6, mean_confidence) to reduce
+        sizing when the model is uncertain about its own outputs.
 
         Playbook penalties are derived from category_stats: categories with
         win_rate < 0.3 and count >= 3 receive a 0.5 penalty weight.
@@ -646,6 +651,17 @@ class JudgeFeedbackService:
             risk_multiplier = 1.2
         else:
             risk_multiplier = 1.0
+
+        # R93: scale down when LLM reports low confidence in its own plan fields
+        if field_uncertainty:
+            try:
+                vals = [float(v) for v in field_uncertainty.values() if isinstance(v, (int, float))]
+                if vals:
+                    mean_confidence = sum(vals) / len(vals)
+                    if mean_confidence < 0.7:
+                        risk_multiplier *= max(0.6, mean_confidence)
+            except Exception:
+                pass
 
         # Playbook penalties from category win rates
         playbook_penalties: Dict[str, float] = {}
