@@ -154,11 +154,12 @@ def test_same_timeframe_atr_clean():
 
 # ── validate_trigger_plan ─────────────────────────────────────────────────────
 
-def _make_plan(triggers: list) -> dict:
+def _make_plan(triggers: list, stance: str = "active") -> dict:
     return {
         "generated_at": "2026-01-01T00:00:00+00:00",
         "valid_until": "2026-01-02T00:00:00+00:00",
         "regime": "bear",
+        "stance": stance,
         "triggers": triggers,
         "risk_constraints": {
             "max_position_risk_pct": 2.0,
@@ -184,7 +185,7 @@ def _emergency_exit(exit_rule: str, trigger_id: str = "test_exit") -> dict:
 
 
 def test_validate_rejects_tautology():
-    plan = _make_plan([_emergency_exit(ACTUAL_FAILING_RULE)])
+    plan = _make_plan([_emergency_exit(ACTUAL_FAILING_RULE)], stance="wait")
     result = validate_trigger_plan(plan, base_tf_minutes=60)
     assert not result.is_valid
     assert len(result.hard_errors) == 1
@@ -193,7 +194,7 @@ def test_validate_rejects_tautology():
 
 
 def test_validate_rejects_missing_exit_rule():
-    plan = _make_plan([_emergency_exit("")])
+    plan = _make_plan([_emergency_exit("")], stance="wait")
     result = validate_trigger_plan(plan, base_tf_minutes=60)
     assert not result.is_valid
     assert result.hard_errors[0].code == "MISSING_EXIT_RULE"
@@ -201,7 +202,7 @@ def test_validate_rejects_missing_exit_rule():
 
 def test_validate_accepts_vol_state_rule():
     rule = "not is_flat and (vol_state == 'extreme' or unrealized_pnl_pct < -6.0)"
-    plan = _make_plan([_emergency_exit(rule)])
+    plan = _make_plan([_emergency_exit(rule)], stance="wait")
     result = validate_trigger_plan(plan, base_tf_minutes=60)
     assert result.is_valid
     assert result.warnings == []
@@ -209,7 +210,7 @@ def test_validate_accepts_vol_state_rule():
 
 def test_validate_accepts_structural_break_rule():
     rule = "not is_flat and close < nearest_support * 0.97"
-    plan = _make_plan([_emergency_exit(rule)])
+    plan = _make_plan([_emergency_exit(rule)], stance="wait")
     result = validate_trigger_plan(plan, base_tf_minutes=60)
     assert result.is_valid
 
@@ -235,11 +236,72 @@ def test_validate_multiple_triggers_mixed():
     """One clean + one tautological emergency exit → one error."""
     clean = _emergency_exit("not is_flat and vol_state == 'extreme'", trigger_id="clean_exit")
     bad = _emergency_exit(ACTUAL_FAILING_RULE, trigger_id="bad_exit")
-    plan = _make_plan([clean, bad])
+    plan = _make_plan([clean, bad], stance="wait")
     result = validate_trigger_plan(plan, base_tf_minutes=60)
     assert not result.is_valid
     assert len(result.hard_errors) == 1
     assert result.hard_errors[0].trigger_id == "bad_exit"
+
+
+def _entry_trigger(direction: str = "long", trigger_id: str = "btc_entry") -> dict:
+    return {
+        "id": trigger_id,
+        "symbol": "BTC-USD",
+        "category": "technical",
+        "direction": direction,
+        "timeframe": "5m",
+        "confidence_grade": "B",
+        "entry_rule": "is_flat and rsi_14 < 35",
+        "exit_rule": "not is_flat and (stop_hit or target_hit)",
+        "stop_loss_pct": 1.5,
+        "target_anchor_type": "r_multiple_2",
+    }
+
+
+def test_validate_rejects_exit_only_active_plan():
+    """An active plan with only exit triggers must be rejected with NO_ENTRY_TRIGGERS."""
+    plan = _make_plan([_emergency_exit("not is_flat and vol_state == 'extreme'")])
+    result = validate_trigger_plan(plan, base_tf_minutes=5)
+    assert not result.is_valid
+    assert any(e.code == "NO_ENTRY_TRIGGERS" for e in result.hard_errors)
+
+
+def test_validate_accepts_wait_stance_exit_only():
+    """A wait-stance plan with only exit triggers is valid — intent is to stand aside."""
+    plan = _make_plan([_emergency_exit("not is_flat and vol_state == 'extreme'")], stance="wait")
+    result = validate_trigger_plan(plan, base_tf_minutes=5)
+    assert result.is_valid
+
+
+def test_validate_accepts_active_plan_with_entry():
+    """An active plan with at least one entry trigger passes."""
+    plan = _make_plan([_entry_trigger("long"), _emergency_exit("not is_flat and vol_state == 'extreme'")])
+    result = validate_trigger_plan(plan, base_tf_minutes=5)
+    assert result.is_valid
+
+
+def test_validate_rejects_empty_trigger_list_active():
+    """An active plan with zero triggers must be rejected."""
+    plan = _make_plan([])
+    result = validate_trigger_plan(plan, base_tf_minutes=5)
+    assert not result.is_valid
+    assert any(e.code == "NO_ENTRY_TRIGGERS" for e in result.hard_errors)
+
+
+def test_validate_accepts_empty_trigger_list_wait():
+    """A wait-stance plan with zero triggers is valid."""
+    plan = _make_plan([], stance="wait")
+    result = validate_trigger_plan(plan, base_tf_minutes=5)
+    assert result.is_valid
+
+
+def test_repair_prompt_no_entry_triggers():
+    """repair_prompt for NO_ENTRY_TRIGGERS contains actionable fix instructions."""
+    plan = _make_plan([_emergency_exit("not is_flat and vol_state == 'extreme'")])
+    result = validate_trigger_plan(plan)
+    repair = result.repair_prompt()
+    assert "NO ENTRY TRIGGERS" in repair
+    assert "volume_multiple" in repair
 
 
 # ── PlanValidationResult methods ──────────────────────────────────────────────
@@ -269,7 +331,7 @@ def test_repair_prompt_empty_when_valid():
 
 
 def test_repair_prompt_contains_fix_options():
-    plan = _make_plan([_emergency_exit(ACTUAL_FAILING_RULE)])
+    plan = _make_plan([_emergency_exit(ACTUAL_FAILING_RULE)], stance="wait")
     result = validate_trigger_plan(plan)
     repair = result.repair_prompt()
     assert "REJECTED" in repair

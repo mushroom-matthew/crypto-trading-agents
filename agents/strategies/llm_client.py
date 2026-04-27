@@ -269,15 +269,9 @@ class LLMClient:
                     "schema_mode": os.environ.get("STRATEGIST_SCHEMA_MODE", "core"),
                 }
                 with langfuse_span("llm_strategist.backtest", metadata={"model": self.model}) as span:
-                    # R97: request logprobs for token-level uncertainty extraction
-                    _logprob_kwargs: dict = {}
-                    try:
-                        _logprob_kwargs = {"logprobs": True}
-                    except Exception:
-                        pass
                     _temp = temperature if temperature is not None else 0.1
                     _effort = reasoning_effort if reasoning_effort is not None else "low"
-                    completion = self.client.responses.create(
+                    _call_kwargs = dict(
                         model=self.model,
                         input=[
                             {"role": "system", "content": system_prompt},
@@ -286,8 +280,12 @@ class LLMClient:
                         **output_token_args(self.model, 2500),
                         **temperature_args(self.model, _temp),
                         **reasoning_args(self.model, effort=_effort),
-                        **_logprob_kwargs,
                     )
+                    # R97: top_logprobs unsupported on reasoning models — gate upfront
+                    from agents.llm.model_utils import is_reasoning_model
+                    if not is_reasoning_model(self.model):
+                        _call_kwargs["top_logprobs"] = 5
+                    completion = self.client.responses.create(**_call_kwargs)
                     content = completion.output_text
                     if not content:
                         raise ValueError(

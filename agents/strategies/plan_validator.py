@@ -202,6 +202,17 @@ class PlanValidationResult:
             "",
         ]
         for e in self.hard_errors:
+            if e.code == "NO_ENTRY_TRIGGERS":
+                lines.append("ERROR: NO ENTRY TRIGGERS")
+                lines.append(e.message)
+                lines.append(
+                    "FIX: Include at least one 'long' or 'short' direction trigger per "
+                    "active symbol. Keep entry_rule conditions achievable given current "
+                    "market conditions (e.g. avoid volume_multiple > 0.5 in low-volume "
+                    "overnight sessions; prefer volume_multiple > 0.1)."
+                )
+                lines.append("")
+                continue
             lines.append(f"TRIGGER: {e.trigger_id}  (category={e.category})")
             lines.append(f"RULE:    {e.raw_rule}")
             lines.append(f"ERROR:   {e.message}")
@@ -231,6 +242,7 @@ def validate_trigger_plan(
     Currently validates:
     - emergency_exit triggers must have a non-empty exit_rule
     - emergency_exit exit_rules must not contain cross-timeframe ATR tautologies
+    - plans with stance != "wait" must contain at least one entry (long/short) trigger
 
     Args:
         plan_dict: Raw plan dictionary with a "triggers" list.
@@ -242,7 +254,27 @@ def validate_trigger_plan(
     """
     result = PlanValidationResult()
 
-    for trigger in plan_dict.get("triggers", []):
+    # Plans that aren't explicitly in wait stance must include at least one entry trigger.
+    # Exit-only plans leave the session blind and suppress participation for the entire
+    # plan interval — treat as a hard error so the repair pass can ask the LLM to add entries.
+    _stance = (plan_dict.get("stance") or "").lower()
+    _triggers = plan_dict.get("triggers") or []
+    _has_entry = any(t.get("direction") in ("long", "short") for t in _triggers)
+    if _stance != "wait" and not _has_entry:
+        result.hard_errors.append(TriggerError(
+            trigger_id="<plan>",
+            category="plan",
+            code="NO_ENTRY_TRIGGERS",
+            message=(
+                "Plan has no long or short entry triggers but stance is not 'wait'. "
+                "Add at least one directional entry trigger per symbol, or set stance='wait' "
+                "with a clear rationale. Exit-only plans leave the session blind for the "
+                "entire plan interval."
+            ),
+            raw_rule="",
+        ))
+
+    for trigger in _triggers:
         tid = trigger.get("id", "<unknown>")
         cat = trigger.get("category", "")
 

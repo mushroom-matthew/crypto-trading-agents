@@ -937,6 +937,10 @@ async def generate_strategy_plan_activity(
         if plan.max_trades_per_day is not None and plan.max_trades_per_day < plan.min_trades_per_day:
             plan.max_trades_per_day = plan.min_trades_per_day
 
+    # compile_plan requires run_id; llm_client.generate_plan() doesn't set it on the plan
+    # object (only uses it for event emission), so we stamp it here before model_dump.
+    if not plan.run_id and session_id:
+        plan = plan.model_copy(update={"run_id": session_id})
     plan_dict = plan.model_dump()
     # Stash retrieval metadata for the workflow to include in plan_generated event.
     # Prefixed with _ so it can be popped before any Pydantic re-validation.
@@ -3367,18 +3371,22 @@ class PaperTradingWorkflow:
                 })
                 plan_dict["triggers"] = _valid_triggers
 
-            # R72: Zero-trigger fallback synthesis.
-            # When ALL triggers are invalid/dropped after repair, attempt a minimal
-            # fallback rather than immediately standing down.
-            _zero_triggers = len(plan_dict.get("triggers") or []) == 0
+            # R72: Zero-entry-trigger fallback synthesis.
+            # Fires when there are no long/short entry triggers after repair/validation —
+            # including exit-only plans that passed the trigger list non-empty check.
+            _zero_triggers = not any(
+                t.get("direction") in ("long", "short")
+                for t in (plan_dict.get("triggers") or [])
+            )
             _fallback_succeeded = False
             if _zero_triggers:
                 workflow.logger.warning(
-                    "R72: zero valid triggers after repair/validation — attempting fallback synthesis"
+                    "R72: no entry triggers after repair/validation — attempting fallback synthesis"
                 )
+                _exit_only = len(plan_dict.get("triggers") or []) > 0
                 await self._emit("eval_summary", {
                     "event": "plan_construction_failed",
-                    "reason": "zero_triggers_after_repair",
+                    "reason": "exit_only_plan" if _exit_only else "zero_triggers_after_repair",
                     "missing_stop_count": sum(1 for i in _invalid_triggers if i.get("reason") == "missing_stop"),
                     "missing_target_count": sum(1 for i in _invalid_triggers if "target" in i.get("reason", "")),
                     "schema_mismatch_count": 0,
