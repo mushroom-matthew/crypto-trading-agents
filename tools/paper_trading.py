@@ -16,6 +16,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from agents.constants import (
@@ -2624,7 +2625,19 @@ class PaperTradingWorkflow:
             self._restore_state(resume_state)
             workflow.logger.info(f"Resumed session {self.session_id} at cycle {self.cycle_count}")
         elif config:
-            parsed_config = PaperTradingConfig.model_validate(config)
+            try:
+                parsed_config = PaperTradingConfig.model_validate(config)
+            except Exception as _cfg_exc:
+                # Convert schema validation failures into a non-retryable ApplicationError.
+                # A raw Pydantic exception here causes a retryable workflow task failure,
+                # which gets recorded in Temporal history. If a new worker then replays and
+                # succeeds (e.g. after a schema migration), Temporal raises NonDeterministicError.
+                # ApplicationError(non_retryable=True) terminates the workflow immediately
+                # instead, keeping history clean and surfacing a clear error in the UI.
+                raise ApplicationError(
+                    f"Session config validation failed — terminate and restart with corrected config: {_cfg_exc}",
+                    non_retryable=True,
+                ) from _cfg_exc
             self.session_id = parsed_config.session_id
             self.ledger_workflow_id = (
                 parsed_config.ledger_workflow_id or MOCK_LEDGER_WORKFLOW_ID
