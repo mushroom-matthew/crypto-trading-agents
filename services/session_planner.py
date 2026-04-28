@@ -274,3 +274,53 @@ async def generate_session_intent(
             top_cards,
             regime_summary=regime_hint,
         )
+
+
+async def build_session_intent_from_indicator_snapshots(
+    symbols: List[str],
+    indicator_snapshots_raw: Dict[str, Any],
+    portfolio_state: Dict[str, Any],
+    session_config: Dict[str, Any],
+    llm_model: Optional[str] = None,
+) -> Optional[SessionIntent]:
+    """Build a SessionIntent directly from serialized indicator snapshots.
+
+    This is the shared service-layer entrypoint used by the API before workflow
+    start and by any explicit operator refresh path. It keeps SessionIntent
+    generation out of workflow branching.
+    """
+    try:
+        from datetime import datetime as _dt
+        from schemas.llm_strategist import IndicatorSnapshot as _IndicatorSnapshot
+        from services.opportunity_scanner import rank_universe as _rank_universe
+
+        snapshots: Dict[str, Any] = {}
+        timeframe = session_config.get("indicator_timeframe", "1h")
+        for sym, raw in indicator_snapshots_raw.items():
+            if not isinstance(raw, dict):
+                continue
+            try:
+                snapshots[sym] = _IndicatorSnapshot.model_validate({
+                    **raw,
+                    "symbol": sym,
+                    "timeframe": timeframe,
+                    "as_of": raw.get("as_of", _dt.now(timezone.utc)),
+                })
+            except Exception:
+                logger.debug("session_planner: invalid snapshot skipped for %s", sym, exc_info=True)
+
+        ranking = _rank_universe(
+            symbols=list(snapshots.keys()) or symbols,
+            indicator_snapshots=snapshots,
+            top_n=10,
+        )
+        return await generate_session_intent(
+            opportunity_ranking=ranking.cards,
+            portfolio_state=portfolio_state,
+            session_config=session_config,
+            fallback_symbols=symbols,
+            llm_model=llm_model,
+        )
+    except Exception as exc:
+        logger.warning("session_planner: failed to build session intent from snapshots: %s", exc)
+        return None

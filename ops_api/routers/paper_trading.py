@@ -36,6 +36,11 @@ def _is_not_found(err: Exception) -> bool:
     return "not found" in msg or "no rows in result set" in msg
 
 
+def _normalize_symbols(symbols: List[str]) -> List[str]:
+    """Normalize symbols into the workflow's canonical SYMBOL-USD format."""
+    return [s.upper() if "-" in s else f"{s.upper()}-USD" for s in symbols]
+
+
 async def _verify_session_exists(client: Any, session_id: str) -> None:
     """Lightweight existence check that avoids workflow query-buffer pressure."""
     from temporalio.service import RPCError
@@ -47,6 +52,22 @@ async def _verify_session_exists(client: Any, session_id: str) -> None:
         if _is_not_found(err):
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         raise
+
+
+async def _query_session_portfolio(client: Any, session_id: str) -> Dict[str, Any]:
+    """Query the session-scoped ledger, falling back to the legacy shared ledger."""
+    from agents.constants import MOCK_LEDGER_WORKFLOW_ID
+    from temporalio.service import RPCError, RPCStatusCode
+
+    ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+    ledger_handle = client.get_workflow_handle(ledger_workflow_id)
+    try:
+        return await ledger_handle.query("get_portfolio_status")
+    except RPCError as err:
+        if err.status != RPCStatusCode.NOT_FOUND:
+            raise
+        legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
+        return await legacy_ledger_handle.query("get_portfolio_status")
 
 
 def _count_completed_trade_sets(transactions: List[Dict[str, Any]]) -> int:
@@ -393,8 +414,8 @@ class PaperTradingSessionConfig(BaseModel):
         default=False,
         description=(
             "Enable the AI portfolio planner (R76). When true, generates a SessionIntent "
-            "before the first strategy plan, overriding the symbol list with LLM-selected "
-            "symbols and injecting a SESSION_INTENT block into the strategist prompt."
+            "before the workflow starts, freezes it into session config, and injects a "
+            "SESSION_INTENT block into the strategist prompt."
         ),
     )
 
@@ -449,6 +470,7 @@ class SessionStatus(BaseModel):
     plan_interval_hours: float
     indicator_timeframe: Optional[str] = None
     direction_bias: Optional[str] = None
+    screener_regime: Optional[str] = None
     enable_symbol_discovery: Optional[bool] = None
     # R77: CadenceGovernor summary
     cadence_summary: Optional[Dict[str, Any]] = None
@@ -609,11 +631,12 @@ async def start_session(config: PaperTradingSessionConfig):
         strategy_prompt = config.strategy_prompt
         if config.strategy_id and not strategy_prompt:
             try:
-                from ops_api.routers.prompts import STRATEGIES_DIR, STRATEGIST_PROMPT_FILE
+                from ops_api.routers.prompts import STRATEGIES_DIR, current_strategist_prompt_path
 
                 if config.strategy_id == "default":
-                    if STRATEGIST_PROMPT_FILE.exists():
-                        strategy_prompt = STRATEGIST_PROMPT_FILE.read_text()
+                    strategist_prompt_file = current_strategist_prompt_path()
+                    if strategist_prompt_file.exists():
+                        strategy_prompt = strategist_prompt_file.read_text()
                 else:
                     strategy_file = STRATEGIES_DIR / f"{config.strategy_id}.txt"
                     if strategy_file.exists():
@@ -622,7 +645,7 @@ async def start_session(config: PaperTradingSessionConfig):
                 logger.warning(f"Failed to load strategy template: {e}")
 
         # Normalize symbols
-        symbols = [s.upper() if "-" in s else f"{s.upper()}-USD" for s in config.symbols]
+        symbols = _normalize_symbols(config.symbols)
 
         # Auto-compute plan_interval_hours from indicator_timeframe when not explicitly set.
         # Only applies when the caller left plan_interval_hours at the default (4.0).
@@ -695,6 +718,45 @@ async def start_session(config: PaperTradingSessionConfig):
             risk_params["max_triggers_per_symbol_per_day"] = config.max_triggers_per_symbol_per_day
 
         ledger_workflow_id = _paper_ledger_workflow_id(session_id)
+        session_intent_dict: Optional[Dict[str, Any]] = None
+
+        if config.use_ai_planner:
+            try:
+                from services.session_planner import build_session_intent_from_indicator_snapshots
+                from tools.paper_trading import fetch_indicator_snapshots_activity
+
+                indicator_snapshots = await fetch_indicator_snapshots_activity(
+                    symbols,
+                    config.indicator_timeframe,
+                    300,
+                )
+                indicator_snapshots.pop("_raw_ohlcv_data", None)
+
+                planner_portfolio_state = {
+                    "cash": float(config.initial_cash),
+                    "positions": {},
+                    "equity": float(config.initial_cash),
+                }
+                planner_session_config = {
+                    "indicator_timeframe": config.indicator_timeframe,
+                    "screener_regime": config.screener_regime,
+                    "direction_bias": config.direction_bias,
+                }
+                session_intent = await build_session_intent_from_indicator_snapshots(
+                    symbols=symbols,
+                    indicator_snapshots_raw=indicator_snapshots,
+                    portfolio_state=planner_portfolio_state,
+                    session_config=planner_session_config,
+                    llm_model=config.llm_model,
+                )
+                if session_intent is not None:
+                    session_intent_dict = session_intent.model_dump(mode="json")
+                    if session_intent.selected_symbols:
+                        normalized_selected = _normalize_symbols(session_intent.selected_symbols)
+                        session_intent_dict["selected_symbols"] = normalized_selected
+                        symbols = normalized_selected
+            except Exception as e:
+                logger.warning("Failed to build prestart session intent: %s", e, exc_info=True)
 
         # Build workflow config
         workflow_config = {
@@ -743,6 +805,7 @@ async def start_session(config: PaperTradingSessionConfig):
             "screener_regime": config.screener_regime,
             # R76: AI portfolio planner
             "use_ai_planner": config.use_ai_planner,
+            "session_intent": session_intent_dict,
             # R85: trailing stop session defaults
             "default_trailing_config": config.default_trailing_config,
             # R:R gate (LLM-invisible — structural targets screened post-resolution)
@@ -836,6 +899,7 @@ async def get_session_status(session_id: str):
             plan_interval_hours=float(status.get("plan_interval_hours") or 0.0),
             indicator_timeframe=status.get("indicator_timeframe"),
             direction_bias=status.get("direction_bias"),
+            screener_regime=status.get("screener_regime"),
             enable_symbol_discovery=status.get("enable_symbol_discovery"),
             cadence_summary=status.get("cadence_summary"),
             session_intent_symbols=status.get("session_intent_symbols"),
@@ -912,8 +976,7 @@ async def terminate_session(session_id: str):
 async def get_portfolio(session_id: str):
     """Get current portfolio status for a paper trading session."""
     from ops_api.temporal_client import get_temporal_client
-    from agents.constants import MOCK_LEDGER_WORKFLOW_ID
-    from temporalio.service import RPCError, RPCStatusCode
+    from temporalio.service import RPCError
 
     try:
         client = await get_temporal_client()
@@ -921,16 +984,7 @@ async def get_portfolio(session_id: str):
         # Verify session exists without consuming workflow query slots.
         await _verify_session_exists(client, session_id)
 
-        # Query the session-scoped ledger workflow, fallback to legacy shared ledger for older sessions.
-        ledger_workflow_id = _paper_ledger_workflow_id(session_id)
-        ledger_handle = client.get_workflow_handle(ledger_workflow_id)
-        try:
-            portfolio = await ledger_handle.query("get_portfolio_status")
-        except RPCError as err:
-            if err.status != RPCStatusCode.NOT_FOUND:
-                raise
-            legacy_ledger_handle = client.get_workflow_handle(MOCK_LEDGER_WORKFLOW_ID)
-            portfolio = await legacy_ledger_handle.query("get_portfolio_status")
+        portfolio = await _query_session_portfolio(client, session_id)
 
         # Merge live R-tracking from the paper trading workflow into position_meta.
         # This adds current_R, mfe_r, trade_state, r1_reached, r2_reached, r3_reached
@@ -1176,6 +1230,107 @@ async def force_replan(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to trigger replan: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/session-intent/refresh")
+async def refresh_session_intent(session_id: str):
+    """Explicitly refresh SessionIntent for a running session and force a replan."""
+    from ops_api.temporal_client import get_temporal_client
+    from services.session_planner import build_session_intent_from_indicator_snapshots
+    from temporalio.service import RPCError
+    from tools.paper_trading import fetch_indicator_snapshots_activity
+
+    try:
+        client = await get_temporal_client()
+        handle = client.get_workflow_handle(session_id)
+
+        desc = await handle.describe()
+        execution_status = desc.status.name.lower() if desc.status else "unknown"
+        if execution_status != "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Session {session_id} is {execution_status}; refresh requires a running session",
+            )
+
+        status = await handle.query("get_session_status")
+        symbols = _normalize_symbols(status.get("symbols") or [])
+        indicator_timeframe = str(status.get("indicator_timeframe") or "1h")
+        direction_bias = str(status.get("direction_bias") or "neutral")
+        screener_regime = status.get("screener_regime")
+        if not symbols:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Session {session_id} has no active symbols to refresh",
+            )
+
+        portfolio = await _query_session_portfolio(client, session_id)
+        portfolio_positions: Dict[str, Any] = {}
+        raw_quantities = dict(portfolio.get("positions") or {})
+        raw_meta = dict(portfolio.get("position_meta") or {})
+        for symbol, qty in raw_quantities.items():
+            meta = raw_meta.get(symbol)
+            if isinstance(meta, dict) and meta:
+                portfolio_positions[symbol] = dict(meta)
+                continue
+            qty_float = float(qty or 0.0)
+            if abs(qty_float) <= 1e-12:
+                continue
+            portfolio_positions[symbol] = {
+                "qty": qty_float,
+                "side": "long" if qty_float >= 0 else "short",
+            }
+        portfolio_state = {
+            "cash": float(portfolio.get("cash", 0.0) or 0.0),
+            "positions": portfolio_positions,
+            "equity": float(portfolio.get("total_equity", 0.0) or 0.0),
+        }
+        session_config = {
+            "indicator_timeframe": indicator_timeframe,
+            "direction_bias": direction_bias,
+            "screener_regime": screener_regime,
+        }
+
+        indicator_snapshots = await fetch_indicator_snapshots_activity(
+            symbols,
+            indicator_timeframe,
+            300,
+        )
+        indicator_snapshots.pop("_raw_ohlcv_data", None)
+
+        session_intent = await build_session_intent_from_indicator_snapshots(
+            symbols=symbols,
+            indicator_snapshots_raw=indicator_snapshots,
+            portfolio_state=portfolio_state,
+            session_config=session_config,
+            llm_model=None,
+        )
+        if session_intent is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to build session intent for {session_id}",
+            )
+
+        session_intent_dict = session_intent.model_dump(mode="json")
+        session_intent_dict["selected_symbols"] = _normalize_symbols(session_intent.selected_symbols)
+        await handle.signal("update_session_intent", session_intent_dict)
+
+        return {
+            "session_id": session_id,
+            "status": "session_intent_refreshed",
+            "symbols": session_intent_dict["selected_symbols"],
+            "session_intent": session_intent_dict,
+            "message": "Session intent refreshed and replan requested.",
+        }
+
+    except HTTPException:
+        raise
+    except RPCError as e:
+        if _is_not_found(e):
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to refresh session intent: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2217,7 +2372,7 @@ async def update_symbols(session_id: str, symbols: List[str]):
         handle = client.get_workflow_handle(session_id)
 
         # Normalize symbols
-        normalized = [s.upper() if "-" in s else f"{s.upper()}-USD" for s in symbols]
+        normalized = _normalize_symbols(symbols)
 
         await handle.signal("update_symbols", normalized)
 
