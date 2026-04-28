@@ -251,6 +251,7 @@ class LLMClient:
                     prompt_context,
                     strategy_context,
                     eligible_playbooks_block=eligible_playbooks_block,
+                    active_triggers_context=getattr(llm_input, "active_triggers_context", None),
                 )
                 _user_payload = llm_input.to_json()
                 _prompt_budget = {
@@ -573,6 +574,7 @@ class LLMClient:
         prompt_context: str | None = None,
         strategy_context: str | None = None,
         eligible_playbooks_block: str | None = None,
+        active_triggers_context: str | None = None,
     ) -> str:
         base = self._default_prompt()
         schema = self._schema_prompt()
@@ -593,6 +595,9 @@ class LLMClient:
             base = f"{base}\n\n{vector_context}"
         if eligible_playbooks_block:
             base = f"{base}\n\n{eligible_playbooks_block}"
+        # R96: inject current registry state last so LLM sees it just before user payload
+        if active_triggers_context:
+            base = f"{base}\n\n{active_triggers_context}"
         return base
 
     @staticmethod

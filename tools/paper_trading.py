@@ -71,6 +71,17 @@ PAPER_TRADING_HISTORY_LIMIT = int(os.environ.get("PAPER_TRADING_HISTORY_LIMIT", 
 DEFAULT_PLAN_INTERVAL_HOURS = float(os.environ.get("PAPER_TRADING_PLAN_INTERVAL_HOURS", "4"))
 PLAN_CACHE_DIR = Path(os.environ.get("PAPER_TRADING_PLAN_CACHE", ".cache/paper_trading_plans"))
 
+# Feature-introduction cutoffs used for replay compatibility on live histories
+# that crossed unversioned workflow code deployments.
+_SESSION_INTENT_GENERATION_INTRODUCED_AT = datetime(2026, 4, 9, 0, 45, 39, tzinfo=timezone.utc)
+_REGIME_DRIFT_REFRESH_INTRODUCED_AT = datetime(2026, 4, 26, 17, 21, 17, tzinfo=timezone.utc)
+
+# Replay-compat overrides for live histories that crossed the deployment where
+# `generate_session_intent_activity` was inserted on first plan generation
+# without a Temporal patch marker. Start-time cutoff covers the common case;
+# this table is reserved for any stuck sessions that need an exact override.
+_SESSION_INTENT_GENERATION_REPLAY_COMPAT: Dict[str, bool] = {}
+
 # Replay-compat overrides for live histories that crossed the deployment where
 # `session_intent_generated` event emission was inserted before plan generation
 # without a Temporal patch marker. These sessions are already stuck in
@@ -89,6 +100,12 @@ _SESSION_INTENT_EVENT_REPLAY_COMPAT: Dict[str, bool] = {
 _LIVE_STRUCTURE_REFRESH_REPLAY_COMPAT: Dict[str, bool] = {
     "paper-trading-06c35370": False,
 }
+
+# Replay-compat overrides for live histories that crossed the deployment where
+# regime-drift SessionIntent refresh was inserted without a Temporal patch
+# marker. Older workflows must skip this branch on replay unless explicitly
+# overridden here.
+_REGIME_DRIFT_REFRESH_REPLAY_COMPAT: Dict[str, bool] = {}
 
 
 def _timeframe_to_minutes(tf: str) -> int:
@@ -192,6 +209,31 @@ def _candidate_templates_for_context(regime: str, direction_bias: str) -> List[s
     return ["compression_breakout", "mean_reversion"]
 
 
+def _workflow_started_on_or_after(workflow_started_at: datetime, cutoff: datetime) -> bool:
+    """Return whether the workflow started on or after the given UTC cutoff."""
+    started_at = workflow_started_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return started_at.astimezone(timezone.utc) >= cutoff
+
+
+def _should_generate_initial_session_intent(
+    session_id: str,
+    workflow_started_at: datetime,
+    patch_enabled: bool,
+) -> bool:
+    """Return whether replay should schedule the initial SessionIntent activity."""
+    if patch_enabled:
+        return True
+    override = _SESSION_INTENT_GENERATION_REPLAY_COMPAT.get(session_id)
+    if override is not None:
+        return override
+    return _workflow_started_on_or_after(
+        workflow_started_at,
+        _SESSION_INTENT_GENERATION_INTRODUCED_AT,
+    )
+
+
 def _should_emit_session_intent_generated_event(session_id: str, patch_enabled: bool) -> bool:
     """Return whether replay should schedule the SessionIntent UI emit activity.
 
@@ -211,6 +253,23 @@ def _should_emit_session_intent_generated_event(session_id: str, patch_enabled: 
     if patch_enabled:
         return True
     return _SESSION_INTENT_EVENT_REPLAY_COMPAT.get(session_id, False)
+
+
+def _should_refresh_session_intent_on_regime_drift(
+    session_id: str,
+    workflow_started_at: datetime,
+    patch_enabled: bool,
+) -> bool:
+    """Return whether replay should schedule regime-drift SessionIntent refresh."""
+    if patch_enabled:
+        return True
+    override = _REGIME_DRIFT_REFRESH_REPLAY_COMPAT.get(session_id)
+    if override is not None:
+        return override
+    return _workflow_started_on_or_after(
+        workflow_started_at,
+        _REGIME_DRIFT_REFRESH_INTRODUCED_AT,
+    )
 
 
 def _should_refresh_live_structure_snapshots(session_id: str, patch_enabled: bool) -> bool:
@@ -419,6 +478,7 @@ class PaperTradingConfig(BaseModel):
     research_max_loss_pct: Optional[float] = None      # % of research capital (None → 50%)
     # R76: AI-led portfolio planner
     use_ai_planner: bool = False
+    session_intent: Optional[Dict[str, Any]] = None
     # R85: Trailing stop defaults (applied to every new position unless overridden per-trigger)
     default_trailing_config: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -500,6 +560,8 @@ class SessionState(BaseModel):
     # R94: drift detection
     intent_creation_fp: Optional[Dict[str, Any]] = None
     last_intent_refresh_cycle: int = 0
+    # R96: TriggerRegistry state for incremental diff across replans
+    trigger_registry_state: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
@@ -699,6 +761,17 @@ async def generate_strategy_plan_activity(
             from schemas.episode_memory import MemoryRetrievalRequest, EpisodeMemoryRecord
 
             _mem_store = EpisodeMemoryStore()
+            # R96: extract registry state for ACTIVE_TRIGGERS context injection
+            _registry_state = market_context.pop("__trigger_registry_state__", None)
+            if _registry_state:
+                try:
+                    from services.trigger_registry import TriggerRegistry as _TriggerRegistry
+                    _temp_registry = _TriggerRegistry.from_state(_registry_state)
+                    _active_ctx = _temp_registry.to_context_block()
+                    llm_input = llm_input.model_copy(update={"active_triggers_context": _active_ctx})
+                except Exception:
+                    logger.debug("R96: failed to inject ACTIVE_TRIGGERS context (non-fatal)", exc_info=True)
+
             # R63: load in-session episode records from market_context (no DB needed)
             _insession_records = market_context.pop("__episode_memory_store_state__", None) or []
             for _ep_dict in _insession_records:
@@ -1905,42 +1978,19 @@ async def generate_session_intent_activity(
     Returns the SessionIntent as a dict, or None if both LLM and fallback fail.
     """
     try:
-        from services.opportunity_scanner import rank_universe as _rank_universe
-        from services.session_planner import generate_session_intent as _gen_intent
-        from schemas.llm_strategist import IndicatorSnapshot as _IS
-        from schemas.opportunity import OpportunityCard as _OC
-        from datetime import datetime as _dt, timezone as _tz
-
-        # Reconstruct IndicatorSnapshot objects from raw dicts
-        _snaps: Dict[str, Any] = {}
-        for sym, raw in indicator_snapshots_raw.items():
-            if not isinstance(raw, dict):
-                continue
-            try:
-                _snaps[sym] = _IS.model_validate({
-                    **raw,
-                    "symbol": sym,
-                    "timeframe": session_config.get("indicator_timeframe", "1h"),
-                    "as_of": raw.get("as_of", _dt.now(_tz.utc)),
-                })
-            except Exception:
-                pass
-
-        # Run opportunity scanner
-        _ranking = _rank_universe(
-            symbols=list(_snaps.keys()) or symbols,
-            indicator_snapshots=_snaps,
-            top_n=10,
+        from services.session_planner import (
+            build_session_intent_from_indicator_snapshots as _build_intent,
         )
 
-        # Generate session intent via LLM (with fallback)
-        _intent = await _gen_intent(
-            opportunity_ranking=_ranking.cards,
+        _intent = await _build_intent(
+            symbols=symbols,
+            indicator_snapshots_raw=indicator_snapshots_raw,
             portfolio_state=portfolio_state,
             session_config=session_config,
-            fallback_symbols=symbols,
             llm_model=llm_model,
         )
+        if _intent is None:
+            return None
         logger.info(
             "R76: session_intent generated — symbols=%s fallback=%s",
             _intent.selected_symbols,
@@ -2041,6 +2091,8 @@ class PaperTradingWorkflow:
         self._cadence_governor_state: Dict[str, Any] = {}
         # Portfolio state cache — last successful query_ledger_portfolio_activity result
         self._last_portfolio_state: Dict[str, Any] = {}
+        # R96: TriggerRegistry (in-memory; serialised via trigger_registry_state for CaN)
+        self._trigger_registry: Optional[Any] = None  # TriggerRegistry, lazy-init
 
     # -------------------------------------------------------------------------
     # Signals
@@ -2070,6 +2122,25 @@ class PaperTradingWorkflow:
         self.strategy_prompt = prompt
         self.last_plan_time = None  # Force replan
         workflow.logger.info("Updated strategy prompt, forcing replan")
+
+    @workflow.signal
+    def update_session_intent(self, session_intent: Dict[str, Any]) -> None:
+        """Explicitly replace the session intent and force a replan."""
+        if not isinstance(session_intent, dict):
+            workflow.logger.warning("Ignored invalid session intent payload")
+            return
+        self._session_intent = dict(session_intent)
+        selected = session_intent.get("selected_symbols") or []
+        if isinstance(selected, list) and selected:
+            normalized = [str(sym).upper() for sym in selected]
+            self._session_intent["selected_symbols"] = normalized
+            self.symbols = normalized
+        self.use_ai_planner = True
+        self.last_plan_time = None
+        workflow.logger.info(
+            "Updated session intent explicitly: symbols=%s",
+            self.symbols,
+        )
 
     def _append_trigger_rule_edit(self, entry: Dict[str, Any]) -> None:
         """Append a trigger-rule edit record and keep bounded history."""
@@ -2388,6 +2459,7 @@ class PaperTradingWorkflow:
             "plan_interval_hours": self.plan_interval_hours,
             "indicator_timeframe": self.indicator_timeframe,
             "direction_bias": self.direction_bias,
+            "screener_regime": self.screener_regime,
             "enable_symbol_discovery": self.enable_symbol_discovery,
             "research": research,
             "active_experiments": self.active_experiments,
@@ -2655,6 +2727,15 @@ class PaperTradingWorkflow:
             self.conflicting_signal_policy = parsed_config.conflicting_signal_policy
             # R76: AI planner flag
             self.use_ai_planner = parsed_config.use_ai_planner
+            self._session_intent = (
+                dict(parsed_config.session_intent)
+                if parsed_config.session_intent
+                else None
+            )
+            if self._session_intent and self._session_intent.get("selected_symbols"):
+                normalized = [str(sym).upper() for sym in (self._session_intent.get("selected_symbols") or [])]
+                self._session_intent["selected_symbols"] = normalized
+                self.symbols = list(normalized or self.symbols)
             # R85: trailing stop session defaults
             self._default_trailing_config = parsed_config.default_trailing_config
             # Minimum R:R gate
@@ -2869,6 +2950,20 @@ class PaperTradingWorkflow:
 
     async def _generate_plan(self) -> None:
         """Generate a new strategy plan."""
+        _workflow_started_at = workflow.info().workflow_start_time
+        # Replay safety: if any of these patch markers were ever recorded in this
+        # workflow run, they must be consumed on every replay path through
+        # _generate_plan(), even if later gate logic returns early.
+        _session_intent_generation_patch = workflow.patched(
+            "paper-trading-session-intent-generation-v1"
+        )
+        _session_intent_emit_patch = workflow.patched(
+            "paper-trading-session-intent-generated-event-v2"
+        )
+        _regime_drift_refresh_patch = workflow.patched(
+            "paper-trading-regime-drift-session-intent-refresh-v1"
+        )
+
         # Get portfolio state from ledger (via activity — external handles can't query)
         portfolio_state = await workflow.execute_activity(
             query_ledger_portfolio_activity,
@@ -3092,140 +3187,6 @@ class PaperTradingWorkflow:
         except Exception as _gov_exc:
             workflow.logger.debug("R77: CadenceGovernor check failed (non-fatal): %s", _gov_exc)
 
-        # R76: AI portfolio planner — generate SessionIntent on first plan cycle
-        if self.use_ai_planner and self._session_intent is None:
-            try:
-                _session_config_for_planner = {
-                    "indicator_timeframe": self.indicator_timeframe,
-                    "screener_regime": self.screener_regime,
-                    "direction_bias": self.direction_bias,
-                }
-                _raw_snaps_for_planner = {
-                    sym: dict(indicator_snapshots.get(sym) or {})
-                    for sym in self.symbols
-                    if indicator_snapshots.get(sym)
-                }
-                _intent_dict = await workflow.execute_activity(
-                    generate_session_intent_activity,
-                    args=[
-                        self.symbols,
-                        _raw_snaps_for_planner,
-                        {},  # structure_snapshots_raw (lightweight for now)
-                        portfolio_state,
-                        _session_config_for_planner,
-                        None,  # llm_model
-                    ],
-                    schedule_to_close_timeout=timedelta(minutes=2),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
-                if _intent_dict:
-                    self._session_intent = _intent_dict
-                    # R94: snapshot fingerprint at intent creation for drift detection
-                    _ws_fp = (self._world_state or {}).get("regime_fingerprint") or {}
-                    if _ws_fp:
-                        self._intent_creation_fp = {k: float(v) for k, v in _ws_fp.items() if isinstance(v, (int, float))}
-                    self._last_intent_refresh_cycle = self.cycle_count
-                    # Override session symbols with planner selection
-                    _selected = _intent_dict.get("selected_symbols") or []
-                    if _selected:
-                        self.symbols = list(_selected)
-                        workflow.logger.info(
-                            "R76: planner overrode symbols → %s (is_fallback=%s)",
-                            self.symbols,
-                            _intent_dict.get("is_fallback", True),
-                        )
-                    # Replay compatibility:
-                    # This emit was inserted after generate_session_intent_activity
-                    # without a version marker, so some live histories have it and
-                    # some do not. New executions record a patch marker; known stuck
-                    # legacy histories are handled by the compatibility map.
-                    _intent_emit_patch = workflow.patched(
-                        "paper-trading-session-intent-generated-event-v2"
-                    )
-                    if _should_emit_session_intent_generated_event(
-                        self.session_id,
-                        patch_enabled=_intent_emit_patch,
-                    ):
-                        await self._emit("session_intent_generated", {
-                            "selected_symbols": self.symbols,
-                            "is_fallback": _intent_dict.get("is_fallback", True),
-                            "regime_summary": _intent_dict.get("regime_summary", ""),
-                            "planner_rationale": _intent_dict.get("planner_rationale", ""),
-                        })
-            except Exception as _planner_exc:
-                workflow.logger.warning(
-                    "R76: session intent generation failed (non-fatal): %s", _planner_exc
-                )
-
-        # R94: proactive regime drift detection — refresh SessionIntent mid-session
-        # when fingerprint has drifted significantly since intent was created.
-        # Guard: not in THESIS_ARMED, not a repair pass, cooldown elapsed.
-        if (
-            self.use_ai_planner
-            and self._session_intent is not None
-            and self._intent_creation_fp
-            and not repair_instructions
-            and (self.cycle_count - self._last_intent_refresh_cycle) >= 12
-        ):
-            _current_policy_state = (policy_state_machine_record or {}).get("current_state", "IDLE")
-            if _current_policy_state not in ("THESIS_ARMED", "HOLD_LOCK"):
-                try:
-                    from services.cadence_governor import CadenceGovernor as _CG
-                    from schemas.reasoning_cadence import get_cadence_config as _gcc
-                    _drift_threshold = _gcc().regime_drift_threshold
-                    _current_ws_fp = {
-                        k: float(v)
-                        for k, v in ((self._world_state or {}).get("regime_fingerprint") or {}).items()
-                        if isinstance(v, (int, float))
-                    }
-                    _drift_signal = _CG.detect_regime_drift(
-                        prior_fingerprint=self._intent_creation_fp,
-                        current_fingerprint=_current_ws_fp,
-                        threshold=_drift_threshold,
-                        prior_regime=(self._session_intent or {}).get("regime_summary", "")[:20],
-                        current_regime=(self._world_state or {}).get("regime", ""),
-                        cycle_count=self.cycle_count,
-                    )
-                    if _drift_signal is not None:
-                        workflow.logger.info(
-                            "R94: regime drift detected (distance=%.3f) — refreshing SessionIntent",
-                            _drift_signal.cosine_distance,
-                        )
-                        _drift_raw_snaps = {
-                            sym: dict(indicator_snapshots.get(sym) or {})
-                            for sym in self.symbols
-                            if indicator_snapshots.get(sym)
-                        }
-                        _refreshed_intent = await workflow.execute_activity(
-                            generate_session_intent_activity,
-                            args=[
-                                self.symbols,
-                                _drift_raw_snaps,
-                                {},
-                                portfolio_state,
-                                {"indicator_timeframe": self.indicator_timeframe,
-                                 "screener_regime": self.screener_regime,
-                                 "direction_bias": self.direction_bias,
-                                 "drift_triggered": True},
-                                None,
-                            ],
-                            schedule_to_close_timeout=timedelta(minutes=2),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
-                        if _refreshed_intent:
-                            _refreshed_intent["drift_triggered"] = True
-                            self._session_intent = _refreshed_intent
-                            self._intent_creation_fp = _current_ws_fp or self._intent_creation_fp
-                            self._last_intent_refresh_cycle = self.cycle_count
-                            await self._emit("regime_drift_refresh", {
-                                "cosine_distance": _drift_signal.cosine_distance,
-                                "prior_regime": _drift_signal.prior_regime,
-                                "current_regime": _drift_signal.current_regime,
-                                "cycle_count": self.cycle_count,
-                            })
-                except Exception as _drift_exc:
-                    workflow.logger.debug("R94: drift detection failed (non-fatal): %s", _drift_exc)
-
         # Generate plan (guarded by PolicyLoopGate — gate acquired above)
         try:
             # R63: thread in-session episode records so the activity can load them
@@ -3254,6 +3215,9 @@ class PaperTradingWorkflow:
                 _plan_market_ctx["__episode_memory_store_state__"] = list(
                     self.episode_memory_store_state
                 )
+            # R96: pass registry state so activity can inject ACTIVE_TRIGGERS context
+            if self._trigger_registry is not None:
+                _plan_market_ctx["__trigger_registry_state__"] = self._trigger_registry.to_state()
             plan_dict = await workflow.execute_activity(
                 generate_strategy_plan_activity,
                 args=[
@@ -3497,6 +3461,57 @@ class PaperTradingWorkflow:
                     "error": str(exc),
                 })
                 return
+
+            # R96: apply trigger_diff to workflow registry and derive triggers list
+            _trigger_diff = plan_dict.get("trigger_diff")
+            if _trigger_diff is not None:
+                try:
+                    from services.trigger_registry import TriggerRegistry
+                    from schemas.trigger_catalog import TriggerDiff
+                    from schemas.llm_strategist import TriggerCondition
+                    # Lazy-init registry on first plan cycle
+                    if self._trigger_registry is None:
+                        self._trigger_registry = TriggerRegistry(session_id=self.session_id)
+                    _diff_obj = (
+                        TriggerDiff.model_validate(_trigger_diff)
+                        if isinstance(_trigger_diff, dict)
+                        else _trigger_diff
+                    )
+                    _current_policy_state = (
+                        (self.policy_state_machine_record or {}).get("current_state", "IDLE")
+                    )
+                    _open_syms = [
+                        sym for sym in self.symbols
+                        if (portfolio_state or {}).get("positions", {}).get(sym)
+                    ]
+                    _summary = self._trigger_registry.apply_diff(
+                        _diff_obj,
+                        policy_state=_current_policy_state,
+                        open_position_symbols=_open_syms,
+                    )
+                    workflow.logger.info(
+                        "R96: registry diff — +%d -%d ~%d active=%d blocked=%s",
+                        _summary["added"], _summary["removed"], _summary["modified"],
+                        _summary["total_active"], _summary["blocked_mutations"],
+                    )
+                    _tc_dicts = self._trigger_registry.to_trigger_conditions()
+                    _tc_objs = []
+                    for _tc in _tc_dicts:
+                        try:
+                            _tc_objs.append(TriggerCondition.model_validate(_tc).model_dump())
+                        except Exception as _exc:
+                            workflow.logger.warning(
+                                "R96: invalid trigger from registry %s: %s",
+                                _tc.get("id"), _exc,
+                            )
+                    if _tc_objs:
+                        plan_dict = dict(plan_dict)
+                        plan_dict["triggers"] = _tc_objs
+                        workflow.logger.info("R96: %d triggers derived from registry", len(_tc_objs))
+                except Exception as _r96_err:
+                    workflow.logger.warning(
+                        "R96: registry diff failed (non-fatal, using plan triggers): %s", _r96_err
+                    )
 
             self.current_plan = plan_dict
             self.last_plan_time = workflow.now()
@@ -4827,6 +4842,12 @@ class PaperTradingWorkflow:
             cadence_governor_state=dict(self._cadence_governor_state) if self._cadence_governor_state else None,
             # Portfolio state cache
             last_portfolio_state=dict(self._last_portfolio_state) if self._last_portfolio_state else {},
+            # R96: TriggerRegistry
+            trigger_registry_state=(
+                self._trigger_registry.to_state()
+                if self._trigger_registry is not None
+                else None
+            ),
         ).model_dump()
 
     def _restore_state(self, state: Dict[str, Any]) -> None:
@@ -4881,6 +4902,10 @@ class PaperTradingWorkflow:
         # R76: AI planner
         self.use_ai_planner = parsed.use_ai_planner
         self._session_intent = dict(parsed.session_intent) if parsed.session_intent else None
+        if self._session_intent and self._session_intent.get("selected_symbols"):
+            self._session_intent["selected_symbols"] = [
+                str(sym).upper() for sym in (self._session_intent.get("selected_symbols") or [])
+            ]
         # R94: drift detection state
         self._intent_creation_fp = dict(parsed.intent_creation_fp) if getattr(parsed, "intent_creation_fp", None) else None
         self._last_intent_refresh_cycle = getattr(parsed, "last_intent_refresh_cycle", None) or 0
@@ -4892,6 +4917,16 @@ class PaperTradingWorkflow:
         self._cadence_governor_state = dict(parsed.cadence_governor_state) if parsed.cadence_governor_state else {}
         # Portfolio state cache
         self._last_portfolio_state = dict(parsed.last_portfolio_state) if parsed.last_portfolio_state else {}
+        # R96: TriggerRegistry
+        _reg_state = getattr(parsed, "trigger_registry_state", None)
+        if _reg_state:
+            try:
+                from services.trigger_registry import TriggerRegistry
+                self._trigger_registry = TriggerRegistry.from_state(_reg_state)
+            except Exception:
+                self._trigger_registry = None
+        else:
+            self._trigger_registry = None
 
     # -------------------------------------------------------------------------
     # Structure snapshot history helpers (UI time-travel)

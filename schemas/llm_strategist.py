@@ -190,6 +190,9 @@ class LLMInput(SerializableModel):
     global_context: Dict[str, Any] = Field(default_factory=dict)
     market_structure: Dict[str, Any] = Field(default_factory=dict)
     previous_triggers: List[TriggerSummary] = Field(default_factory=list)
+    # R96: Pre-formatted ACTIVE_TRIGGERS block injected into the prompt.
+    # None = first cycle or catalog mode disabled (falls back to free-form).
+    active_triggers_context: Optional[str] = Field(default=None)
 
     def slim_for_symbol(
         self,
@@ -459,6 +462,14 @@ class StrategyPlan(SerializableModel):
         description="Version of the selected playbook definition at decision time.",
     )
     triggers: List[TriggerCondition] = Field(default_factory=list)
+    # R96: Catalog-based incremental diff. When present, plan_provider applies this
+    # diff to the TriggerRegistry and derives the triggers list from registry state.
+    # Absent on legacy plans — backward-compat: triggers list is used directly.
+    trigger_diff: Optional[Any] = Field(
+        default=None,
+        description="TriggerDiff from the catalog-based output path (R96). "
+                    "Type is Any to avoid circular import with schemas.trigger_catalog.",
+    )
     # R78: New round-trip hypothesis model. When non-empty, HypothesisExecutor is used
     # instead of TriggerEngine for exit management. Backward-compatible: sessions without
     # PAPER_TRADING_USE_HYPOTHESIS_MODEL=true will have an empty list here.

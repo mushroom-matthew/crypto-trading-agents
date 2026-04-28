@@ -227,6 +227,7 @@ class StrategyPlanProvider:
         emit_events: bool = True,
         policy_snapshot: "PolicySnapshot | None" = None,
         world_state: "Any | None" = None,
+        trigger_registry: "Any | None" = None,
     ) -> StrategyPlan:
         cache_path = self._cache_path(run_id, plan_date, llm_input)
         emit_ts = event_ts or plan_date
@@ -262,6 +263,13 @@ class StrategyPlanProvider:
                 )
             except Exception:
                 logger.debug("Failed to auto-build policy snapshot", exc_info=True)
+        # R96: inject current registry state into LLMInput before hashing/LLM call
+        if trigger_registry is not None:
+            try:
+                _active_ctx = trigger_registry.to_context_block()
+                llm_input = llm_input.model_copy(update={"active_triggers_context": _active_ctx})
+            except Exception:
+                logger.debug("R96: failed to build active_triggers_context (non-fatal)", exc_info=True)
         resolved_prompt = _resolve_prompt_template(prompt_template)
         input_hash = hashlib.sha256(llm_input.to_json().encode("utf-8")).hexdigest()
         metadata = self._llm_call_metadata(llm_input, plan_date, prompt_template=resolved_prompt)
@@ -371,6 +379,7 @@ class StrategyPlanProvider:
                     eligible_ids,
                 )
                 plan = plan.model_copy(update={"playbook_id": None})
+
         plan = self._enrich_plan(plan, llm_input)
         plan = plan.model_copy(update={"run_id": run_id})
 
